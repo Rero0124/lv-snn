@@ -20,9 +20,10 @@ import argparse
 
 sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
 
-SSN_URL = "http://127.0.0.1:3000"
-OLLAMA_URL = "http://127.0.0.1:11434"
-OLLAMA_MODEL = "gemma3:4b"
+SSN_URL = "http://127.0.0.1:8081"
+#OLLAMA_URL = "http://192.168.0.31:11434"
+OLLAMA_URL = "http://192.168.55.150:11434"
+OLLAMA_MODEL = "gemma3:12b"
 MAX_RETRY = 5  # 최대 재시도 횟수
 
 
@@ -63,23 +64,78 @@ def generate_input(topic, recent=""):
 
 
 def judge(input_text, output_text):
-    """Ollama가 맞다/틀리다만 판단 (엄격)"""
+    """Ollama가 0~1 점수로 평가 (엄격)"""
     if not output_text:
-        return False
+        return 0.0
     prompt = (
-        f"A가 말하고 B가 대답했다. B의 대답이 A의 주제에 정확히 맞는 응답인지 판단.\n"
-        f"A:\"{input_text}\"\nB:\"{output_text}\"\n"
-        f"엄격 기준 (하나라도 해당되면 X):\n"
-        f"- B가 A의 주제와 다른 얘기를 하면 X\n"
-        f"- B가 A의 질문/상황에 맞지 않으면 X\n"
-        f"- B가 A에 대한 적절한 반응이면 O\n"
-        f"O 또는 X 한 글자만:"
+        f"A가 말했고 B가 대답했다. B의 응답 품질을 0.0~1.0 점수로 평가.\n"
+        f"A:\"{input_text}\"\nB:\"{output_text}\"\n\n"
+        f"채점 기준 (엄격하게, 0.7 이상은 정말 잘한 경우만):\n"
+        f"- 주제 일치: A의 핵심 주제/키워드에 B가 구체적으로 반응하는가?\n"
+        f"- 상황 적합: A의 질문/감정/상황에 맞는 대답인가?\n"
+        f"- 구체성: 아무 말에나 통하는 범용 대답이면 0.2 이하\n"
+        f"- 자연스러움: 실제 대화처럼 자연스러운가?\n\n"
+        f"감점 예시:\n"
+        f"- A가 음식 얘기인데 B가 음식 무관 → 0.0~0.1\n"
+        f"- B가 두루뭉술하게 맞장구만 → 0.2~0.3\n"
+        f"- B가 주제는 맞지만 어색 → 0.4~0.5\n"
+        f"- B가 주제에 맞고 자연스러움 → 0.6~0.7\n"
+        f"- B가 완벽한 응답 → 0.8~1.0\n\n"
+        f"숫자만 출력 (예: 0.3):"
     )
-    result = ollama(prompt, max_tokens=3)
+    result = ollama(prompt, max_tokens=5)
     if result:
-        first = result.strip()[0] if result.strip() else 'X'
-        return first in ('O', 'o', '○')
-    return False
+        try:
+            score = float(re.search(r'[01]\.?\d*', result.strip()).group())
+            return min(1.0, max(0.0, score))
+        except Exception:
+            pass
+    return 0.0
+
+
+def judge_tokens(input_text, output_tokens):
+    """출력 토큰 중 단어(2글자+) 상위 8개만 평가하여 부분 피드백 생성"""
+    words = [t for t in output_tokens if t["length"] >= 2]
+    # 가중치 상위 8개만 (LLM 부담 줄이기 + JSON 길이 제한)
+    words = sorted(words, key=lambda t: -t["weight"])[:8]
+    if not words:
+        return []
+
+    word_list = ", ".join(f'"{w["token"]}"' for w in words)
+    prompt = (
+        f"A가 \"{input_text}\"라고 말했다.\n"
+        f"B의 응답 단어들: [{word_list}]\n"
+        f"각 단어가 A의 말에 적절한지 -1.0~1.0 점수. "
+        f"적절=양수, 무관=0, 부적절=음수.\n"
+        f"JSON 배열만 출력 (예: [0.5, -0.3, 0.8]):"
+    )
+    result = ollama(prompt, max_tokens=80)
+    if not result:
+        return []
+    try:
+        scores = json.loads(re.search(r'\[.*?\]', result.strip()).group())
+        # 개수 불일치면 짧은 쪽에 맞춤
+        pairs = min(len(scores), len(words))
+        return [(w["token"], max(-1.0, min(1.0, float(s)))) for w, s in zip(words[:pairs], scores[:pairs])]
+    except Exception:
+        return []
+
+
+def reorder_tokens(input_text, tokens):
+    """긍정 평가된 토큰들을 자연스러운 순서로 재배열"""
+    token_list = ", ".join(f'"{t}"' for t in tokens)
+    prompt = (
+        f"A가 \"{input_text}\"라고 말했다.\n"
+        f"B가 이 단어들로 응답하려 한다: [{token_list}]\n"
+        f"이 단어들만 사용해서 자연스러운 한국어 응답 1문장을 만들어라. "
+        f"단어를 빼거나 새로 추가하지 말고 순서만 바꿔라. 반말. 따옴표 없이 텍스트만."
+    )
+    result = ollama(prompt, max_tokens=60)
+    if result:
+        result = result.strip().strip('"\'')
+        if 1 < len(result) < 80:
+            return result
+    return None
 
 
 def suggest_response(input_text):
@@ -135,8 +191,8 @@ def main():
     print(f"=== LV-SNN 자율 탐색 학습 ({args.duration}초) ===")
     print(f"주제: {', '.join(topics)}")
     print(f"서버: 시냅스 {status['synapses']} | 패턴 {status['patterns']}")
-    print(f"LLM: {OLLAMA_MODEL} (판정만: O/X)")
-    print(f"방식: 입력 → SNN 탐색 (최대 {MAX_RETRY}회) → 실패 시만 teach")
+    print(f"LLM: {OLLAMA_MODEL} (0~1 점수 평가)")
+    print(f"방식: 입력 → SNN 탐색 (최대 {MAX_RETRY}회) → ≥0.6 강화, 0.5~0.6 무시, <0.5 약화, 전패 시 teach")
     print()
 
     start = time.time()
@@ -190,28 +246,49 @@ def main():
                 print(f"    {attempt}) (무출력)")
                 continue
 
-            # 3) Ollama 판정: O/X
-            ok = judge(inp, out)
+            # 3) Ollama 점수 평가 (0.0~1.0)
+            score = judge(inp, out)
 
-            if ok:
-                # 맞음! → 강화
+            if score >= 0.6:
+                # 좋은 응답 → 점수 비례 강화
                 if fire_id:
-                    ssn_request("/feedback", {"fire_id": fire_id, "positive": True, "strength": 0.8})
+                    ssn_request("/feedback", {"fire_id": fire_id, "positive": True, "strength": score})
                     total_pos += 1
                 found = True
                 found_at.append(attempt)
-                print(f"    {attempt}) \"{out}\" ✓")
+                print(f"    {attempt}) \"{out}\" ✓ {score:.1f}")
                 if attempt > (best.get('tries') or 999):
                     best = {'tries': attempt, 'input': inp, 'output': out}
                 context.append(f"{inp}→{out}")
                 break
+            elif score >= 0.3:
+                # 애매한 응답 (0.3~0.6) → 토큰별 부분 평가 + 순서 재배열 teach
+                output_tokens = resp.get("output_tokens", [])
+                token_scores = judge_tokens(inp, output_tokens)
+                if token_scores and fire_id:
+                    ssn_request("/feedback_partial", {"fire_id": fire_id, "token_scores": token_scores})
+                    pos_t = sum(1 for _, s in token_scores if s > 0)
+                    neg_t = sum(1 for _, s in token_scores if s < 0)
+                    # 긍정 토큰이 3개 이상이면 재배열 teach
+                    good_tokens = [tok for tok, s in token_scores if s > 0]
+                    if len(good_tokens) >= 3:
+                        reordered = reorder_tokens(inp, good_tokens)
+                        if reordered:
+                            ssn_request("/teach", {"input": inp, "target": reordered})
+                            print(f"    {attempt}) \"{out}\" ~ {score:.1f} (토큰 +{pos_t}/-{neg_t}) → reorder \"{reordered}\"")
+                        else:
+                            print(f"    {attempt}) \"{out}\" ~ {score:.1f} (토큰 +{pos_t}/-{neg_t})")
+                    else:
+                        print(f"    {attempt}) \"{out}\" ~ {score:.1f} (토큰 +{pos_t}/-{neg_t})")
+                else:
+                    print(f"    {attempt}) \"{out}\" ~ {score:.1f}")
             else:
-                # 틀림! → 약화 (SNN이 다음 시도에서 다른 경로 선택하도록)
+                # 나쁜 응답 (<0.3) → 약화 (시도할수록 강하게)
                 if fire_id:
-                    neg_strength = min(1.0, 0.5 + attempt * 0.1)  # 시도할수록 더 강하게 약화
+                    neg_strength = min(1.0, (1.0 - score) * 0.5 + attempt * 0.1)
                     ssn_request("/feedback", {"fire_id": fire_id, "positive": False, "strength": neg_strength})
                     total_neg += 1
-                print(f"    {attempt}) \"{out}\" ✗")
+                print(f"    {attempt}) \"{out}\" ✗ {score:.1f}")
 
         # 4) 모든 시도 실패 → 그때만 LLM이 정답 제안
         if not found:

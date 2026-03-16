@@ -26,7 +26,7 @@ Input text → Tokenize (original/word/n-gram/char/jamo)
 
 ### Key Mechanisms
 
-- **3-State Neuron** (neuron.rs): Decay (< threshold x 0.85) / Pass / Diverge (> threshold x 1.5, 1.3x signal boost). Top-K (10) synapses per neuron
+- **Probabilistic Neuron Firing** (neuron.rs): Sigmoid-based stochastic firing `p = sigmoid(activation - threshold, 0.15)`. Per-synapse transmission is also probabilistic. Diverge (> threshold x 1.5) applies 1.3x signal boost. Top-K (10) synapses per neuron
 - **STDP** (network.rs): Spike-timing-dependent plasticity. Pre→post causal = LTP (strengthen), anti-causal = LTD (weaken)
 - **Hippocampus** (hippocampus.rs): Tracks neuron-level path patterns (length 3) → consolidates frequent patterns to Storage → removes transferred patterns from hippocampus
 - **Output Gate** (network.rs): Output neuron threshold set high (1.0) → gate opens for 5 ticks after sufficient signal accumulation
@@ -69,7 +69,7 @@ cargo build --release
 
 ### Autonomous Exploration (ai_train.py)
 
-Ollama (gemma3:4b) generates inputs, SNN explores responses autonomously.
+Ollama (gemma3:12b) generates inputs, SNN explores responses autonomously.
 The LLM only judges O/X (correct/incorrect) — it does not provide answers.
 
 ```
@@ -80,7 +80,7 @@ Input → SNN fires "시켜 먹을까?" → Ollama "X" → weaken + re-fire
 ```
 
 ```bash
-ollama pull gemma3:4b
+ollama pull gemma3:12b
 python3 scripts/ai_train.py --topic "음식,여행,감정" --duration 1800
 ```
 
@@ -109,3 +109,4 @@ python3 scripts/fast_train.py --rounds 10             # With Ollama semantic eva
 | serde + serde_json | Serialization |
 | signal-hook 0.3 | Graceful shutdown |
 | uuid 1 | Neuron/synapse ID generation |
+| rand 0.10 | Probabilistic firing |

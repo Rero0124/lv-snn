@@ -55,6 +55,15 @@ pub struct FireResp {
     pub fire_id: u64,
     pub output: String,
     pub path_length: usize,
+    pub output_tokens: Vec<OutputTokenInfo>,
+}
+
+#[derive(Serialize)]
+pub struct OutputTokenInfo {
+    pub token: String,
+    pub length: usize,
+    pub weight: f64,
+    pub synapse_id: String,
 }
 
 #[derive(Deserialize)]
@@ -93,13 +102,19 @@ async fn fire(state: web::Data<AppState>, req: web::Json<FireReq>) -> HttpRespon
     let fire_id = net.fire(&req.text);
     let output = net.get_last_output();
     let path_length = net.get_last_path_length();
+    let tokens = net.get_last_output_tokens();
     state.update_stats(&net);
     drop(net);
+
+    let output_tokens = tokens.into_iter().map(|(token, length, weight, synapse_id)| {
+        OutputTokenInfo { token, length, weight, synapse_id }
+    }).collect();
 
     HttpResponse::Ok().json(FireResp {
         fire_id,
         output,
         path_length,
+        output_tokens,
     })
 }
 

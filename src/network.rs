@@ -2,10 +2,10 @@ use crate::hippocampus::{Hippocampus, HippocampusState};
 use crate::neuron::{Neuron, NeuronId, PASS_RATIO};
 use crate::region::RegionType;
 use crate::synapse::{PathMemory, SynapseId, SynapseStore};
-use crate::tokenizer::{self, hash_to_index, TextTokens, TokenType};
+use crate::tokenizer::{self, hash_to_index, TextTokens};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,21 +15,22 @@ use uuid::Uuid;
 
 // ── 상수 ──
 
-const INITIAL_WEIGHT: f64 = 1.0;
+const INITIAL_WEIGHT: f64 = 0.5;
 const DECAY_RATE: f64 = 0.75;          // 감쇠율: 낮을수록 신호가 빨리 약해짐
-const BACKWARD_LR: f64 = 0.03;        // 틱마다 시냅스 weight 조정
-const FEEDBACK_LR: f64 = 0.3;         // 피드백 시 weight 조정
-const MAX_WEIGHT: f64 = 5.0;
+const BACKWARD_LR: f64 = 0.01;        // 틱마다 시냅스 weight 조정
+const FEEDBACK_LR: f64 = 0.1;         // 피드백 시 weight 조정
+const MAX_WEIGHT: f64 = 1.0;
 const MIN_WEIGHT: f64 = 0.01;
 const MAX_TICKS: u64 = 50;
 const CONSOLIDATION_INTERVAL: usize = 5;
 const MIN_PATTERN_FREQ: u64 = 3;
-const OUTPUT_THRESHOLD: f64 = 1.0; // 출력 뉴런 임계값 (높게 설정 = 게이트)
-const GATE_TICKS: u64 = 5;         // 출력 게이트 열림 틱 수
+const OUTPUT_EMISSION_DECAY: f64 = 0.3; // 출력 뉴런이 토큰 방출 후 activation에 곱하는 감쇠율
+const RANDOM_SYNAPSE_WEIGHT: f64 = 0.1; // 초기 랜덤 시냅스 가중치 (낮게 시작)
+const COFIRE_SYNAPSE_WEIGHT: f64 = 0.15; // co-firing으로 생성되는 시냅스 가중치
 
 // ── 감정/이성 구역별 특성 ──
-const EMOTION_THRESHOLD: f64 = 0.5;  // 감정: 기본 임계값 (빠르게 반응)
-const REASON_THRESHOLD: f64 = 0.7;   // 이성: 높은 임계값 (근거 필요)
+const EMOTION_THRESHOLD: f64 = 0.2;  // 감정: 낮은 임계값 (빠르게 반응)
+const REASON_THRESHOLD: f64 = 0.35;  // 이성: 높은 임계값 (근거 필요)
 
 // ── 상태 영속화 ──
 
@@ -56,13 +57,14 @@ pub struct FireRecord {
 
 // ── 네트워크 ──
 
-const COOLDOWN_DECAY: f64 = 0.7;      // 쿨다운 감쇠율 (매 fire마다, 높을수록 오래 유지)
-const COOLDOWN_PENALTY: f64 = 0.15;    // 최근 사용 시냅스 전달값 감소율 (낮을수록 약한 억제)
+const COOLDOWN_HISTORY: usize = 10;    // 최근 N회 사용 이력 추적
+const COOLDOWN_MAX_PENALTY: f64 = 0.3;  // 1회 전 사용 시 최대 감소율 (30% 감소)
+const COOLDOWN_MIN_PENALTY: f64 = 0.05; // 10회 전 사용 시 최소 감소율 (5% 감소)
 const RELEVANCE_BONUS: f64 = 2.0;      // 입력-출력 토큰 관련성 보너스 배율
 
 // ── STDP (Spike-Timing-Dependent Plasticity) ──
-const STDP_A_PLUS: f64 = 0.02;        // LTP 강화 크기 (pre→post 인과)
-const STDP_A_MINUS: f64 = 0.025;      // LTD 약화 크기 (반인과, 약간 더 강하게)
+const STDP_A_PLUS: f64 = 0.005;       // LTP 강화 크기 (pre→post 인과)
+const STDP_A_MINUS: f64 = 0.007;      // LTD 약화 크기 (반인과, 약간 더 강하게)
 const STDP_TAU: f64 = 10.0;           // 시간 상수 (틱 단위, 클수록 넓은 시간창)
 
 pub struct Network {
@@ -74,8 +76,9 @@ pub struct Network {
     next_fire_id: u64,
     hippocampus: Hippocampus,
     shutdown: Arc<AtomicBool>,
-    // 최근 사용 억제: 시냅스ID → 쿨다운 값 (1.0=방금 사용, 매 fire마다 감쇠)
-    cooldown: HashMap<SynapseId, f64>,
+    // 최근 사용 억제: 시냅스ID → 최근 N회 fire에서 사용된 이력 (앞=최근, 뒤=오래됨)
+    cooldown_history: HashMap<SynapseId, VecDeque<bool>>,
+    fire_generation: u64, // 현재 fire 세대 (이력 관리용)
     // 현재 fire의 입력 토큰 (compose_response에서 관련성 판단용)
     current_input_tokens: HashSet<String>,
 }
@@ -91,7 +94,8 @@ impl Network {
             next_fire_id: 1,
             hippocampus: Hippocampus::new(CONSOLIDATION_INTERVAL, MIN_PATTERN_FREQ),
             shutdown,
-            cooldown: HashMap::new(),
+            cooldown_history: HashMap::new(),
+            fire_generation: 0,
             current_input_tokens: HashSet::new(),
         }
     }
@@ -161,7 +165,6 @@ impl Network {
 
     pub fn add_region(&mut self, region: RegionType, neuron_count: usize) {
         let threshold = match region {
-            RegionType::Output => OUTPUT_THRESHOLD,
             RegionType::Emotion => EMOTION_THRESHOLD,
             RegionType::Reason => REASON_THRESHOLD,
             _ => crate::neuron::DEFAULT_THRESHOLD,
@@ -178,6 +181,117 @@ impl Network {
             })
             .collect();
         self.region_neurons.entry(region).or_default().extend(neurons);
+    }
+
+    /// 초기 랜덤 빈 시냅스 씨앗 뿌리기
+    /// - Output↔Output: 내부 순환용
+    /// - 구역 간: region.targets()에 따라 랜덤 연결
+    /// 토큰 없이 구조적 연결만 — 학습/해마가 강화/약화로 다듬음
+    pub fn seed_random_synapses(&mut self, per_region_count: usize) {
+        use rand::prelude::*;
+        let mut rng = rand::rng();
+
+        // Output→Output 내부 순환
+        if let Some(output_nids) = self.region_neurons.get(&RegionType::Output).cloned() {
+            let n = output_nids.len();
+            let count = per_region_count.min(n * 2);
+            let mut created = 0;
+            for _ in 0..count * 3 {
+                if created >= count { break; }
+                let a = rng.random_range(0..n);
+                let b = rng.random_range(0..n);
+                if a == b { continue; }
+                let src = &output_nids[a];
+                let dst = &output_nids[b];
+                // 이미 연결 있으면 skip
+                let neuron = self.neurons.get(src).unwrap();
+                let already = neuron.outgoing.iter().any(|sid| {
+                    self.synapse_store.get(sid).is_some_and(|s| s.post_neuron == *dst)
+                });
+                if already { continue; }
+                let neuron = self.neurons.get_mut(src).unwrap();
+                neuron.create_synapse(
+                    &self.synapse_store, dst.clone(),
+                    RANDOM_SYNAPSE_WEIGHT, None, None,
+                );
+                created += 1;
+            }
+            println!("  [seed] Output↔Output: {created}개 랜덤 시냅스");
+        }
+
+        // 구역 간 랜덤 연결 (targets에 따라)
+        let regions: Vec<RegionType> = self.region_neurons.keys().copied().collect();
+        let mut total_inter = 0;
+        for region in &regions {
+            let targets = region.targets();
+            let src_nids = match self.region_neurons.get(region) {
+                Some(ns) => ns.clone(),
+                None => continue,
+            };
+            for target_region in targets {
+                if target_region == region { continue; } // Output→Output은 위에서 처리
+                let dst_nids = match self.region_neurons.get(target_region) {
+                    Some(ns) => ns.clone(),
+                    None => continue,
+                };
+                let count = (per_region_count / 2).max(1);
+                let mut created = 0;
+                for _ in 0..count * 3 {
+                    if created >= count { break; }
+                    let src = &src_nids[rng.random_range(0..src_nids.len())];
+                    let dst = &dst_nids[rng.random_range(0..dst_nids.len())];
+                    let neuron = self.neurons.get(src).unwrap();
+                    let already = neuron.outgoing.iter().any(|sid| {
+                        self.synapse_store.get(sid).is_some_and(|s| s.post_neuron == *dst)
+                    });
+                    if already { continue; }
+                    let neuron = self.neurons.get_mut(src).unwrap();
+                    neuron.create_synapse(
+                        &self.synapse_store, dst.clone(),
+                        RANDOM_SYNAPSE_WEIGHT, None, None,
+                    );
+                    created += 1;
+                    total_inter += 1;
+                }
+            }
+        }
+        println!("  [seed] 구역 간: {total_inter}개 랜덤 시냅스");
+    }
+
+    /// 해마가 감지한 co-firing 쌍에 시냅스 생성/강화
+    fn connect_cofiring_pairs(&mut self, pairs: &[((NeuronId, NeuronId), u64)]) {
+        let mut created = 0;
+        let mut strengthened = 0;
+
+        for ((nid_a, nid_b), freq) in pairs {
+            // 양방향 확인: A→B 있으면 강화, 없으면 생성
+            let bonus = COFIRE_SYNAPSE_WEIGHT * (*freq as f64 / 10.0).min(1.0);
+
+            // A→B
+            let neuron_a = self.neurons.get(nid_a).unwrap();
+            let existing_ab = neuron_a.outgoing.iter().find(|sid| {
+                self.synapse_store.get(sid).is_some_and(|s| s.post_neuron == *nid_b)
+            }).cloned();
+
+            if let Some(sid) = existing_ab {
+                if let Some(syn) = self.synapse_store.get(&sid) {
+                    let new_w = (syn.weight + bonus).min(MAX_WEIGHT);
+                    self.synapse_store.update_weight(&sid, new_w);
+                    strengthened += 1;
+                }
+            } else {
+                let neuron = self.neurons.get_mut(nid_a).unwrap();
+                neuron.create_synapse(
+                    &self.synapse_store, nid_b.clone(),
+                    COFIRE_SYNAPSE_WEIGHT, None, None,
+                );
+                created += 1;
+            }
+        }
+
+        if created > 0 || strengthened > 0 {
+            eprintln!("  [해마 co-fire] 시냅스 생성 {created}개, 강화 {strengthened}개");
+        }
     }
 
     fn reset_activations(&mut self) {
@@ -199,41 +313,37 @@ impl Network {
         let emotion_neurons = self.region_neurons.get(&RegionType::Emotion).unwrap().clone();
         let reason_neurons = self.region_neurons.get(&RegionType::Reason).unwrap().clone();
 
-        // 원문 + 단어 → 모든 대상 구역으로 퍼짐 (사방 전파)
-        for (token, ttype, weight) in [
-            (tokens.original.as_str(), TokenType::Original, INITIAL_WEIGHT),
-        ] {
-            self.ensure_token_synapse(&input_neurons, &storage_neurons, token, ttype.clone(), weight);
-            self.ensure_token_synapse(&input_neurons, &emotion_neurons, token, ttype.clone(), weight);
-            self.ensure_token_synapse(&input_neurons, &reason_neurons, token, ttype, weight * 0.8);
-        }
+        // 원문 → Storage + Emotion (전체 문맥 보존)
+        self.ensure_token_synapse(&input_neurons, &storage_neurons, &tokens.original, INITIAL_WEIGHT * 0.5);
+        self.ensure_token_synapse(&input_neurons, &emotion_neurons, &tokens.original, INITIAL_WEIGHT * 0.3);
 
+        // 단어 → 모든 대상 구역으로 퍼짐 (사방 전파)
         for word in &tokens.words {
-            self.ensure_token_synapse(&input_neurons, &storage_neurons, word, TokenType::Word, INITIAL_WEIGHT);
-            self.ensure_token_synapse(&input_neurons, &emotion_neurons, word, TokenType::Word, INITIAL_WEIGHT);
-            self.ensure_token_synapse(&input_neurons, &reason_neurons, word, TokenType::Word, INITIAL_WEIGHT * 0.8);
+            self.ensure_token_synapse(&input_neurons, &storage_neurons, word, INITIAL_WEIGHT);
+            self.ensure_token_synapse(&input_neurons, &emotion_neurons, word, INITIAL_WEIGHT);
+            self.ensure_token_synapse(&input_neurons, &reason_neurons, word, INITIAL_WEIGHT * 0.8);
         }
 
         // 단일 글자 → Storage + Emotion (빠른 패턴 매칭)
         for ch in &tokens.chars {
-            self.ensure_token_synapse(&input_neurons, &storage_neurons, ch, TokenType::Char, INITIAL_WEIGHT * 1.2);
-            self.ensure_token_synapse(&input_neurons, &emotion_neurons, ch, TokenType::Char, INITIAL_WEIGHT);
+            self.ensure_token_synapse(&input_neurons, &storage_neurons, ch, INITIAL_WEIGHT * 0.8);
+            self.ensure_token_synapse(&input_neurons, &emotion_neurons, ch, INITIAL_WEIGHT * 0.6);
         }
 
         // 초성 → Storage (최소 단위, 넓은 매칭)
         for cho in &tokens.jamo {
-            self.ensure_token_synapse(&input_neurons, &storage_neurons, cho, TokenType::Jamo, INITIAL_WEIGHT * 1.5);
+            self.ensure_token_synapse(&input_neurons, &storage_neurons, cho, INITIAL_WEIGHT * 0.6);
         }
 
         // n-gram → Storage에만 (기억 경로, 폭발 방지)
         for bg in &tokens.bigrams {
-            self.ensure_token_synapse(&input_neurons, &storage_neurons, bg, TokenType::NGram(2), 0.8);
+            self.ensure_token_synapse(&input_neurons, &storage_neurons, bg, INITIAL_WEIGHT * 0.7);
         }
         for tg in &tokens.trigrams {
-            self.ensure_token_synapse(&input_neurons, &storage_neurons, tg, TokenType::NGram(3), 0.9);
+            self.ensure_token_synapse(&input_neurons, &storage_neurons, tg, INITIAL_WEIGHT * 0.6);
         }
         for fg in &tokens.fourgrams {
-            self.ensure_token_synapse(&input_neurons, &storage_neurons, fg, TokenType::NGram(4), 0.95);
+            self.ensure_token_synapse(&input_neurons, &storage_neurons, fg, INITIAL_WEIGHT * 0.5);
         }
     }
 
@@ -247,19 +357,19 @@ impl Network {
 
         for word in &tokens.words {
             let idx = hash_to_index(word, input_neurons.len());
-            self.neurons.get_mut(&input_neurons[idx]).unwrap().receive(1.0);
+            self.neurons.get_mut(&input_neurons[idx]).unwrap().receive(0.9);
         }
 
-        // 단일 글자: 높은 활성화 (짧을수록 강하게)
+        // 단일 글자
         for ch in &tokens.chars {
             let idx = hash_to_index(ch, input_neurons.len());
-            self.neurons.get_mut(&input_neurons[idx]).unwrap().receive(1.2);
+            self.neurons.get_mut(&input_neurons[idx]).unwrap().receive(0.7);
         }
 
-        // 초성: 가장 높은 활성화
+        // 초성
         for cho in &tokens.jamo {
             let idx = hash_to_index(cho, input_neurons.len());
-            self.neurons.get_mut(&input_neurons[idx]).unwrap().receive(1.5);
+            self.neurons.get_mut(&input_neurons[idx]).unwrap().receive(0.5);
         }
 
         for bg in &tokens.bigrams {
@@ -288,46 +398,48 @@ impl Network {
 
         // 각 구역에서 Output으로의 응답 시냅스
         let regions: Vec<(&[NeuronId], f64)> = vec![
-            (&storage_neurons, INITIAL_WEIGHT * 1.5),  // 기억: 가장 강한 응답
-            (&emotion_neurons, INITIAL_WEIGHT),         // 감정: 직관적 응답
-            (&reason_neurons, INITIAL_WEIGHT * 1.2),    // 이성: 숙고된 응답
+            (&storage_neurons, INITIAL_WEIGHT * 1.4),  // 기억: 가장 강한 응답 (0.7)
+            (&emotion_neurons, INITIAL_WEIGHT),         // 감정: 직관적 응답 (0.5)
+            (&reason_neurons, INITIAL_WEIGHT * 1.2),    // 이성: 숙고된 응답 (0.6)
         ];
 
         for (src_neurons, base_weight) in &regions {
             let src_idx = hash_to_index(&input_tokens.original, src_neurons.len());
             let src_neuron = &src_neurons[src_idx];
 
-            // 원문 토큰
-            let dst_idx = hash_to_index(&target_tokens.original, output_neurons.len());
-            self.ensure_synapse_between(
-                src_neuron, &output_neurons[dst_idx],
-                &target_tokens.original, TokenType::Original, *base_weight,
-            );
+            // 원문 토큰 (전체 응답 텍스트)
+            {
+                let dst_idx = hash_to_index(&target_tokens.original, output_neurons.len());
+                self.ensure_synapse_between(
+                    src_neuron, &output_neurons[dst_idx],
+                    &target_tokens.original, base_weight * 0.3,
+                );
+            }
 
-            // 단어 토큰
+            // 단어 토큰 (가장 높은 가중치 — 출력의 핵심)
             for word in &target_tokens.words {
                 let dst_idx = hash_to_index(word, output_neurons.len());
                 self.ensure_synapse_between(
                     src_neuron, &output_neurons[dst_idx],
-                    word, TokenType::Word, base_weight * 0.8,
+                    word, base_weight * 1.2,
                 );
             }
 
-            // 단일 글자 토큰
+            // 단일 글자 토큰 (중간)
             for ch in &target_tokens.chars {
                 let dst_idx = hash_to_index(ch, output_neurons.len());
                 self.ensure_synapse_between(
                     src_neuron, &output_neurons[dst_idx],
-                    ch, TokenType::Char, base_weight * 0.9,
+                    ch, base_weight * 0.5,
                 );
             }
 
-            // 초성 토큰
+            // 자모 토큰 (가장 낮은 가중치 — 보조 역할)
             for cho in &target_tokens.jamo {
                 let dst_idx = hash_to_index(cho, output_neurons.len());
                 self.ensure_synapse_between(
                     src_neuron, &output_neurons[dst_idx],
-                    cho, TokenType::Jamo, base_weight * 1.0,
+                    cho, base_weight * 0.3,
                 );
             }
         }
@@ -338,14 +450,13 @@ impl Network {
         src_neurons: &[NeuronId],
         dst_neurons: &[NeuronId],
         token: &str,
-        token_type: TokenType,
         weight: f64,
     ) {
         let src_idx = hash_to_index(token, src_neurons.len());
         let dst_idx = hash_to_index(token, dst_neurons.len());
         let src = &src_neurons[src_idx];
         let dst = &dst_neurons[dst_idx];
-        self.ensure_synapse_between(src, dst, token, token_type, weight);
+        self.ensure_synapse_between(src, dst, token, weight);
     }
 
     fn ensure_synapse_between(
@@ -353,7 +464,6 @@ impl Network {
         src: &NeuronId,
         dst: &NeuronId,
         token: &str,
-        token_type: TokenType,
         weight: f64,
     ) {
         let existing = self.synapse_store.find_by_token(token);
@@ -373,7 +483,6 @@ impl Network {
             dst.clone(),
             weight,
             Some(token.to_string()),
-            Some(token_type),
             None,
         );
     }
@@ -397,35 +506,21 @@ impl Network {
         sorted.sort_by_key(|(_, _, tick)| *tick);
 
         for window in sorted.windows(2) {
-            let (tok_a, sid_a, tick_a) = &window[0];
-            let (tok_b, sid_b, tick_b) = &window[1];
+            let (tok_a, _sid_a, tick_a) = &window[0];
+            let (tok_b, _sid_b, tick_b) = &window[1];
 
             // 같은 틱이거나 연속 틱에서 나온 토큰만 병합 대상
             if tick_b - tick_a > 2 {
                 continue;
             }
 
-            // 둘 다 Jamo나 Char인 경우 병합
-            let type_a = self.synapse_store.get(sid_a).and_then(|s| s.token_type.clone());
-            let type_b = self.synapse_store.get(sid_b).and_then(|s| s.token_type.clone());
-
-            let should_merge = matches!(
-                (&type_a, &type_b),
-                (Some(TokenType::Jamo), Some(TokenType::Jamo))
-                | (Some(TokenType::Jamo), Some(TokenType::Char))
-                | (Some(TokenType::Char), Some(TokenType::Jamo))
-                | (Some(TokenType::Char), Some(TokenType::Char))
-                | (Some(TokenType::Jamo), Some(TokenType::Word))
-                | (Some(TokenType::Word), Some(TokenType::Jamo))
-                | (Some(TokenType::Char), Some(TokenType::Word))
-                | (Some(TokenType::Word), Some(TokenType::Char))
-            );
-
-            if !should_merge {
+            // 실제 자모(ㄱㅏㅎ 등)끼리만 병합 (음절 합성용)
+            // 한글 완성 음절(요, 기, 나)은 1글자여도 자모가 아니므로 제외
+            if !is_jamo_token(tok_a) || !is_jamo_token(tok_b) {
                 continue;
             }
 
-            // 병합 토큰 생성
+            // 병합 토큰 생성 (자모 2개 → bigram)
             let merged = format!("{}{}", tok_a, tok_b);
 
             // 기존에 이 병합 토큰 시냅스가 있으면 강화, 없으면 생성
@@ -449,7 +544,6 @@ impl Network {
                     &storage_neurons[src_idx],
                     &output_neurons[dst_idx],
                     &merged,
-                    TokenType::NGram(merged.chars().count()),
                     INITIAL_WEIGHT,
                 );
             }
@@ -457,40 +551,26 @@ impl Network {
     }
 
     // ═══════════════════════════════════════════════
-    //  출력 게이팅
+    //  쿨다운 (최근 사용 억제)
     // ═══════════════════════════════════════════════
 
-    /// 출력 뉴런 중 충분히 활성화된 것이 있는지 확인
-    fn output_ready(&self) -> bool {
-        let output_nids = match self.region_neurons.get(&RegionType::Output) {
-            Some(ns) => ns,
-            None => return false,
+    /// 최근 10회 사용 이력 기반 차등 쿨다운 페널티 계산
+    /// 1회 전 사용: 80% 감소, 10회 전 사용: 5% 감소, 누적 합산
+    fn compute_cooldown_penalty(&self, sid: &SynapseId) -> f64 {
+        let history = match self.cooldown_history.get(sid) {
+            Some(h) => h,
+            None => return 0.0,
         };
-        output_nids.iter().any(|nid| {
-            self.neurons.get(nid)
-                .is_some_and(|n| n.activation >= n.threshold * PASS_RATIO)
-        })
-    }
-
-    /// 출력 게이트 열기: 출력 뉴런 임계값을 낮춤
-    fn open_output_gate(&mut self) {
-        let output_nids = self.region_neurons.get(&RegionType::Output).unwrap().clone();
-        for nid in &output_nids {
-            if let Some(n) = self.neurons.get_mut(nid) {
-                n.threshold = crate::neuron::DEFAULT_THRESHOLD;
+        let mut total_penalty = 0.0;
+        for (i, &used) in history.iter().enumerate() {
+            if used {
+                // i=0 (1회 전) → MAX, i=9 (10회 전) → MIN
+                let t = i as f64 / (COOLDOWN_HISTORY - 1).max(1) as f64;
+                let penalty = COOLDOWN_MAX_PENALTY * (1.0 - t) + COOLDOWN_MIN_PENALTY * t;
+                total_penalty += penalty;
             }
         }
-    }
-
-    /// 출력 게이트 닫기: 출력 뉴런 임계값을 올리고 활성값 리셋
-    fn close_output_gate(&mut self) {
-        let output_nids = self.region_neurons.get(&RegionType::Output).unwrap().clone();
-        for nid in &output_nids {
-            if let Some(n) = self.neurons.get_mut(nid) {
-                n.threshold = OUTPUT_THRESHOLD;
-                n.activation = 0.0; // 출력 완료 후 소멸
-            }
-        }
+        total_penalty.min(0.95) // 최대 95% 감소 (완전 차단은 안 함)
     }
 
     // ═══════════════════════════════════════════════
@@ -503,11 +583,7 @@ impl Network {
 
         self.reset_activations();
 
-        // 쿨다운 감쇠: 이전 fire에서 사용된 시냅스의 쿨다운 줄이기
-        self.cooldown.retain(|_, v| {
-            *v *= COOLDOWN_DECAY;
-            *v > 0.01
-        });
+        self.fire_generation += 1;
 
         let tokens = tokenizer::tokenize(input);
         self.store_input_tokens(&tokens);
@@ -532,9 +608,10 @@ impl Network {
         let mut all_fired: Vec<SynapseId> = Vec::new();
         let mut all_output_tokens: Vec<(String, SynapseId, u64)> = Vec::new();
         let mut neurons_activated: Vec<NeuronId> = Vec::new();
+        let mut neuron_fire_ticks: Vec<(NeuronId, u64)> = Vec::new(); // co-firing 추적용
         let mut emitted_tokens: HashSet<String> = HashSet::new();
-        let mut output_buffer: Vec<(String, SynapseId, u64)> = Vec::new();
-        let mut gate_opened = false;
+        // 큐: 발화한 토큰이 항상 쌓이고, Output on일 때만 배출
+        let mut token_queue: VecDeque<(String, SynapseId, u64)> = VecDeque::new();
 
         for tick in 0..MAX_TICKS {
             if self.shutdown.load(Ordering::Relaxed) { break; }
@@ -542,70 +619,47 @@ impl Network {
 
             all_fired.extend(result.fired_synapses.iter().cloned());
             neurons_activated.extend(result.activated_neurons.iter().cloned());
-
-            // 출력 후보를 버퍼에 축적
-            for (tok, sid) in &result.output_tokens {
-                output_buffer.push((tok.clone(), sid.clone(), tick));
+            for nid in &result.activated_neurons {
+                neuron_fire_ticks.push((nid.clone(), tick));
             }
 
-            // 자연 감쇠: 모든 활성 뉴런이 사라지면 종료
-            if result.active_count == 0 {
-                break;
+            // 발화한 토큰은 항상 큐에 쌓임
+            for (tok, sid) in &result.fired_tokens_queue {
+                token_queue.push_back((tok.clone(), sid.clone(), tick));
             }
 
-            // 출력 게이트: 출력 뉴런에 충분한 신호가 쌓이면 열기
-            if !gate_opened && self.output_ready() {
-                gate_opened = true;
-                self.open_output_gate();
-
-                // 버퍼에 있던 출력 토큰 방출
-                for (tok, sid, t) in output_buffer.drain(..) {
+            // Output이 on이면 큐에서 빼서 출력
+            if result.output_on {
+                while let Some((tok, sid, t)) = token_queue.pop_front() {
                     if !emitted_tokens.contains(&tok) {
                         emitted_tokens.insert(tok.clone());
                         all_output_tokens.push((tok, sid, t));
                     }
                 }
 
-                // 게이트 열린 동안 추가 틱 실행
-                for gate_tick in 1..=GATE_TICKS {
-                    let gr = self.run_tick(&emitted_tokens, tick + gate_tick);
-                    all_fired.extend(gr.fired_synapses.iter().cloned());
-                    neurons_activated.extend(gr.activated_neurons.iter().cloned());
-
-                    for (tok, sid) in &gr.output_tokens {
-                        if !emitted_tokens.contains(tok) {
-                            emitted_tokens.insert(tok.clone());
-                            all_output_tokens.push((tok.clone(), sid.clone(), tick + gate_tick));
-                        }
-                    }
-
-                    if gr.active_count == 0 {
-                        break;
+                // Output 뉴런 감쇠 (말하면 약해짐)
+                for (nid, _) in &result.emitted_output_neurons {
+                    if let Some(n) = self.neurons.get_mut(nid) {
+                        n.activation *= OUTPUT_EMISSION_DECAY;
                     }
                 }
+            }
 
-                // 게이트 닫기: 출력 완료, 뉴런 소멸
-                self.close_output_gate();
+            // 자연 감쇠: 모든 활성 뉴런이 사라지면 종료
+            if result.active_count == 0 {
+                break;
             }
         }
 
-        // 게이트가 안 열렸어도 버퍼에 남은 게 있으면 출력
-        if !gate_opened {
-            for (tok, sid, t) in output_buffer.drain(..) {
-                if !emitted_tokens.contains(&tok) {
-                    emitted_tokens.insert(tok.clone());
-                    all_output_tokens.push((tok, sid, t));
-                }
-            }
-        }
-
-        let output = self.compose_response(&all_output_tokens);
+        let (output, used_output_tokens) = self.assemble_output(&all_output_tokens);
 
         print!("[{fire_id}] {output}");
         println!();
 
-        // 해마 기록
+        // 해마 기록: 경로 패턴 + co-firing
         self.hippocampus.record(&neurons_activated);
+        self.hippocampus.record_cofiring(&neuron_fire_ticks);
+
         let patterns = self.hippocampus.maybe_consolidate();
         if !patterns.is_empty() {
             let total = patterns.len();
@@ -626,20 +680,40 @@ impl Network {
             }
         }
 
-        if gate_opened {
-            println!("  (게이트 발화)");
-        } else if output.is_empty() {
+        // 해마 co-firing 통합: 자주 동시 발화하는 뉴런 쌍에 시냅스 생성/강화
+        let cofire_pairs = self.hippocampus.consolidate_cofiring();
+        if !cofire_pairs.is_empty() {
+            self.connect_cofiring_pairs(&cofire_pairs);
+        }
+
+        if output.is_empty() {
             println!("  (신호 소멸)");
         }
 
-        // 출력에 사용된 시냅스에 쿨다운 기록
+        // 출력/경로 시냅스에 사용 이력 기록
+        let mut used_sids: HashSet<SynapseId> = HashSet::new();
         for (_, sid, _) in &all_output_tokens {
-            self.cooldown.insert(sid.clone(), 1.0);
+            used_sids.insert(sid.clone());
         }
-        // 경로 시냅스에도 약한 쿨다운
         for sid in &all_fired {
-            self.cooldown.entry(sid.clone()).or_insert(0.5);
+            used_sids.insert(sid.clone());
         }
+        for (_, history) in self.cooldown_history.iter_mut() {
+            history.push_front(false); // 이번 fire에서 미사용
+            if history.len() > COOLDOWN_HISTORY {
+                history.pop_back();
+            }
+        }
+        for sid in &used_sids {
+            let history = self.cooldown_history.entry(sid.clone()).or_insert_with(VecDeque::new);
+            if let Some(front) = history.front_mut() {
+                *front = true; // 이번 fire에서 사용됨
+            } else {
+                history.push_front(true);
+            }
+        }
+        // 10회 동안 한 번도 안 쓰인 시냅스는 이력 제거
+        self.cooldown_history.retain(|_, h| h.iter().any(|&used| used));
 
         // 패턴 병합: 연속 출력 토큰을 묶어서 기억 구역에 저장
         self.consolidate_patterns(&all_output_tokens);
@@ -648,7 +722,7 @@ impl Network {
         self.fire_records.push(FireRecord {
             id: fire_id,
             fired_synapses: all_fired,
-            output_tokens: all_output_tokens,
+            output_tokens: used_output_tokens,
             neurons_visited: neurons_activated,
             output,
             path_length,
@@ -666,61 +740,176 @@ impl Network {
         fire_id
     }
 
-    /// 다층 응답 조합: Original → Word 조합 → Char 조합 → Jamo 재조합
+    /// 출력 토큰 조립: 발화 순서 + 가중치 기반
+    /// Word → Char → Jamo 순으로 시도, 짧은 토큰은 jamo 재조합
+    /// 출력 조립 — (출력문자열, 실제 사용된 토큰 목록) 반환
+    fn assemble_output(&self, tokens: &[(String, SynapseId, u64)]) -> (String, Vec<(String, SynapseId, u64)>) {
+        if tokens.is_empty() {
+            return (String::new(), Vec::new());
+        }
+
+        // sid 역참조용 맵
+        let sid_map: HashMap<String, (SynapseId, u64)> = tokens.iter()
+            .map(|(tok, sid, tick)| (tok.clone(), (sid.clone(), *tick)))
+            .collect();
+
+        // 토큰별 점수 수집 (비선형: 고weight 강조, 저weight 억제)
+        let mut scored: Vec<(String, f64, u64)> = Vec::new();
+        for (tok, sid, tick) in tokens {
+            if let Some(syn) = self.synapse_store.get(sid) {
+                let bonus = tokenizer::fire_bonus(tok);
+                let linear = syn.weight * bonus;
+                // sigmoid-like 비선형 변환: 0.15~1.0 구간을 S자로
+                // 0.3 이하는 급격히 억제, 0.5 이상은 급격히 강조
+                let score = 1.0 / (1.0 + (-12.0 * (linear - 0.4)).exp());
+                scored.push((tok.clone(), score, *tick));
+            }
+        }
+
+        // 단어(4+글자) 우선 선별, 그 다음 ngram(2-3), 마지막 자모(1)
+        // 각 카테고리 내에서 가중치 내림차순
+        let mut words: Vec<(String, f64, u64)> = Vec::new();
+        let mut ngrams: Vec<(String, f64, u64)> = Vec::new();
+        let mut jamos: Vec<(String, f64, u64)> = Vec::new();
+        for s in &scored {
+            let len = s.0.chars().count();
+            if len >= 4 { words.push(s.clone()); }
+            else if len >= 2 { ngrams.push(s.clone()); }
+            else { jamos.push(s.clone()); }
+        }
+        words.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ngrams.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        jamos.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 단어 최대 15개 + ngram 최대 8개 + 자모 최대 5개
+        words.truncate(15);
+        ngrams.truncate(8);
+        jamos.truncate(5);
+
+        scored = Vec::new();
+        scored.extend(words);
+        scored.extend(ngrams);
+        scored.extend(jamos);
+
+        // 발화 순서(tick) 기준 정렬, 같은 tick이면 가중치 내림차순
+        scored.sort_by(|a, b| {
+            a.2.cmp(&b.2)
+                .then(b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+        });
+
+        // 모든 토큰을 발화 순서대로 모아서 재조합
+        // 긴 토큰(4+글자)은 단어로, 짧은 토큰(1글자)은 jamo 버퍼, 2-3글자는 ngram
+        let mut parts: Vec<String> = Vec::new();
+        let mut jamo_buf: Vec<char> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut used_tokens: Vec<(String, SynapseId, u64)> = Vec::new();
+
+        let min_w = INITIAL_WEIGHT * 0.3;
+
+        for (tok, w, _) in &scored {
+            if *w < min_w { continue; }
+            if seen.contains(tok) { continue; }
+            seen.insert(tok.clone());
+            // 실제 사용된 토큰 기록
+            if let Some((sid, tick)) = sid_map.get(tok) {
+                used_tokens.push((tok.clone(), sid.clone(), *tick));
+            }
+
+            let char_len = tok.chars().count();
+            if char_len >= 4 {
+                // 긴 토큰 (단어급): jamo 버퍼 비우고 그대로 추가
+                if !jamo_buf.is_empty() {
+                    let composed = tokenizer::compose_jamo(&jamo_buf);
+                    let merged = tokenizer::merge_trailing_jamo(&composed);
+                    if !merged.is_empty() { parts.push(merged); }
+                    jamo_buf.clear();
+                }
+                parts.push(tok.clone());
+            } else if char_len <= 1 {
+                // 짧은 토큰 (jamo/char급): jamo 버퍼에 쌓기
+                for c in tok.chars() {
+                    jamo_buf.push(c);
+                }
+            } else {
+                // 2-3글자 (ngram급): jamo 버퍼 비우고 그대로 추가
+                if !jamo_buf.is_empty() {
+                    let composed = tokenizer::compose_jamo(&jamo_buf);
+                    let merged = tokenizer::merge_trailing_jamo(&composed);
+                    if !merged.is_empty() { parts.push(merged); }
+                    jamo_buf.clear();
+                }
+                parts.push(tok.clone());
+            }
+        }
+
+        // 남은 jamo 버퍼 처리
+        if !jamo_buf.is_empty() {
+            let composed = tokenizer::compose_jamo(&jamo_buf);
+            let merged = tokenizer::merge_trailing_jamo(&composed);
+            if !merged.is_empty() { parts.push(merged); }
+        }
+
+        let output = if parts.is_empty() {
+            // 폴백: 가중치 상위 토큰 연결
+            scored.iter().take(3).map(|(t, _, _)| t.as_str()).collect::<Vec<_>>().join("")
+        } else {
+            parts.join(" ")
+        };
+        (output, used_tokens)
+    }
+
+    /// (미사용) 다층 응답 조합: Original → Word 조합 → Char 조합 → Jamo 재조합
     fn compose_response(&mut self, tokens: &[(String, SynapseId, u64)]) -> String {
         if tokens.is_empty() {
             return String::new();
         }
 
-        let mut scored: Vec<(String, f64, Option<TokenType>, u64)> = Vec::new();
+        let mut scored: Vec<(String, f64, u64)> = Vec::new();
         for (tok, sid, tick) in tokens {
             if let Some(syn) = self.synapse_store.get(sid) {
                 let mut weight = syn.weight;
-                // 짧은 토큰 보너스
-                if let Some(ref tt) = syn.token_type {
-                    weight *= tt.length_bonus();
-                }
+                // 짧은 토큰 보너스 (fire_bonus 기반)
+                weight *= tokenizer::fire_bonus(tok);
                 // 입력-출력 바인딩: 입력 토큰과 관련된 출력에 보너스
                 if let Some(ref syn_tok) = syn.token {
                     if self.current_input_tokens.contains(syn_tok) {
                         weight *= RELEVANCE_BONUS;
                     }
                 }
-                scored.push((tok.clone(), weight, syn.token_type.clone(), *tick));
+                scored.push((tok.clone(), weight, *tick));
             }
         }
 
         // 가중치 내림차순 (가장 강한 신호 우선)
         scored.sort_by(|a, b| {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.3.cmp(&b.3))
+                .then(a.2.cmp(&b.2))
         });
 
-        // ── 1층: Original (학습한 문장 그대로) ──
-        if let Some((tok, w, _, _)) = scored.iter().find(|(_, _, tt, _)| *tt == Some(TokenType::Original)) {
+        // ── 1층: 긴 토큰 (문장급, 5+ 글자) ──
+        if let Some((tok, w, _)) = scored.iter().find(|(t, _, _)| t.chars().count() >= 5) {
             if *w >= INITIAL_WEIGHT {
                 return tok.clone();
             }
         }
 
-        // ── 2층: Word 조합 (단어를 이어붙여 새 문장) ──
+        // ── 2층: Word 조합 (4+ 글자 단어를 이어붙여 새 문장) ──
         let words: Vec<(&str, f64)> = scored
             .iter()
-            .filter(|(_, w, tt, _)| *tt == Some(TokenType::Word) && *w >= MIN_WEIGHT * 10.0)
-            .map(|(t, w, _, _)| (t.as_str(), *w))
+            .filter(|(t, w, _)| t.chars().count() >= 4 && *w >= MIN_WEIGHT * 10.0)
+            .map(|(t, w, _)| (t.as_str(), *w))
             .collect();
 
         if words.len() >= 2 {
-            // 가중치 상위 단어로 조합 (최대 8개)
             let selected: Vec<&str> = words.iter().take(8).map(|(t, _)| *t).collect();
             return selected.join(" ");
         }
 
-        // ── 3층: Char 조합 (글자 단위 조합) ──
+        // ── 3층: Char 조합 (1글자 단위 조합) ──
         let chars: Vec<(&str, f64)> = scored
             .iter()
-            .filter(|(_, w, tt, _)| *tt == Some(TokenType::Char) && *w >= MIN_WEIGHT * 10.0)
-            .map(|(t, w, _, _)| (t.as_str(), *w))
+            .filter(|(t, w, _)| t.chars().count() == 1 && *w >= MIN_WEIGHT * 10.0)
+            .map(|(t, w, _)| (t.as_str(), *w))
             .collect();
 
         if chars.len() >= 2 {
@@ -728,11 +917,11 @@ impl Network {
             return assembled;
         }
 
-        // ── 4층: Jamo 재조합 (자모를 모아서 한글 음절로 합침) ──
+        // ── 4층: Jamo 재조합 (1글자 자모를 모아서 한글 음절로 합침) ──
         let jamo_tokens: Vec<(char, f64)> = scored
             .iter()
-            .filter(|(t, w, tt, _)| *tt == Some(TokenType::Jamo) && *w >= MIN_WEIGHT * 10.0 && t.chars().count() == 1)
-            .map(|(t, w, _, _)| (t.chars().next().unwrap(), *w))
+            .filter(|(t, w, _)| t.chars().count() == 1 && *w >= MIN_WEIGHT * 10.0)
+            .map(|(t, w, _)| (t.chars().next().unwrap(), *w))
             .collect();
 
         if jamo_tokens.len() >= 2 {
@@ -747,7 +936,7 @@ impl Network {
         scored
             .iter()
             .take(3)
-            .map(|(t, _, _, _)| t.as_str())
+            .map(|(t, _, _)| t.as_str())
             .collect::<Vec<_>>()
             .join("")
     }
@@ -785,22 +974,26 @@ impl Network {
         // 결과 병합 (순차)
         let mut pending: HashMap<NeuronId, f64> = HashMap::new();
         let mut fired: Vec<(NeuronId, SynapseId, NeuronId, f64)> = Vec::new();
-        let mut output_candidates: Vec<(NeuronId, String, SynapseId)> = Vec::new();
+        let mut fired_tokens: Vec<(String, SynapseId)> = Vec::new();
+        let output_nid_set: HashSet<&NeuronId> = self.region_neurons
+            .get(&RegionType::Output)
+            .map(|ns| ns.iter().collect())
+            .unwrap_or_default();
 
         for (nid, fires) in fires_per_neuron {
-            for (sid, post_id, forward_val, token, _token_type) in fires {
-                // 최근 사용 억제: 쿨다운 중인 시냅스는 전달값 감소
-                let cd = self.cooldown.get(&sid).copied().unwrap_or(0.0);
-                let forward_val = forward_val * (1.0 - cd * COOLDOWN_PENALTY);
+            for (sid, post_id, forward_val, token) in fires {
+                // 최근 사용 억제: 최근 10회 이력 기반 차등 감소
+                let penalty = self.compute_cooldown_penalty(&sid);
+                let forward_val = forward_val * (1.0 - penalty);
                 *pending.entry(post_id.clone()).or_insert(0.0) += forward_val;
                 fired.push((nid.clone(), sid.clone(), post_id.clone(), forward_val));
                 result.fired_synapses.push(sid.clone());
 
-                let post_region = self.neuron_region.get(&post_id).copied();
-
-                if post_region == Some(RegionType::Output) {
-                    if let Some(tok) = token {
-                        output_candidates.push((post_id.clone(), tok, sid));
+                // Output 뉴런으로 향하는 시냅스의 토큰만 큐에 등록
+                // (Output은 스위치 — 다른 구역에서 Output으로 도달한 토큰만 출력 대상)
+                if let Some(tok) = token {
+                    if output_nid_set.contains(&post_id) {
+                        fired_tokens.push((tok, sid));
                     }
                 }
 
@@ -840,11 +1033,22 @@ impl Network {
             }
         }
 
-        // 출력 토큰 수집: 수신 후 출력 뉴런 활성값이 임계 전달 구간 이상이면 방출
-        for (output_nid, tok, sid) in output_candidates {
-            if let Some(n) = self.neurons.get(&output_nid) {
-                if n.activation >= n.threshold * PASS_RATIO {
-                    result.output_tokens.push((tok, sid));
+        // 출력 채널: Output 뉴런 중 하나라도 on이면 채널 열림
+        let output_nids = self.region_neurons.get(&RegionType::Output).cloned().unwrap_or_default();
+        result.output_on = output_nids.iter().any(|nid| {
+            self.neurons.get(nid).is_some_and(|n| n.activation >= n.threshold)
+        });
+
+        // 발화한 토큰은 항상 큐에 등록 (output_on 여부와 무관)
+        result.fired_tokens_queue = fired_tokens;
+
+        // Output on인 뉴런 기록
+        if result.output_on {
+            for nid in &output_nids {
+                if let Some(n) = self.neurons.get(nid) {
+                    if n.activation >= n.threshold {
+                        result.emitted_output_neurons.push((nid.clone(), n.activation));
+                    }
                 }
             }
         }
@@ -1155,8 +1359,8 @@ impl Network {
         let mut all_fired: Vec<SynapseId> = Vec::new();
         let mut emitted_tokens: HashSet<String> = HashSet::new();
         let mut neurons_visited: Vec<NeuronId> = Vec::new();
-        let mut output_buffer: Vec<(String, SynapseId, u64)> = Vec::new();
-        let mut gate_opened = false;
+        let mut neuron_fire_ticks: Vec<(NeuronId, u64)> = Vec::new();
+        let mut token_queue: VecDeque<(String, SynapseId, u64)> = VecDeque::new();
 
         for tick in 0..MAX_TICKS {
             if self.shutdown.load(Ordering::Relaxed) { break; }
@@ -1164,66 +1368,48 @@ impl Network {
 
             all_fired.extend(result.fired_synapses.iter().cloned());
             neurons_visited.extend(result.activated_neurons.iter().cloned());
-
-            for (tok, sid) in &result.output_tokens {
-                output_buffer.push((tok.clone(), sid.clone(), tick));
+            for nid in &result.activated_neurons {
+                neuron_fire_ticks.push((nid.clone(), tick));
             }
 
-            if result.active_count == 0 {
-                break;
+            for (tok, sid) in &result.fired_tokens_queue {
+                token_queue.push_back((tok.clone(), sid.clone(), tick));
             }
 
-            if !gate_opened && self.output_ready() {
-                gate_opened = true;
-                self.open_output_gate();
-
-                for (tok, sid, t) in output_buffer.drain(..) {
+            if result.output_on {
+                while let Some((tok, sid, t)) = token_queue.pop_front() {
                     if !emitted_tokens.contains(&tok) {
                         emitted_tokens.insert(tok.clone());
                         all_output_tokens.push((tok, sid, t));
                     }
                 }
-
-                for gate_tick in 1..=GATE_TICKS {
-                    let gr = self.run_tick(&emitted_tokens, tick + gate_tick);
-                    all_fired.extend(gr.fired_synapses.iter().cloned());
-                    neurons_visited.extend(gr.activated_neurons.iter().cloned());
-
-                    for (tok, sid) in &gr.output_tokens {
-                        if !emitted_tokens.contains(tok) {
-                            emitted_tokens.insert(tok.clone());
-                            all_output_tokens.push((tok.clone(), sid.clone(), tick + gate_tick));
-                        }
-                    }
-
-                    if gr.active_count == 0 {
-                        break;
+                for (nid, _) in &result.emitted_output_neurons {
+                    if let Some(n) = self.neurons.get_mut(nid) {
+                        n.activation *= OUTPUT_EMISSION_DECAY;
                     }
                 }
+            }
 
-                self.close_output_gate();
+            if result.active_count == 0 {
+                break;
             }
         }
 
-        if !gate_opened {
-            for (tok, sid, t) in output_buffer.drain(..) {
-                if !emitted_tokens.contains(&tok) {
-                    emitted_tokens.insert(tok.clone());
-                    all_output_tokens.push((tok, sid, t));
-                }
-            }
-        }
-
-        // 해마
+        // 해마: 패턴 + co-firing 기록
         self.hippocampus.record(&neurons_visited);
+        self.hippocampus.record_cofiring(&neuron_fire_ticks);
         let patterns = self.hippocampus.maybe_consolidate();
         for (pattern, freq) in patterns {
             self.store_memory_silent(pattern, freq);
         }
+        let cofire_pairs = self.hippocampus.consolidate_cofiring();
+        if !cofire_pairs.is_empty() {
+            self.connect_cofiring_pairs(&cofire_pairs);
+        }
 
         let path_length = all_fired.len();
-        let output = self.compose_response(&all_output_tokens);
-        (output, all_output_tokens, path_length)
+        let (output, used_output_tokens) = self.assemble_output(&all_output_tokens);
+        (output, used_output_tokens, path_length)
     }
 
     // ═══════════════════════════════════════════════
@@ -1246,13 +1432,13 @@ impl Network {
         }
         let target_id = emotion_neurons.choose(&mut rng).unwrap().clone();
 
-        let weight = INITIAL_WEIGHT + (frequency as f64 * 0.05);
+        let weight = (INITIAL_WEIGHT + frequency as f64 * 0.02).min(MAX_WEIGHT);
         let memory = PathMemory {
             pattern: pattern.clone(),
             frequency,
         };
         let neuron = self.neurons.get_mut(&neuron_id).unwrap();
-        neuron.create_synapse(&self.synapse_store, target_id, weight, None, None, Some(memory));
+        neuron.create_synapse(&self.synapse_store, target_id, weight, None, Some(memory));
 
         let short_ids: Vec<String> = pattern.iter().map(|id| id[..8].to_string()).collect();
         println!(
@@ -1280,9 +1466,9 @@ impl Network {
         let target_id = emotion_neurons.choose(&mut rng).unwrap().clone();
 
         let memory = PathMemory { pattern, frequency };
-        let weight = INITIAL_WEIGHT + (frequency as f64 * 0.05);
+        let weight = (INITIAL_WEIGHT + frequency as f64 * 0.02).min(MAX_WEIGHT);
         let neuron = self.neurons.get_mut(&neuron_id).unwrap();
-        neuron.create_synapse(&self.synapse_store, target_id, weight, None, None, Some(memory));
+        neuron.create_synapse(&self.synapse_store, target_id, weight, None, Some(memory));
     }
 
     // ═══════════════════════════════════════════════
@@ -1299,6 +1485,23 @@ impl Network {
 
     pub fn get_last_path_length(&self) -> usize {
         self.fire_records.last().map(|r| r.path_length).unwrap_or(0)
+    }
+
+    /// 마지막 발화의 출력 토큰 상세 정보 (실제 output에 포함된 토큰만)
+    /// 반환: (토큰, 타입명, 가중치, 시냅스ID)
+    pub fn get_last_output_tokens(&self) -> Vec<(String, usize, f64, String)> {
+        let record = match self.fire_records.last() {
+            Some(r) => r,
+            None => return Vec::new(),
+        };
+        let mut result = Vec::new();
+        for (tok, sid, _tick) in &record.output_tokens {
+            if let Some(syn) = self.synapse_store.get(sid) {
+                let char_len = tok.chars().count();
+                result.push((tok.clone(), char_len, syn.weight, sid.clone()));
+            }
+        }
+        result
     }
 
     pub fn teach_api(&mut self, input: &str, target: &str) -> serde_json::Value {
@@ -1413,12 +1616,26 @@ impl Network {
 #[derive(Default)]
 struct TickResult {
     fired_synapses: Vec<SynapseId>,
-    output_tokens: Vec<(String, SynapseId)>,
+    fired_tokens_queue: Vec<(String, SynapseId)>, // 이번 틱에 발화한 토큰 (큐에 쌓임)
+    output_on: bool,                               // Output 채널이 열려있는지
+    emitted_output_neurons: Vec<(NeuronId, f64)>,  // on 상태인 Output 뉴런
     activated_neurons: Vec<NeuronId>,
     active_count: usize,
 }
 
 // ── 유틸 ──
+
+/// 토큰이 실제 자모(ㄱ~ㅎ, ㅏ~ㅣ)인지 확인
+/// 한글 완성 음절(가~힣)이나 다른 문자는 false
+fn is_jamo_token(token: &str) -> bool {
+    let chars: Vec<char> = token.chars().collect();
+    if chars.len() != 1 {
+        return false;
+    }
+    let code = chars[0] as u32;
+    // 한글 호환 자모: ㄱ(0x3131) ~ ㅣ(0x3163)
+    (0x3131..=0x3163).contains(&code)
+}
 
 fn path_efficiency_score(path_length: usize) -> f64 {
     1.0 / (1.0 + path_length as f64 / 10.0)

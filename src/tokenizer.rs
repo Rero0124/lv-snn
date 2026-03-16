@@ -1,32 +1,16 @@
 use serde::{Deserialize, Serialize};
 
-/// 토큰 유형
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum TokenType {
-    /// 원문 전체
-    Original,
-    /// 단일 글자
-    Char,
-    /// 한글 자모 (초성/중성/종성)
-    Jamo,
-    /// 문자 n-gram
-    NGram(usize),
-    /// 띄어쓰기 기준 단어
-    Word,
-}
-
-impl TokenType {
-    /// 토큰 길이 기반 가중치 배율 (짧을수록 높음)
-    pub fn length_bonus(&self) -> f64 {
-        match self {
-            TokenType::Jamo => 2.0,         // 자모: 최고 보너스
-            TokenType::Char => 1.8,         // 단일 글자
-            TokenType::Word => 1.5,         // 단어
-            TokenType::NGram(2) => 1.3,     // bigram
-            TokenType::NGram(3) => 1.1,     // trigram
-            TokenType::NGram(_) => 1.0,     // 4-gram 이상
-            TokenType::Original => 0.8,     // 원문 전체: 가장 낮음
-        }
+/// 토큰 길이 기반 발화 보너스
+/// 단어(4+글자)가 출력 핵심이므로 가장 높게, 자모는 보조 역할
+pub fn fire_bonus(token: &str) -> f64 {
+    let len = token.chars().count();
+    match len {
+        1 => 0.6,       // 자모/단일 글자: 보조 (발화는 쉽지만 출력 기여 낮음)
+        2 => 0.8,       // bigram
+        3 => 0.9,       // trigram
+        4..=5 => 1.2,   // 짧은 단어: 핵심 출력 단위
+        6..=10 => 1.0,  // 일반 단어
+        _ => 0.7,       // 긴 문장/구
     }
 }
 
@@ -121,6 +105,51 @@ pub fn compose_jamo(jamo_chars: &[char]) -> String {
         }
 
         // 조합 안 되면 그대로 출력
+        result.push(c);
+        i += 1;
+    }
+
+    result
+}
+
+/// 출력 후처리: 종성 없는 음절 + 자음 자모 → 종성으로 합침
+/// 예: "이러" + "ㄴ" → "이런", "하" + "ㄹ" → "할"
+pub fn merge_trailing_jamo(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut result = String::new();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+        let code = c as u32;
+
+        // 한글 음절이고 종성이 없는 경우
+        if (0xAC00..=0xD7A3).contains(&code) && (code - 0xAC00) % 28 == 0 {
+            // 다음 글자가 종성 가능한 자음 자모인지 확인
+            if i + 1 < chars.len() {
+                let next = chars[i + 1];
+                let jong = JONGSEONGS.iter().position(|&x| x == next);
+
+                if let Some(jong_idx) = jong {
+                    if jong_idx > 0 {
+                        // 그 다음이 중성(모음)이면 합치지 않음 (다음 초성임)
+                        let next_is_jung = i + 2 < chars.len()
+                            && JUNGSEONGS.iter().any(|&x| x == chars[i + 2]);
+
+                        if !next_is_jung {
+                            // 종성 합치기
+                            let new_code = code + jong_idx as u32;
+                            if let Some(merged) = char::from_u32(new_code) {
+                                result.push(merged);
+                                i += 2;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         result.push(c);
         i += 1;
     }

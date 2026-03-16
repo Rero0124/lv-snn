@@ -27,7 +27,7 @@
 
 ### 핵심 메커니즘
 
-- **3-State 뉴런** (neuron.rs): 소멸(< threshold x 0.85) / 전달 / 발산(> threshold x 1.5, 신호 1.3배 증폭). 뉴런당 TOP_K(10)개 시냅스만 발화
+- **확률적 뉴런 발화** (neuron.rs): 시그모이드 기반 확률적 발화 `p = sigmoid(activation - threshold, 0.15)`. 시냅스별 전달도 확률적. 발산(> threshold x 1.5) 시 1.3배 증폭. 뉴런당 TOP_K(10)개 시냅스만 발화
 - **STDP** (network.rs): 뉴런 발화 타이밍 기반 시냅스 강화(LTP)/약화(LTD). pre→post 인과 = 강화, 역인과 = 약화
 - **해마** (hippocampus.rs): 뉴런 단위 경로 패턴(길이 3) 추적 → 빈도 높은 패턴을 기억 구역에 통합 → 전달 후 해마에서 삭제
 - **출력 게이트** (network.rs): Output 뉴런 임계값을 높게(1.0) 설정 → 충분한 신호 축적 후 5틱간 게이트 열림
@@ -70,7 +70,7 @@ cargo build --release
 
 ### 자율 탐색 학습 (ai_train.py)
 
-Ollama(gemma3:4b)가 입력을 생성하고, SNN이 스스로 답을 찾을 때까지 탐색.
+Ollama(gemma3:12b)가 입력을 생성하고, SNN이 스스로 답을 찾을 때까지 탐색.
 LLM은 O/X(맞다/틀리다)만 판정하고 정답을 알려주지 않음.
 
 ```
@@ -81,7 +81,7 @@ LLM은 O/X(맞다/틀리다)만 판정하고 정답을 알려주지 않음.
 ```
 
 ```bash
-ollama pull gemma3:4b
+ollama pull gemma3:12b
 python3 scripts/ai_train.py --topic "음식,여행,감정" --duration 1800
 ```
 
@@ -110,3 +110,4 @@ python3 scripts/fast_train.py --rounds 10             # Ollama 의미 평가 포
 | serde + serde_json | 직렬화 |
 | signal-hook 0.3 | graceful shutdown |
 | uuid 1 | 뉴런/시냅스 ID 생성 |
+| rand 0.10 | 확률적 발화 |

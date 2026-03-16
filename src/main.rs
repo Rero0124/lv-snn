@@ -37,6 +37,8 @@ fn main() {
         net.add_region(RegionType::Reason, 64);
         net.add_region(RegionType::Storage, 128);
         net.add_region(RegionType::Output, 64);
+        // 초기 랜덤 빈 시냅스: 구조적 연결 씨앗 (해마가 학습으로 다듬음)
+        net.seed_random_synapses(30);
     }
 
     if serve_mode {

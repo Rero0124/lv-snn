@@ -1,5 +1,4 @@
 use crate::neuron::NeuronId;
-use crate::tokenizer::TokenType;
 use redb::{Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -29,7 +28,6 @@ pub struct Synapse {
     pub post_neuron: NeuronId,
     pub weight: f64,
     pub token: Option<String>,
-    pub token_type: Option<TokenType>,
     pub memory: Option<PathMemory>,
     pub active: bool,
 }
@@ -41,7 +39,6 @@ impl Synapse {
         post: NeuronId,
         weight: f64,
         token: Option<String>,
-        token_type: Option<TokenType>,
         memory: Option<PathMemory>,
     ) -> Self {
         Self {
@@ -50,7 +47,6 @@ impl Synapse {
             post_neuron: post,
             weight,
             token,
-            token_type,
             memory,
             active: true,
         }
@@ -121,11 +117,10 @@ impl SynapseStore {
         post: NeuronId,
         weight: f64,
         token: Option<String>,
-        token_type: Option<TokenType>,
         memory: Option<PathMemory>,
     ) -> SynapseId {
         let id = Uuid::new_v4().to_string();
-        let synapse = Synapse::new(id.clone(), pre, post, weight, token, token_type, memory);
+        let synapse = Synapse::new(id.clone(), pre, post, weight, token, memory);
         let mut st = self.state.lock().unwrap();
         if let Some(ref tok) = synapse.token {
             st.token_index.entry(tok.clone()).or_default().push(id.clone());

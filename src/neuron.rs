@@ -1,18 +1,19 @@
 use crate::synapse::{PathMemory, SynapseId, SynapseStore};
-use crate::tokenizer::TokenType;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 pub type NeuronId = String;
 
-pub const DEFAULT_THRESHOLD: f64 = 0.5;
-pub const MAX_ACTIVATION: f64 = 3.0;
-pub const DB_WEIGHT_DISCOUNT: f64 = 0.5;
+pub const DEFAULT_THRESHOLD: f64 = 0.25;
+pub const MAX_ACTIVATION: f64 = 1.0;
+pub const DB_WEIGHT_DISCOUNT: f64 = 0.8;
 
-// 3-state 뉴런 상수
-pub const DIVERGE_RATIO: f64 = 1.5; // activation > threshold × 이 값 → 발산
-pub const PASS_RATIO: f64 = 0.85;   // activation >= threshold × 이 값 → 전달 (높을수록 엄격)
-pub const DIVERGE_BOOST: f64 = 1.3; // 발산 시 신호 증폭 비율
-pub const TOP_K_FIRES: usize = 10;  // 뉴런당 최대 발화 시냅스 수 (상위 K개만)
+// 확률적 뉴런 상수
+pub const DIVERGE_RATIO: f64 = 1.5;        // activation > threshold × 이 값 → 발산 (신호 증폭)
+pub const PASS_RATIO: f64 = 0.85;          // STDP/출력 수집용 (발화 판정은 시그모이드)
+pub const DIVERGE_BOOST: f64 = 1.3;        // 발산 시 신호 증폭 비율
+pub const TOP_K_FIRES: usize = 10;         // 뉴런당 최대 발화 시냅스 수
+pub const SIGMOID_TEMPERATURE: f64 = 0.15; // 시그모이드 온도 (낮을수록 급격한 전환)
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Neuron {
@@ -46,24 +47,29 @@ impl Neuron {
         self.activation = (self.activation + value).min(MAX_ACTIVATION);
     }
 
-    /// 3-state 뉴런 발화:
-    /// - 소멸: activation < threshold × PASS_RATIO → 신호 전파 없음
-    /// - 전달: activation >= threshold × PASS_RATIO → 신호 그대로 전달
-    /// - 발산: activation > threshold × DIVERGE_RATIO → 신호 증폭 전달
+    /// 확률적 뉴런 발화 (시그모이드 기반):
+    /// - 발화 확률: p = 1 / (1 + exp(-(activation - threshold) / temperature))
+    /// - activation >> threshold → p ≈ 1 (거의 확실히 발화)
+    /// - activation << threshold → p ≈ 0 (거의 발화 안 함)
+    /// - activation ≈ threshold → p ≈ 0.5 (50% 확률)
+    /// - 발산: activation > threshold × DIVERGE_RATIO → 신호 증폭
     pub fn compute_fires(
         &self,
         store: &SynapseStore,
         emitted_tokens: &std::collections::HashSet<String>,
-    ) -> Vec<(SynapseId, NeuronId, f64, Option<String>, Option<TokenType>)> {
+    ) -> Vec<(SynapseId, NeuronId, f64, Option<String>)> {
         let mut fires = Vec::new();
 
-        // 소멸 구간: 임계값보다 한참 낮으면 전파 없음
-        if self.activation < self.threshold * PASS_RATIO {
-            return fires;
+        // 시그모이드 발화 확률 계산
+        let fire_prob = sigmoid(self.activation - self.threshold, SIGMOID_TEMPERATURE);
+
+        // 확률적 판정: 난수로 발화 여부 결정
+        let mut rng = rand::rng();
+        if rng.random::<f64>() > fire_prob {
+            return fires; // 발화하지 않음
         }
 
         let diverging = self.activation > self.threshold * DIVERGE_RATIO;
-        let min_forward = self.threshold * PASS_RATIO; // 이 값 미만의 forward는 전달 안 함
 
         for sid in &self.outgoing {
             let cached = store.is_cached(sid);
@@ -83,9 +89,10 @@ impl Neuron {
                     forward *= DIVERGE_BOOST;
                 }
 
-                // 전달 구간에서도 약한 시냅스는 걸러냄
-                if forward < min_forward {
-                    continue;
+                // 시냅스별 확률적 전달: forward 값에 비례한 확률
+                let syn_prob = sigmoid(forward - self.threshold * 0.5, SIGMOID_TEMPERATURE);
+                if rng.random::<f64>() > syn_prob {
+                    continue; // 이 시냅스는 전달하지 않음
                 }
 
                 fires.push((
@@ -93,7 +100,6 @@ impl Neuron {
                     syn.post_neuron.clone(),
                     forward,
                     syn.token.clone(),
-                    syn.token_type.clone(),
                 ));
             }
         }
@@ -107,18 +113,22 @@ impl Neuron {
         fires
     }
 
-    /// 시냅스 생성
+    /// 시냅스 생성 (확률적 발화와 무관, 구조 변경 없음)
     pub fn create_synapse(
         &mut self,
         store: &SynapseStore,
         target: NeuronId,
         weight: f64,
         token: Option<String>,
-        token_type: Option<TokenType>,
         memory: Option<PathMemory>,
     ) -> SynapseId {
-        let sid = store.create(self.id.clone(), target, weight, token, token_type, memory);
+        let sid = store.create(self.id.clone(), target, weight, token, memory);
         self.outgoing.push(sid.clone());
         sid
     }
+}
+
+/// 시그모이드 함수: 1 / (1 + exp(-x / temperature))
+fn sigmoid(x: f64, temperature: f64) -> f64 {
+    1.0 / (1.0 + (-x / temperature).exp())
 }

@@ -31,7 +31,7 @@ impl RegionType {
             Emotion => &[Reason, Storage, Output],
             Reason => &[Emotion, Storage, Output],
             Storage => &[Emotion, Reason, Output],
-            Output => &[], // 종착점: 출력 후 소멸
+            Output => &[Output], // 내부 순환: 발화 후 감쇠로 자연 소멸
         }
     }
 }
