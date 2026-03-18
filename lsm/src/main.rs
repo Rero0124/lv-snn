@@ -7,12 +7,66 @@ mod server;
 mod synapse;
 mod tokenizer;
 
+use hippocampus::{HippoInput, HippoStats, HippocampusState, hippo_thread_main};
 use network::Network;
 use region::RegionType;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+/// 채널 + 해마 스레드를 생성하고 Network를 반환
+fn create_network(
+    db_path: PathBuf,
+    max_cached_synapses: usize,
+    shutdown: Arc<AtomicBool>,
+    reset_mode: bool,
+) -> (Network, std::thread::JoinHandle<()>) {
+    // 해마 ↔ 네트워크 채널
+    let (hippo_tx, hippo_rx) = crossbeam::channel::bounded::<HippoInput>(256);
+    let (consolidation_tx, consolidation_rx) = crossbeam::channel::bounded(16);
+    let hippo_stats = Arc::new(HippoStats::new());
+
+    let mut net = Network::new(
+        db_path, max_cached_synapses, Arc::clone(&shutdown),
+        hippo_tx.clone(), consolidation_rx, Arc::clone(&hippo_stats),
+    );
+
+    // 상태 로드 → 해마 상태 추출
+    let hippo_state: Option<HippocampusState>;
+    if reset_mode {
+        println!("  [리셋] 네트워크 구조 재생성 (시냅스 DB는 유지)...");
+        hippo_state = None;
+    } else {
+        let (loaded, hs) = net.try_load_state();
+        if loaded {
+            hippo_state = hs;
+        } else {
+            println!("  새 네트워크 생성 (기존 시냅스 DB 유지)...");
+            hippo_state = None;
+        }
+    }
+
+    if net.neuron_count() == 0 {
+        net.add_region(RegionType::Input, 256);
+        net.add_region(RegionType::Emotion, 128);
+        net.add_region(RegionType::Reason, 128);
+        net.add_region(RegionType::Storage, 512);
+        net.add_region(RegionType::Output, 128);
+        net.seed_random_synapses(30);
+    }
+
+    // 해마 스레드 시작
+    let hippo_shutdown = Arc::clone(&shutdown);
+    let hippo_handle = std::thread::Builder::new()
+        .name("hippocampus".into())
+        .spawn(move || {
+            hippo_thread_main(hippo_rx, consolidation_tx, hippo_stats, hippo_state, hippo_shutdown);
+        })
+        .expect("해마 스레드 생성 실패");
+
+    (net, hippo_handle)
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -30,32 +84,17 @@ fn main() {
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown)).ok();
 
     let db_path = PathBuf::from("data/network.redb");
-    let mut net = Network::new(db_path.clone(), 50000, Arc::clone(&shutdown));
-
-    if reset_mode || !net.try_load_state() {
-        if reset_mode {
-            println!("  [리셋] 네트워크 구조 재생성 (시냅스 DB는 유지)...");
-        } else {
-            println!("  새 네트워크 생성 (기존 시냅스 DB 유지)...");
-        }
-        net.add_region(RegionType::Input, 256);
-        net.add_region(RegionType::Emotion, 128);
-        net.add_region(RegionType::Reason, 128);
-        net.add_region(RegionType::Storage, 512);
-        net.add_region(RegionType::Output, 128);
-        // 초기 랜덤 빈 시냅스: 구조적 연결 씨앗 (해마가 학습으로 다듬음)
-        net.seed_random_synapses(30);
-    }
+    let (net, hippo_handle) = create_network(db_path, 50000, Arc::clone(&shutdown), reset_mode);
 
     if serve_mode {
-        run_server(net, port);
+        run_server(net, port, hippo_handle, shutdown);
     } else {
-        run_interactive(net, shutdown);
+        run_interactive(net, shutdown, hippo_handle);
     }
 }
 
 #[tokio::main]
-async fn run_server(net: Network, port: u16) {
+async fn run_server(net: Network, port: u16, hippo_handle: std::thread::JoinHandle<()>, shutdown: Arc<AtomicBool>) {
     println!("=== LV-SNN 서버 모드 ===");
 
     println!("  POST /fire       {{\"text\": \"...\"}})");
@@ -68,9 +107,13 @@ async fn run_server(net: Network, port: u16) {
     if let Err(e) = server::run_server(net, port).await {
         eprintln!("서버 오류: {e}");
     }
+
+    // 서버 종료 후 해마 스레드 정리
+    shutdown.store(true, Ordering::Relaxed);
+    let _ = hippo_handle.join();
 }
 
-fn run_interactive(mut net: Network, shutdown: Arc<AtomicBool>) {
+fn run_interactive(mut net: Network, shutdown: Arc<AtomicBool>, hippo_handle: std::thread::JoinHandle<()>) {
     println!("=== LV-SNN 대화형 모드 (토큰 기반) ===");
     net.print_summary();
     println!();
@@ -109,6 +152,9 @@ fn run_interactive(mut net: Network, shutdown: Arc<AtomicBool>) {
         if line == "/quit" || line == "/q" {
             net.save_state();
             let _ = writeln!(io::stdout(), "종료합니다.");
+            // 해마 스레드 종료
+            shutdown.store(true, Ordering::Relaxed);
+            let _ = hippo_handle.join();
             return;
         }
         if let Some(args) = line.strip_prefix("/train") {

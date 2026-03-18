@@ -1,9 +1,10 @@
 use crate::fire_engine::{EngineNeuron, EngineSynapse, FireEngine};
-use crate::hippocampus::{Hippocampus, HippocampusState};
+use crate::hippocampus::{ConsolidationResult, HippoInput, HippoStats, HippocampusState};
 use crate::neuron::{Neuron, NeuronId, PASS_RATIO};
 use crate::region::RegionType;
 use crate::synapse::{PathMemory, SynapseId, SynapseStore};
 use crate::tokenizer::{self, hash_to_index, TextTokens};
+use crossbeam::channel::{Receiver, Sender};
 use crossbeam::queue::SegQueue;
 use rand::RngExt;
 use rayon::prelude::*;
@@ -25,8 +26,6 @@ const FEEDBACK_LR: f64 = 0.1;         // 피드백 시 weight 조정
 const MAX_WEIGHT: f64 = 1.0;
 const MIN_WEIGHT: f64 = 0.1;
 const MAX_TICKS: u64 = 50;
-const CONSOLIDATION_INTERVAL: usize = 5;
-const MIN_PATTERN_FREQ: u64 = 3;
 const OUTPUT_EMISSION_DECAY: f64 = 0.3; // 출력 뉴런이 토큰 방출 후 activation에 곱하는 감쇠율
 const RANDOM_SYNAPSE_WEIGHT: f64 = 0.1; // 초기 랜덤 시냅스 가중치 (낮게 시작)
 const COFIRE_SYNAPSE_WEIGHT: f64 = 0.15; // co-firing으로 생성되는 시냅스 가중치
@@ -42,7 +41,8 @@ struct NetworkState {
     neurons: HashMap<NeuronId, Neuron>,
     neuron_region: HashMap<NeuronId, RegionType>,
     region_neurons: Vec<(RegionType, Vec<NeuronId>)>,
-    hippocampus: HippocampusState,
+    #[serde(default)]
+    hippocampus: Option<HippocampusState>,
     next_fire_id: u64,
 }
 
@@ -147,7 +147,10 @@ pub struct Network {
     synapse_store: SynapseStore,
     fire_records: Vec<FireRecord>,
     next_fire_id: u64,
-    hippocampus: Hippocampus,
+    // 해마 스레드 통신
+    hippo_tx: Sender<HippoInput>,
+    consolidation_rx: Receiver<ConsolidationResult>,
+    hippo_stats: Arc<HippoStats>,
     shutdown: Arc<AtomicBool>,
     // 최근 사용 억제: 시냅스ID → 최근 N회 fire에서 사용된 이력 (앞=최근, 뒤=오래됨)
     cooldown_history: HashMap<SynapseId, VecDeque<bool>>,
@@ -188,7 +191,14 @@ impl Network {
         }
     }
 
-    pub fn new(db_path: PathBuf, max_cached_synapses: usize, shutdown: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        db_path: PathBuf,
+        max_cached_synapses: usize,
+        shutdown: Arc<AtomicBool>,
+        hippo_tx: Sender<HippoInput>,
+        consolidation_rx: Receiver<ConsolidationResult>,
+        hippo_stats: Arc<HippoStats>,
+    ) -> Self {
         Self {
             neurons: HashMap::new(),
             neuron_region: HashMap::new(),
@@ -196,7 +206,9 @@ impl Network {
             synapse_store: SynapseStore::new(db_path, max_cached_synapses),
             fire_records: Vec::new(),
             next_fire_id: 1,
-            hippocampus: Hippocampus::new(CONSOLIDATION_INTERVAL, MIN_PATTERN_FREQ),
+            hippo_tx,
+            consolidation_rx,
+            hippo_stats,
             shutdown,
             cooldown_history: HashMap::new(),
             fire_generation: 0,
@@ -205,17 +217,18 @@ impl Network {
         }
     }
 
-    pub fn try_load_state(&mut self) -> bool {
+    /// 상태 로드. 성공 시 (true, Option<HippocampusState>) 반환
+    pub fn try_load_state(&mut self) -> (bool, Option<HippocampusState>) {
         let data = match self.synapse_store.load_network_state() {
             Some(d) => d,
-            None => return false,
+            None => return (false, None),
         };
         let state: NetworkState = match serde_json::from_slice(&data) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("  상태 파싱 실패 (구조 변경?): {e}");
                 eprintln!("  → data/network.redb를 삭제하고 다시 시작하세요.");
-                return false;
+                return (false, None);
             }
         };
 
@@ -223,7 +236,7 @@ impl Network {
         self.neuron_region = state.neuron_region;
         self.region_neurons = state.region_neurons.into_iter().collect();
         self.next_fire_id = state.next_fire_id;
-        self.hippocampus.import_state(state.hippocampus);
+        let hippo_state = state.hippocampus; // 해마 상태는 외부(서버)에서 스레드로 전달
 
         // 레거시 데이터 마이그레이션: outgoing(ID만) → outgoing_cache(weight/modifier 포함)
         // + 기존 outgoing_cache에 post_neuron이 비어있으면 채우기
@@ -250,33 +263,75 @@ impl Network {
         // 시냅스 캐시 워밍업 (token_index 구축)
         self.synapse_store.warm_cache();
 
+        let pattern_count = hippo_state.as_ref().map(|s| s.pattern_counts.len()).unwrap_or(0);
         println!(
             "  [로드] 뉴런 {}개, 구역 {}개, 해마 패턴 {}개 복원",
             self.neurons.len(),
             self.region_neurons.len(),
-            self.hippocampus.pattern_count(),
+            pattern_count,
         );
-        true
+        (true, hippo_state)
     }
 
-    pub fn save_state(&self) {
-        // 네트워크 상태를 먼저 저장 (SIGTERM 시에도 최소한 상태는 보존)
+    /// 경량 저장: 네트워크 상태 + dirty 시냅스만 (자동저장용, 블로킹 최소화)
+    pub fn save_state_light(&self) {
+        let hippo_state = {
+            let (tx, rx) = crossbeam::channel::bounded(1);
+            if self.hippo_tx.send(HippoInput::ExportState(tx)).is_ok() {
+                rx.recv_timeout(std::time::Duration::from_secs(5)).ok()
+            } else {
+                None
+            }
+        };
+
         let state = NetworkState {
             neurons: self.neurons.clone(),
             neuron_region: self.neuron_region.clone(),
             region_neurons: self.region_neurons.iter().map(|(k, v)| (*k, v.clone())).collect(),
-            hippocampus: self.hippocampus.export_state(),
+            hippocampus: hippo_state,
             next_fire_id: self.next_fire_id,
         };
         match serde_json::to_vec(&state) {
             Ok(bytes) => {
                 self.synapse_store.save_network_state(&bytes);
-                // stderr 사용 (stdout 파이프 block 방지)
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "  [경량저장] 뉴런 {}개 → DB 저장 완료",
+                    self.neurons.len(),
+                );
+            }
+            Err(e) => eprintln!("  상태 직렬화 실패: {e}"),
+        }
+        // dirty만 flush (캐시 전체 동기화 + prune 생략)
+        self.synapse_store.flush_dirty();
+    }
+
+    /// 전체 저장: 캐시 동기화 + flush + prune (수동 저장/종료 시)
+    pub fn save_state(&self) {
+        let hippo_state = {
+            let (tx, rx) = crossbeam::channel::bounded(1);
+            if self.hippo_tx.send(HippoInput::ExportState(tx)).is_ok() {
+                rx.recv_timeout(std::time::Duration::from_secs(5)).ok()
+            } else {
+                None
+            }
+        };
+
+        let state = NetworkState {
+            neurons: self.neurons.clone(),
+            neuron_region: self.neuron_region.clone(),
+            region_neurons: self.region_neurons.iter().map(|(k, v)| (*k, v.clone())).collect(),
+            hippocampus: hippo_state,
+            next_fire_id: self.next_fire_id,
+        };
+        match serde_json::to_vec(&state) {
+            Ok(bytes) => {
+                self.synapse_store.save_network_state(&bytes);
                 let _ = writeln!(
                     std::io::stderr(),
                     "  [저장] 뉴런 {}개, 해마 패턴 {}개 → DB 저장 완료",
                     self.neurons.len(),
-                    self.hippocampus.pattern_count(),
+                    self.hippo_stats.pattern_count.load(Ordering::Relaxed),
                 );
             }
             Err(e) => eprintln!("  상태 직렬화 실패: {e}"),
@@ -288,7 +343,7 @@ impl Network {
                 self.synapse_store.update_modifier(&os.id, os.modifier);
             }
         }
-        // dirty 시냅스 저장 (네트워크 상태 이후 — SIGTERM 시 시냅스만 유실)
+        // dirty 시냅스 저장
         self.synapse_store.flush_dirty();
         // DB 전체 pruning (약한/중복 시냅스 정리)
         let (removed, remaining, _removed_pairs) = self.synapse_store.prune_db(MIN_WEIGHT);
@@ -2091,21 +2146,47 @@ impl Network {
     /// 최근 fire 기록의 피드백 정보를 기반으로 중간 경로 시냅스 modifier 조절
     /// 해마 통합 시점에 호출 — 오프라인 경로 최적화
     fn consolidate_path_modifiers(&mut self) {
-        // sid → (pre_neuron, post_neuron, modifier) 맵 구축 (synapse_store.get 대체)
-        let mut sid_info: HashMap<SynapseId, (NeuronId, NeuronId, f64)> = HashMap::new();
-        for (nid, neuron) in &self.neurons {
-            for os in &neuron.outgoing_cache {
-                sid_info.insert(os.id.clone(), (nid.clone(), os.post_neuron.clone(), os.modifier));
+        // 최근 rewarded 레코드의 인덱스만 수집
+        let rewarded_indices: Vec<usize> = self.fire_records.iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, r)| r.rewarded)
+            .take(5)
+            .map(|(i, _)| i)
+            .collect();
+        if rewarded_indices.is_empty() {
+            return;
+        }
+
+        // 필요한 sid만 수집 (전체 200k 대신 관련된 수천 개만)
+        let mut needed_sids: HashSet<SynapseId> = HashSet::new();
+        for &idx in &rewarded_indices {
+            let record = &self.fire_records[idx];
+            for sid in &record.fired_synapses {
+                needed_sids.insert(sid.clone());
+            }
+            for (_, sid, _) in &record.output_tokens {
+                needed_sids.insert(sid.clone());
             }
         }
 
-        let mut mod_updates: Vec<(NeuronId, SynapseId, f64)> = Vec::new();
-
-        for record in &self.fire_records {
-            if !record.rewarded {
-                continue;
+        // 필요한 sid만 해시맵으로 구축 — O(neurons × avg_outgoing) 대신 O(needed)
+        let mut sid_info: HashMap<SynapseId, (NeuronId, NeuronId, f64)> =
+            HashMap::with_capacity(needed_sids.len());
+        for (nid, neuron) in &self.neurons {
+            for os in &neuron.outgoing_cache {
+                if needed_sids.contains(&os.id) {
+                    sid_info.insert(os.id.clone(), (nid.clone(), os.post_neuron.clone(), os.modifier));
+                }
             }
+        }
 
+        // pre_neuron별 modifier 갱신을 그룹핑 (outgoing_cache 탐색 최소화)
+        let mut updates_by_neuron: HashMap<NeuronId, Vec<(SynapseId, f64)>> = HashMap::new();
+        let mut store_updates: Vec<(String, f64)> = Vec::new();
+
+        for &idx in &rewarded_indices {
+            let record = &self.fire_records[idx];
             let output_nids: HashSet<NeuronId> = record.output_tokens.iter()
                 .filter_map(|(_, sid, _)| sid_info.get(sid).map(|(_, post, _)| post.clone()))
                 .collect();
@@ -2127,19 +2208,41 @@ impl Network {
                 if output_sids.contains(sid) {
                     continue;
                 }
-
                 if let Some((pre, post, modifier)) = sid_info.get(sid) {
+                    let is_output_target = self.neuron_region.get(post)
+                        .map(|r| *r == RegionType::Output)
+                        .unwrap_or(false);
+                    if is_output_target {
+                        continue;
+                    }
                     let leads_to_output = output_nids.contains(post);
                     let factor = if leads_to_output { 0.3 } else { 0.1 };
-                    let new_mod = modifier + avg_output_mod * factor;
-                    mod_updates.push((pre.clone(), sid.clone(), new_mod));
+                    let new_mod = (modifier + avg_output_mod * factor).clamp(-1.0, 1.0);
+
+                    updates_by_neuron.entry(pre.clone())
+                        .or_default()
+                        .push((sid.clone(), new_mod));
+                    store_updates.push((sid.clone(), new_mod));
                 }
             }
         }
 
-        for (pre, sid, new_mod) in mod_updates {
-            self.sync_modifier(&pre, &sid, new_mod);
+        // outgoing_cache 갱신: 뉴런별로 한번에 처리
+        for (nid, updates) in &updates_by_neuron {
+            if let Some(neuron) = self.neurons.get_mut(nid) {
+                let sid_mod: HashMap<&str, f64> = updates.iter()
+                    .map(|(sid, m)| (sid.as_str(), *m))
+                    .collect();
+                for os in &mut neuron.outgoing_cache {
+                    if let Some(&new_mod) = sid_mod.get(os.id.as_str()) {
+                        os.modifier = new_mod;
+                    }
+                }
+            }
         }
+
+        // synapse_store batch 업데이트 (단일 lock)
+        self.synapse_store.update_modifiers_batch(&store_updates);
     }
 
     // ═══════════════════════════════════════════════
@@ -2461,17 +2564,13 @@ impl Network {
             }
         }
 
-        // 해마: 패턴 + co-firing 기록
-        self.hippocampus.record(&neurons_visited);
-        self.hippocampus.record_cofiring(&neuron_fire_ticks);
-        let patterns = self.hippocampus.maybe_consolidate();
-        for (pattern, freq) in patterns {
-            self.store_memory_silent(pattern, freq);
-        }
-        let cofire_pairs = self.hippocampus.consolidate_cofiring();
-        if !cofire_pairs.is_empty() {
-            self.connect_cofiring_pairs(&cofire_pairs);
-        }
+        // 해마 스레드에 활성화 데이터 전송 (비동기)
+        let _ = self.hippo_tx.try_send(HippoInput::ActivationData {
+            neurons_activated: neurons_visited.clone(),
+            neuron_fire_ticks: neuron_fire_ticks.clone(),
+        });
+        // 통합 결과 적용 (있으면)
+        self.apply_consolidation_results();
 
         let path_length = all_fired.len();
         let (output, used_output_tokens) = self.assemble_output(&all_output_tokens);
@@ -2611,61 +2710,96 @@ impl Network {
     }
 
     pub fn get_status(&self) -> serde_json::Value {
+        use RegionType::*;
+        let mut regions = serde_json::Map::new();
+        for region in &[Input, Emotion, Reason, Storage, Output] {
+            let neuron_count = self.region_neurons.get(region).map(|n| n.len()).unwrap_or(0);
+            let synapse_count: usize = self.region_neurons.get(region)
+                .map(|neurons| neurons.iter()
+                    .filter_map(|n| self.neurons.get(n))
+                    .map(|n| n.outgoing_cache.len())
+                    .sum())
+                .unwrap_or(0);
+
+            let mut info = serde_json::json!({
+                "neurons": neuron_count,
+                "synapses": synapse_count,
+            });
+
+            if *region == Storage {
+                let all_sids: Vec<SynapseId> = self.region_neurons.get(region)
+                    .map(|neurons| neurons.iter()
+                        .filter_map(|n| self.neurons.get(n))
+                        .flat_map(|n| n.outgoing_cache.iter().map(|os| os.id.clone()))
+                        .collect())
+                    .unwrap_or_default();
+                let memory_count = self.synapse_store.cached_memory_count(&all_sids);
+                info["memories"] = serde_json::json!(memory_count);
+            }
+
+            regions.insert(format!("{region}"), info);
+        }
+
         serde_json::json!({
             "neurons": self.neurons.len(),
             "synapses": self.synapse_store.count(),
             "cached": self.synapse_store.cached_count(),
             "token_vocab": self.synapse_store.token_index_count(),
-            "fire_count": self.hippocampus.fire_count(),
-            "patterns": self.hippocampus.pattern_count(),
+            "fire_count": self.hippo_stats.fire_count.load(Ordering::Relaxed),
+            "patterns": self.hippo_stats.pattern_count.load(Ordering::Relaxed),
+            "regions": regions,
         })
     }
 
     pub fn neuron_count(&self) -> usize { self.neurons.len() }
     pub fn synapse_count(&self) -> usize { self.synapse_store.count() }
     pub fn cached_count(&self) -> usize { self.synapse_store.cached_count() }
-    pub fn fire_count(&self) -> u64 { self.hippocampus.fire_count() as u64 }
-    pub fn pattern_count(&self) -> usize { self.hippocampus.pattern_count() }
+    pub fn fire_count(&self) -> u64 { self.hippo_stats.fire_count.load(Ordering::Relaxed) as u64 }
+    pub fn pattern_count(&self) -> usize { self.hippo_stats.pattern_count.load(Ordering::Relaxed) as usize }
     pub fn token_vocab_count(&self) -> usize { self.synapse_store.token_index_count() }
 
-    /// fire 후처리: 응답 전송 후 별도로 호출 (해마, co-firing, cooldown, link 등)
+    /// 해마 스레드에서 보내온 통합 결과 적용
+    fn apply_consolidation_results(&mut self) {
+        while let Ok(result) = self.consolidation_rx.try_recv() {
+            if !result.patterns.is_empty() {
+                let total = result.patterns.len();
+                let cap = total.min(20);
+                eprintln!(
+                    "  [해마 결과 적용] 패턴 {}개 (저장 {}개), co-fire 쌍 {}개",
+                    total, cap, result.cofire_pairs.len()
+                );
+                let show = cap.min(3);
+                for (pattern, freq) in &result.patterns[..show] {
+                    self.store_memory(pattern.clone(), *freq);
+                }
+                for (pattern, freq) in &result.patterns[show..cap] {
+                    self.store_memory_silent(pattern.clone(), *freq);
+                }
+                self.consolidate_path_modifiers();
+            }
+            if !result.cofire_pairs.is_empty() {
+                self.connect_cofiring_pairs(&result.cofire_pairs);
+            }
+        }
+    }
+
+    /// fire 후처리: 응답 전송 후 별도로 호출 (cooldown, link, prune + 해마 데이터 전송)
     pub fn run_pending_post_process(&mut self) {
+        // 해마 스레드에서 온 통합 결과 적용 (non-blocking)
+        self.apply_consolidation_results();
+
         let data = match self.pending_post_process.take() {
             Some(d) => d,
             None => return,
         };
         let pp_start = Instant::now();
 
-        // 해마 기록: 경로 패턴 + co-firing
-        self.hippocampus.record(&data.neurons_activated);
-        self.hippocampus.record_cofiring(&data.neuron_fire_ticks);
+        // 해마 스레드로 활성화 데이터 전송 (non-blocking, 꽉 차면 drop)
+        let _ = self.hippo_tx.try_send(HippoInput::ActivationData {
+            neurons_activated: data.neurons_activated,
+            neuron_fire_ticks: data.neuron_fire_ticks,
+        });
         let t1 = Instant::now();
-
-        let patterns = self.hippocampus.maybe_consolidate();
-        if !patterns.is_empty() {
-            let total = patterns.len();
-            eprintln!(
-                "  [해마] 통합 (발화 #{}, 패턴 {}개)",
-                self.hippocampus.fire_count(),
-                total
-            );
-            let show = total.min(3);
-            for (pattern, freq) in &patterns[..show] {
-                self.store_memory(pattern.clone(), *freq);
-            }
-            for (pattern, freq) in &patterns[show..] {
-                self.store_memory_silent(pattern.clone(), *freq);
-            }
-            self.consolidate_path_modifiers();
-        }
-        let t2 = Instant::now();
-
-        // 해마 co-firing 통합
-        let cofire_pairs = self.hippocampus.consolidate_cofiring();
-        if !cofire_pairs.is_empty() {
-            self.connect_cofiring_pairs(&cofire_pairs);
-        }
-        let t3 = Instant::now();
 
         // cooldown 이력
         let mut used_sids: HashSet<SynapseId> = HashSet::new();
@@ -2690,13 +2824,13 @@ impl Network {
             }
         }
         self.cooldown_history.retain(|_, h| h.iter().any(|&used| used));
-        let t4 = Instant::now();
+        let t2 = Instant::now();
 
         // 패턴 병합 + 출력 토큰 연결
         self.consolidate_patterns(&data.all_output_tokens);
-        let t5 = Instant::now();
+        let t3 = Instant::now();
         self.link_output_tokens(&data.used_output_tokens);
-        let t6 = Instant::now();
+        let t4 = Instant::now();
 
         // 주기적 pruning
         if data.fire_id > 0 && data.fire_id % 10 == 0 {
@@ -2706,13 +2840,13 @@ impl Network {
                 self.cleanup_and_neurogenesis(&removed_pairs, &removed_sids);
             }
         }
-        let t7 = Instant::now();
+        let t5 = Instant::now();
 
         let total = pp_start.elapsed();
-        if total.as_millis() > 500 {
+        if total.as_millis() > 200 {
             eprintln!(
-                "  [post #{fire_id}] post_process={total:?} | hippo_rec={:?} consolidate={:?} cofire={:?} cooldown={:?} patterns={:?} link={:?} prune={:?}",
-                t1 - pp_start, t2 - t1, t3 - t2, t4 - t3, t5 - t4, t6 - t5, t7 - t6,
+                "  [post #{fire_id}] post_process={total:?} | hippo_send={:?} cooldown={:?} patterns={:?} link={:?} prune={:?}",
+                t1 - pp_start, t2 - t1, t3 - t2, t4 - t3, t5 - t4,
                 fire_id = data.fire_id,
             );
         } else {
@@ -2768,8 +2902,8 @@ impl Network {
         );
         println!(
             "  해마: 발화 {}회, 추적 패턴 {}개",
-            self.hippocampus.fire_count(),
-            self.hippocampus.pattern_count()
+            self.hippo_stats.fire_count.load(Ordering::Relaxed),
+            self.hippo_stats.pattern_count.load(Ordering::Relaxed)
         );
     }
 }

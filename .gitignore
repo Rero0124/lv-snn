@@ -1,4 +1,4 @@
-/target
-/data
-/.claude
-.DS_Store
+/**/target
+/**/data
+.claude
+/**/.DS_Store

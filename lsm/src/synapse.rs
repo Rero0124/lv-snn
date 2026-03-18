@@ -231,6 +231,22 @@ impl SynapseStore {
         false
     }
 
+    /// 배치 modifier 업데이트 — 한번의 lock으로 다수 시냅스 처리
+    pub fn update_modifiers_batch(&self, updates: &[(String, f64)]) {
+        let mut st = self.state.lock().unwrap();
+        let now = Instant::now();
+        for (id, new_modifier) in updates {
+            let clamped = round2(new_modifier.clamp(-1.0, 1.0));
+            if let Some(entry) = st.cache.get_mut(id.as_str()) {
+                entry.synapse.modifier = clamped;
+                entry.last_access = now;
+                entry.access_count += 1;
+                entry.dirty = true;
+            }
+            // 캐시에 없으면 skip (DB 로드 비용 회피, 다음 fire 시 자연스럽게 갱신)
+        }
+    }
+
     /// DB에서 weight/modifier만 읽기 (캐시에 올리지 않음, cold 유지)
     pub fn get_weight_only(&self, id: &str) -> Option<(f64, f64)> {
         let st = self.state.lock().unwrap();

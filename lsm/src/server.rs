@@ -16,6 +16,7 @@ enum NetRequest {
     Feedback { fire_id: u64, positive: bool, strength: f64, reply: oneshot::Sender<()> },
     FeedbackPartial { fire_id: u64, token_scores: Vec<(String, f64)>, reply: oneshot::Sender<()> },
     Save { reply: oneshot::Sender<()> },
+    Status { reply: oneshot::Sender<serde_json::Value> },
 }
 
 pub struct AppState {
@@ -140,14 +141,12 @@ async fn feedback_partial(state: web::Data<AppState>, req: web::Json<FeedbackPar
 }
 
 async fn status(state: web::Data<AppState>) -> HttpResponse {
-    HttpResponse::Ok().json(serde_json::json!({
-        "neurons": state.stat_neurons.load(Ordering::Relaxed),
-        "synapses": state.stat_synapses.load(Ordering::Relaxed),
-        "cached": state.stat_cached.load(Ordering::Relaxed),
-        "fire_count": state.stat_fire_count.load(Ordering::Relaxed),
-        "patterns": state.stat_patterns.load(Ordering::Relaxed),
-        "token_vocab": state.stat_token_vocab.load(Ordering::Relaxed),
-    }))
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let _ = state.tx.send(NetRequest::Status { reply: reply_tx });
+    match reply_rx.await {
+        Ok(resp) => HttpResponse::Ok().json(resp),
+        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({"error": "worker died"})),
+    }
 }
 
 async fn save(state: web::Data<AppState>) -> HttpResponse {
@@ -236,6 +235,9 @@ pub async fn run_server(net: Network, port: u16) -> std::io::Result<()> {
                             last_save = std::time::Instant::now();
                             let _ = reply.send(());
                         }
+                        NetRequest::Status { reply } => {
+                            let _ = reply.send(net.get_status());
+                        }
                     }
                     request_count += 1;
                 }
@@ -250,10 +252,10 @@ pub async fn run_server(net: Network, port: u16) -> std::io::Result<()> {
                 }
             }
 
-            // 자동 저장: 5분 경과 && 요청이 있었을 때
+            // 자동 저장: 5분 경과 && 요청이 있었을 때 (경량 저장 — 블로킹 최소화)
             if last_save.elapsed() >= auto_save_interval && request_count > 0 {
-                eprintln!("  [자동저장] {}건 처리 후 자동 저장...", request_count);
-                net.save_state();
+                eprintln!("  [자동저장] {}건 처리 후 경량 저장...", request_count);
+                net.save_state_light();
                 last_save = std::time::Instant::now();
                 request_count = 0;
             }
