@@ -23,6 +23,15 @@ impl fmt::Display for RegionType {
 }
 
 impl RegionType {
+    /// 2D 그리드 크기 (cols, rows)
+    pub fn grid_dims(&self) -> (usize, usize) {
+        match self {
+            RegionType::Input => (16, 16),      // 256 = 16×16
+            RegionType::Storage => (32, 16),    // 512 = 32×16
+            RegionType::Emotion | RegionType::Reason | RegionType::Output => (16, 8), // 128 = 16×8
+        }
+    }
+
     /// 연결 가능한 대상 구역
     pub fn targets(&self) -> &[RegionType] {
         use RegionType::*;

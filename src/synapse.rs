@@ -27,6 +27,9 @@ pub struct Synapse {
     pub pre_neuron: NeuronId,
     pub post_neuron: NeuronId,
     pub weight: f64,
+    /// 학습 조절값: feedback으로만 변경, 발화 계산에 가산
+    #[serde(default)]
+    pub modifier: f64,
     pub token: Option<String>,
     pub memory: Option<PathMemory>,
     pub active: bool,
@@ -45,7 +48,8 @@ impl Synapse {
             id,
             pre_neuron: pre,
             post_neuron: post,
-            weight,
+            weight: round2(weight),
+            modifier: 0.0,
             token,
             memory,
             active: true,
@@ -59,6 +63,12 @@ impl Synapse {
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
         serde_json::from_slice(bytes).ok()
     }
+}
+
+/// 소수점 둘째 자리까지 반올림
+#[inline]
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
 }
 
 struct CachedEntry {
@@ -111,6 +121,38 @@ impl SynapseStore {
         }
     }
 
+    /// 서버 시작 시 DB에서 token_index 구축 + 캐시는 max_cached까지만
+    pub fn warm_cache(&self) {
+        let mut indexed = 0;
+        let mut cached = 0;
+        if let Ok(read_txn) = self.db.begin_read() {
+            if let Ok(table) = read_txn.open_table(SYNAPSE_TABLE) {
+                if let Ok(iter) = table.iter() {
+                    let mut st = self.state.lock().unwrap();
+                    for entry in iter {
+                        if let Ok((key, val)) = entry {
+                            let id = key.value().to_string();
+                            if let Some(syn) = Synapse::from_bytes(val.value()) {
+                                // token_index는 전부 등록 (캐시 여부 무관)
+                                if let Some(ref tok) = syn.token {
+                                    st.token_index.entry(tok.clone()).or_default().push(id.clone());
+                                    indexed += 1;
+                                }
+                                // 캐시는 max_cached까지만
+                                if st.cache.len() < self.max_cached && !st.cache.contains_key(&id) {
+                                    Self::put_cache_inner(&mut st, id, syn, false);
+                                    cached += 1;
+                                }
+                            }
+                        }
+                    }
+                    st.db_count = st.db_count.saturating_sub(cached);
+                }
+            }
+        }
+        eprintln!("  [캐시 워밍업] token_index {indexed}개, 캐시 {cached}개 로드");
+    }
+
     pub fn create(
         &self,
         pre: NeuronId,
@@ -150,22 +192,58 @@ impl SynapseStore {
     }
 
     pub fn update_weight(&self, id: &str, new_weight: f64) -> bool {
+        let rounded = round2(new_weight);
         let mut st = self.state.lock().unwrap();
         if let Some(entry) = st.cache.get_mut(id) {
-            entry.synapse.weight = new_weight;
+            entry.synapse.weight = rounded;
             entry.last_access = Instant::now();
             entry.access_count += 1;
             entry.dirty = true;
             return true;
         }
         if let Some(mut synapse) = Self::load_from_db(&self.db, id) {
-            synapse.weight = new_weight;
+            synapse.weight = rounded;
             Self::remove_from_db_inner(&mut st, &self.db, id);
             Self::put_cache_inner(&mut st, id.to_string(), synapse, true);
             Self::evict_if_needed_inner(&mut st, &self.db, self.max_cached);
             return true;
         }
         false
+    }
+
+    pub fn update_modifier(&self, id: &str, new_modifier: f64) -> bool {
+        let clamped = round2(new_modifier.clamp(-1.0, 1.0));
+        let mut st = self.state.lock().unwrap();
+        if let Some(entry) = st.cache.get_mut(id) {
+            entry.synapse.modifier = clamped;
+            entry.last_access = Instant::now();
+            entry.access_count += 1;
+            entry.dirty = true;
+            return true;
+        }
+        if let Some(mut synapse) = Self::load_from_db(&self.db, id) {
+            synapse.modifier = clamped;
+            Self::remove_from_db_inner(&mut st, &self.db, id);
+            Self::put_cache_inner(&mut st, id.to_string(), synapse, true);
+            Self::evict_if_needed_inner(&mut st, &self.db, self.max_cached);
+            return true;
+        }
+        false
+    }
+
+    /// DB에서 weight/modifier만 읽기 (캐시에 올리지 않음, cold 유지)
+    pub fn get_weight_only(&self, id: &str) -> Option<(f64, f64)> {
+        let st = self.state.lock().unwrap();
+        // 캐시에 있으면 캐시에서
+        if let Some(entry) = st.cache.get(id) {
+            return Some((entry.synapse.weight, entry.synapse.modifier));
+        }
+        drop(st);
+        // DB에서 전체 로드 후 weight/modifier만 반환 (캐시에 넣지 않음)
+        if let Some(syn) = Self::load_from_db(&self.db, id) {
+            return Some((syn.weight, syn.modifier));
+        }
+        None
     }
 
     /// 캐시에서 특정 토큰을 가진 시냅스 ID 목록
@@ -280,12 +358,13 @@ impl SynapseStore {
 
     /// 약한 시냅스 + 중복 시냅스 제거 (pruning)
     /// 반환: (제거된 수, 남은 수)
-    pub fn prune(&self, min_weight: f64) -> (usize, usize) {
+    /// 약한/중복 시냅스 제거. 제거된 시냅스의 (pre, post) 뉴런 ID 목록도 반환
+    pub fn prune(&self, min_weight: f64) -> (usize, usize, Vec<(NeuronId, NeuronId)>, Vec<SynapseId>) {
         let mut st = self.state.lock().unwrap();
 
         // 1) 캐시에서 약한 시냅스 수집
         let weak_ids: Vec<SynapseId> = st.cache.iter()
-            .filter(|(_, e)| e.synapse.weight <= min_weight)
+            .filter(|(_, e)| e.synapse.weight < min_weight)
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -322,12 +401,14 @@ impl SynapseStore {
 
         if to_remove.is_empty() {
             let remaining = st.cache.len() + st.db_count;
-            return (0, remaining);
+            return (0, remaining, Vec::new(), Vec::new());
         }
 
-        // 4) 캐시에서 제거
+        // 4) 제거 대상의 뉴런 쌍 수집 + 캐시에서 제거
+        let mut removed_pairs: Vec<(NeuronId, NeuronId)> = Vec::new();
         for id in &to_remove {
             if let Some(entry) = st.cache.remove(id) {
+                removed_pairs.push((entry.synapse.pre_neuron.clone(), entry.synapse.post_neuron.clone()));
                 if let Some(ref tok) = entry.synapse.token {
                     if let Some(ids) = st.token_index.get_mut(tok) {
                         ids.retain(|s| s != id);
@@ -353,14 +434,14 @@ impl SynapseStore {
 
         let removed = to_remove.len();
         let remaining = st.cache.len() + st.db_count;
-        (removed, remaining)
+        (removed, remaining, removed_pairs, to_remove)
     }
 
     /// DB 전체를 스캔해서 약한 시냅스 제거
     /// 캐시에 없는 DB 시냅스도 정리
-    pub fn prune_db(&self, min_weight: f64) -> (usize, usize) {
+    pub fn prune_db(&self, min_weight: f64) -> (usize, usize, Vec<(NeuronId, NeuronId)>) {
         // 먼저 캐시 pruning
-        let (cache_removed, _) = self.prune(min_weight);
+        let (cache_removed, _, mut removed_pairs, _) = self.prune(min_weight);
 
         // DB 스캔
         let mut db_remove_ids: Vec<String> = Vec::new();
@@ -374,9 +455,11 @@ impl SynapseStore {
                         if let Ok((key, val)) = entry {
                             let id = key.value().to_string();
                             if let Some(syn) = Synapse::from_bytes(val.value()) {
+                                let pair = (syn.pre_neuron.clone(), syn.post_neuron.clone());
                                 // 약한 시냅스
-                                if syn.weight <= min_weight {
+                                if syn.weight < min_weight {
                                     db_remove_ids.push(id);
+                                    removed_pairs.push(pair);
                                     continue;
                                 }
                                 // 중복 체크
@@ -384,10 +467,12 @@ impl SynapseStore {
                                 if let Some((best_id, best_w)) = db_best.get_mut(&dup_key) {
                                     if syn.weight > *best_w {
                                         db_remove_ids.push(best_id.clone());
+                                        removed_pairs.push(pair);
                                         *best_id = id;
                                         *best_w = syn.weight;
                                     } else {
                                         db_remove_ids.push(id);
+                                        removed_pairs.push(pair);
                                     }
                                 } else {
                                     db_best.insert(dup_key, (id, syn.weight));
@@ -399,23 +484,31 @@ impl SynapseStore {
             }
         }
 
-        let mut st = self.state.lock().unwrap();
-        if !db_remove_ids.is_empty() {
-            if let Ok(write_txn) = self.db.begin_write() {
-                if let Ok(mut table) = write_txn.open_table(SYNAPSE_TABLE) {
-                    for id in &db_remove_ids {
-                        if table.remove(id.as_str()).ok().flatten().is_some() {
-                            st.db_count = st.db_count.saturating_sub(1);
-                        }
-                    }
-                }
-                write_txn.commit().ok();
-            }
+        let db_remove_count = db_remove_ids.len();
+        {
+            let mut st = self.state.lock().unwrap();
+            st.db_count = st.db_count.saturating_sub(db_remove_count);
         }
 
-        let total_removed = cache_removed + db_remove_ids.len();
+        // DB 삭제는 별도 스레드에서 비동기 수행
+        if !db_remove_ids.is_empty() {
+            let db = Arc::clone(&self.db);
+            std::thread::spawn(move || {
+                if let Ok(write_txn) = db.begin_write() {
+                    if let Ok(mut table) = write_txn.open_table(SYNAPSE_TABLE) {
+                        for id in &db_remove_ids {
+                            table.remove(id.as_str()).ok();
+                        }
+                    }
+                    write_txn.commit().ok();
+                }
+            });
+        }
+
+        let st = self.state.lock().unwrap();
+        let total_removed = cache_removed + db_remove_count;
         let remaining = st.cache.len() + st.db_count;
-        (total_removed, remaining)
+        (total_removed, remaining, removed_pairs)
     }
 
     /// 모든 dirty 시냅스를 DB에 배치 저장하고 clean으로 표시
@@ -428,41 +521,53 @@ impl SynapseStore {
         if dirty_synapses.is_empty() {
             return;
         }
-        let _ = writeln!(std::io::stderr(), "  [DB] dirty 시냅스 {}개 저장 중...", dirty_synapses.len());
-        if let Ok(write_txn) = self.db.begin_write() {
-            if let Ok(mut table) = write_txn.open_table(SYNAPSE_TABLE) {
-                for syn in &dirty_synapses {
-                    let bytes = syn.to_bytes();
-                    table.insert(syn.id.as_str(), bytes.as_slice()).ok();
-                }
-            }
-            if write_txn.commit().is_ok() {
-                for entry in st.cache.values_mut() {
-                    entry.dirty = false;
-                }
-                let _ = writeln!(std::io::stderr(), "  [DB] dirty 시냅스 저장 완료");
-            }
+        // dirty 플래그 먼저 해제 (lock 빨리 풀기)
+        for entry in st.cache.values_mut() {
+            entry.dirty = false;
         }
+        drop(st); // lock 해제
+
+        // DB 저장은 별도 스레드에서 비동기 수행
+        let db = Arc::clone(&self.db);
+        let count = dirty_synapses.len();
+        std::thread::spawn(move || {
+            let _ = writeln!(std::io::stderr(), "  [DB] dirty 시냅스 {count}개 저장 중...");
+            if let Ok(write_txn) = db.begin_write() {
+                if let Ok(mut table) = write_txn.open_table(SYNAPSE_TABLE) {
+                    for syn in &dirty_synapses {
+                        let bytes = syn.to_bytes();
+                        table.insert(syn.id.as_str(), bytes.as_slice()).ok();
+                    }
+                }
+                if write_txn.commit().is_ok() {
+                    let _ = writeln!(std::io::stderr(), "  [DB] dirty 시냅스 저장 완료");
+                }
+            }
+        });
     }
 
-    /// 네트워크 상태를 DB에 저장
+    /// 네트워크 상태를 DB에 비동기 저장
     pub fn save_network_state(&self, data: &[u8]) {
-        match self.db.begin_write() {
-            Ok(write_txn) => {
-                match write_txn.open_table(STATE_TABLE) {
-                    Ok(mut table) => {
-                        if let Err(e) = table.insert("network", data) {
-                            eprintln!("  [DB] 상태 insert 실패: {e}");
+        let db = Arc::clone(&self.db);
+        let data = data.to_vec();
+        std::thread::spawn(move || {
+            match db.begin_write() {
+                Ok(write_txn) => {
+                    match write_txn.open_table(STATE_TABLE) {
+                        Ok(mut table) => {
+                            if let Err(e) = table.insert("network", data.as_slice()) {
+                                eprintln!("  [DB] 상태 insert 실패: {e}");
+                            }
                         }
+                        Err(e) => eprintln!("  [DB] STATE_TABLE 열기 실패: {e}"),
                     }
-                    Err(e) => eprintln!("  [DB] STATE_TABLE 열기 실패: {e}"),
+                    if let Err(e) = write_txn.commit() {
+                        eprintln!("  [DB] 상태 커밋 실패: {e}");
+                    }
                 }
-                if let Err(e) = write_txn.commit() {
-                    eprintln!("  [DB] 상태 커밋 실패: {e}");
-                }
+                Err(e) => eprintln!("  [DB] write 트랜잭션 시작 실패: {e}"),
             }
-            Err(e) => eprintln!("  [DB] write 트랜잭션 시작 실패: {e}"),
-        }
+        });
     }
 
     /// DB에서 네트워크 상태 로드

@@ -1,3 +1,4 @@
+mod fire_engine;
 mod hippocampus;
 mod network;
 mod neuron;
@@ -16,6 +17,7 @@ use std::sync::Arc;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let serve_mode = args.iter().any(|a| a == "--serve");
+    let reset_mode = args.iter().any(|a| a == "--reset");
     let port: u16 = args.iter()
         .position(|a| a == "--port")
         .and_then(|i| args.get(i + 1))
@@ -30,13 +32,17 @@ fn main() {
     let db_path = PathBuf::from("data/network.redb");
     let mut net = Network::new(db_path.clone(), 50000, Arc::clone(&shutdown));
 
-    if !net.try_load_state() {
-        println!("  새 네트워크 생성 (기존 시냅스 DB 유지)...");
-        net.add_region(RegionType::Input, 128);
-        net.add_region(RegionType::Emotion, 64);
-        net.add_region(RegionType::Reason, 64);
-        net.add_region(RegionType::Storage, 128);
-        net.add_region(RegionType::Output, 64);
+    if reset_mode || !net.try_load_state() {
+        if reset_mode {
+            println!("  [리셋] 네트워크 구조 재생성 (시냅스 DB는 유지)...");
+        } else {
+            println!("  새 네트워크 생성 (기존 시냅스 DB 유지)...");
+        }
+        net.add_region(RegionType::Input, 256);
+        net.add_region(RegionType::Emotion, 128);
+        net.add_region(RegionType::Reason, 128);
+        net.add_region(RegionType::Storage, 512);
+        net.add_region(RegionType::Output, 128);
         // 초기 랜덤 빈 시냅스: 구조적 연결 씨앗 (해마가 학습으로 다듬음)
         net.seed_random_synapses(30);
     }
@@ -50,10 +56,7 @@ fn main() {
 
 #[tokio::main]
 async fn run_server(net: Network, port: u16) {
-    use actix_web::web;
-
     println!("=== LV-SNN 서버 모드 ===");
-    let state = web::Data::new(server::AppState::new(net));
 
     println!("  POST /fire       {{\"text\": \"...\"}})");
     println!("  POST /teach      {{\"input\": \"...\", \"target\": \"...\"}}");
@@ -62,7 +65,7 @@ async fn run_server(net: Network, port: u16) {
     println!("  POST /save");
     println!();
 
-    if let Err(e) = server::run_server(state, port).await {
+    if let Err(e) = server::run_server(net, port).await {
         eprintln!("서버 오류: {e}");
     }
 }
