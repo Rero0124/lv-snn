@@ -1,25 +1,25 @@
 use crate::network::Network;
 use actix_web::{web, App, HttpServer, HttpResponse};
-use crossbeam::channel;
 use serde::Deserialize;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
+use crossbeam::channel;
 
-const AUTO_SAVE_INTERVAL: Duration = Duration::from_secs(300); // 5분
-
-// ── 요청 타입 ──
+const AUTO_SAVE_INTERVAL: Duration = Duration::from_secs(300);
 
 enum NetRequest {
     Fire { text: String, reply: oneshot::Sender<serde_json::Value> },
     Teach { input: String, target: String, reply: oneshot::Sender<serde_json::Value> },
     Feedback { fire_id: u64, positive: bool, strength: f64, reply: oneshot::Sender<()> },
-    Status { reply: oneshot::Sender<serde_json::Value> },
     Save { reply: oneshot::Sender<()> },
 }
 
 struct AppState {
     tx: channel::Sender<NetRequest>,
+    cached_status: Arc<Mutex<serde_json::Value>>,
+    busy: Arc<AtomicBool>,
 }
 
 #[derive(Deserialize)]
@@ -36,8 +36,6 @@ pub struct FeedbackReq {
     pub strength: f64,
 }
 fn default_strength() -> f64 { 1.0 }
-
-// ── 핸들러 ──
 
 async fn fire(state: web::Data<AppState>, req: web::Json<FireReq>) -> HttpResponse {
     let (tx, rx) = oneshot::channel();
@@ -67,12 +65,9 @@ async fn feedback(state: web::Data<AppState>, req: web::Json<FeedbackReq>) -> Ht
 }
 
 async fn status(state: web::Data<AppState>) -> HttpResponse {
-    let (tx, rx) = oneshot::channel();
-    let _ = state.tx.send(NetRequest::Status { reply: tx });
-    match rx.await {
-        Ok(resp) => HttpResponse::Ok().json(resp),
-        Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({"error": "worker died"})),
-    }
+    let mut s = state.cached_status.lock().unwrap().clone();
+    s["busy"] = serde_json::json!(state.busy.load(Ordering::Relaxed));
+    HttpResponse::Ok().json(s)
 }
 
 async fn save(state: web::Data<AppState>) -> HttpResponse {
@@ -86,19 +81,30 @@ async fn save(state: web::Data<AppState>) -> HttpResponse {
 
 pub async fn run_server(net: Network, port: u16, save_path: PathBuf, debug: bool) -> std::io::Result<()> {
     let (tx, rx) = channel::bounded::<NetRequest>(256);
-    let state = web::Data::new(AppState { tx });
+    let cached_status = Arc::new(Mutex::new(net.get_status()));
+    let busy = Arc::new(AtomicBool::new(false));
+
+    let state = web::Data::new(AppState {
+        tx,
+        cached_status: Arc::clone(&cached_status),
+        busy: Arc::clone(&busy),
+    });
+
     let save_path_display = save_path.display().to_string();
 
     std::thread::Builder::new()
-        .name("worker".into())
+        .name("tick-loop".into())
         .spawn(move || {
             let mut net = net;
             net.debug = debug;
             let mut last_save = Instant::now();
+            let mut last_status_update = Instant::now();
             let mut requests_since_save = 0u64;
+
             loop {
-                match rx.recv_timeout(Duration::from_secs(10)) {
+                match rx.try_recv() {
                     Ok(req) => {
+                        busy.store(true, Ordering::Relaxed);
                         requests_since_save += 1;
                         match req {
                             NetRequest::Fire { text, reply } => {
@@ -126,21 +132,18 @@ pub async fn run_server(net: Network, port: u16, save_path: PathBuf, debug: bool
                                 }
                                 let _ = reply.send(resp);
                             }
-                            NetRequest::Teach { input, target: _, reply } => {
-                                // teach 제거 — fire만 수행
-                                let fire_id = net.fire(&input);
+                            NetRequest::Teach { input, target, reply } => {
+                                let fire_id = net.teach(&input, &target);
                                 let output = net.get_last_output();
                                 let _ = reply.send(serde_json::json!({
                                     "fire_id": fire_id,
                                     "output": output,
+                                    "target": target,
                                 }));
                             }
                             NetRequest::Feedback { fire_id, positive, strength, reply } => {
                                 net.feedback(fire_id, positive, strength);
                                 let _ = reply.send(());
-                            }
-                            NetRequest::Status { reply } => {
-                                let _ = reply.send(net.get_status());
                             }
                             NetRequest::Save { reply } => {
                                 net.save(&save_path);
@@ -149,18 +152,24 @@ pub async fn run_server(net: Network, port: u16, save_path: PathBuf, debug: bool
                                 let _ = reply.send(());
                             }
                         }
-                    },
-                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
-                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                        // 종료 전 저장
-                        if requests_since_save > 0 {
-                            net.save(&save_path);
+                        // 요청 처리 후 status 캐시 갱신
+                        *cached_status.lock().unwrap() = net.get_status();
+                        busy.store(false, Ordering::Relaxed);
+                    }
+                    Err(crossbeam::channel::TryRecvError::Empty) => {
+                        net.idle_tick();
+                        // 1초마다 status 캐시 갱신
+                        if last_status_update.elapsed() >= Duration::from_secs(1) {
+                            *cached_status.lock().unwrap() = net.get_status();
+                            last_status_update = Instant::now();
                         }
+                    }
+                    Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                        if requests_since_save > 0 { net.save(&save_path); }
                         break;
                     }
                 }
 
-                // 자동 저장
                 if last_save.elapsed() >= AUTO_SAVE_INTERVAL && requests_since_save > 0 {
                     net.save(&save_path);
                     last_save = Instant::now();

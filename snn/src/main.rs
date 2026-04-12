@@ -1,3 +1,4 @@
+mod bitmap;
 mod network;
 mod neuron;
 mod region;

@@ -8,12 +8,17 @@ use std::path::Path;
 
 // ── 상수 ──
 
-const MAX_TICKS: u64 = 30;
-const INITIAL_WEIGHT: f64 = 0.4;
-const MIN_WEIGHT: f64 = 0.01;
-const PRUNE_INTERVAL: u64 = 50;
-const EMOTION_COUNT: usize = 2000;
-const REASON_COUNT: usize = 2000;
+const INITIAL_WEIGHT: f64 = 0.2;
+const MIN_WEIGHT: f64 = 0.1;
+const PRUNE_INTERVAL: u64 = 10_000;
+const EMOTION_COUNT: usize = 5000;
+const REASON_COUNT: usize = 5000;
+
+// ── 수면 파라미터 ──
+const SLEEP_FIRE_INTERVAL: u64 = 60_000;
+const SLEEP_TICK_INTERVAL: u64 = 500_000;
+const SLEEP_DURATION_TICKS: u64 = 1_000;
+const SLEEP_WEIGHT_SCALE: f64 = 0.92;
 
 // ── 발화 기록 ──
 
@@ -27,53 +32,69 @@ pub struct DeliveryTrace {
     pub tick: u64,
 }
 
+pub struct EligibilityTrace {
+    pub neuron_idx: usize,
+    pub synapse_idx: usize,
+    pub dw: f64,
+}
+
 pub struct FireRecord {
     pub id: u64,
     pub output: String,
     pub output_tokens: Vec<(String, f64)>,
     pub spiked_neurons: Vec<(NeuronId, u64)>,
     pub traces: Vec<DeliveryTrace>,
+    pub eligibility: Vec<EligibilityTrace>,
+}
+
+pub struct ActiveStimulus {
+    pub fire_id: u64,
+    pub input_indices: Vec<usize>,
+    pub remaining_sustain: u64,
+    pub elapsed_ticks: u64,
+    pub silent_ticks: u64,
+    pub all_spikes: Vec<(NeuronId, u64)>,
+    pub output_spikes: Vec<(NeuronId, u64)>,
+    pub traces: Vec<DeliveryTrace>,
+    pub collect_traces: bool,
 }
 
 // ── 네트워크 ──
 
 pub struct Network {
-    /// 모든 뉴런 (Vec index = NeuronId)
     neurons: Vec<Neuron>,
-    /// 토큰 → seq
     vocab: HashMap<String, u32>,
-    /// seq → 토큰
     reverse_vocab: Vec<String>,
-    /// seq → 입력 뉴런 인덱스
     input_idx: Vec<usize>,
-    /// seq → 출력 뉴런 인덱스
     output_idx: Vec<usize>,
-    /// 감정 뉴런 범위 [start, end)
     emotion_range: (usize, usize),
-    /// 이성 뉴런 범위 [start, end)
     reason_range: (usize, usize),
 
-    fire_records: Vec<FireRecord>,
+    pub fire_records: Vec<FireRecord>,
     next_fire_id: u64,
     pub debug: bool,
+    pub active_stimuli: Vec<ActiveStimulus>,
+    recent_spikes: Vec<(NeuronId, u64)>,
     pub threshold: f64,
+    pub noise_range: f64,
     sprout_cooldown: HashMap<NeuronId, u64>,
     global_tick: u64,
+    fires_since_sleep: u64,
+    last_sleep_tick: u64,
 }
 
 impl Network {
     pub fn new() -> Self {
         let mut neurons: Vec<Neuron> = Vec::new();
 
-        // 감정 뉴런 (20% 억제성)
+        // 감정 뉴런 (30% 억제성)
         let emotion_start = neurons.len();
-        let inhibitory_boundary = (EMOTION_COUNT as f64 * 0.8) as usize;
         let cols = 50usize;
         for i in 0..EMOTION_COUNT {
             let x = (i % cols) as f32;
             let y = (i / cols) as f32;
             let id = neurons.len() as NeuronId;
-            if i >= inhibitory_boundary {
+            if i % 10 >= 7 {
                 neurons.push(Neuron::new_inhibitory(id, x, y));
             } else {
                 neurons.push(Neuron::new(id, x, y));
@@ -81,14 +102,13 @@ impl Network {
         }
         let emotion_end = neurons.len();
 
-        // 이성 뉴런 (20% 억제성)
+        // 이성 뉴런 (30% 억제성)
         let reason_start = neurons.len();
-        let inhibitory_boundary = (REASON_COUNT as f64 * 0.8) as usize;
         for i in 0..REASON_COUNT {
             let x = (i % cols) as f32;
             let y = (i / cols) as f32 + 100.0;
             let id = neurons.len() as NeuronId;
-            if i >= inhibitory_boundary {
+            if i % 10 >= 7 {
                 neurons.push(Neuron::new_inhibitory(id, x, y));
             } else {
                 neurons.push(Neuron::new(id, x, y));
@@ -107,9 +127,14 @@ impl Network {
             fire_records: Vec::new(),
             next_fire_id: 1,
             debug: false,
-            threshold: 0.5,
+            active_stimuli: Vec::new(),
+            recent_spikes: Vec::new(),
+            threshold: 0.72,
+            noise_range: 0.2,
             sprout_cooldown: HashMap::new(),
             global_tick: 0,
+            fires_since_sleep: 0,
+            last_sleep_tick: 0,
         };
 
         // 초기 자모 등록
@@ -119,7 +144,7 @@ impl Network {
         }
 
         // 초기 랜덤 시냅스
-        net.seed_random_synapses(30);
+        net.seed_random_synapses(10);
 
         let total_synapses: usize = net.neurons.iter().map(|n| n.synapses.len()).sum();
         eprintln!("  [초기화] 어휘 {}개, 뉴런 {}개 (감정 {}, 이성 {}, 입출력 {}), 시냅스 {}개",
@@ -128,27 +153,25 @@ impl Network {
         net
     }
 
-    /// 토큰 등록: 입력 뉴런 + 출력 뉴런 생성
     fn register_token(&mut self, token: &str) -> u32 {
         if let Some(&seq) = self.vocab.get(token) {
             return seq;
         }
-
         let seq = self.reverse_vocab.len() as u32;
         self.vocab.insert(token.to_string(), seq);
         self.reverse_vocab.push(token.to_string());
 
-        // 입력 뉴런
         let x = (seq % 20) as f32;
         let y_in = -10.0 + (seq / 20) as f32;
         let input_id = self.neurons.len() as NeuronId;
-        self.neurons.push(Neuron::new(input_id, x, y_in));
+        self.neurons.push(Neuron::new_io(input_id, x, y_in));
         self.input_idx.push(input_id as usize);
 
-        // 출력 뉴런
         let y_out = 200.0 + (seq / 20) as f32;
         let output_id = self.neurons.len() as NeuronId;
-        self.neurons.push(Neuron::new(output_id, x, y_out));
+        let mut out_neuron = Neuron::new_io(output_id, x, y_out);
+        // 출력 뉴런 excitability 기본값(1.0) 유지
+        self.neurons.push(out_neuron);
         self.output_idx.push(output_id as usize);
 
         seq
@@ -169,7 +192,6 @@ impl Network {
         if idx >= es && idx < ee { RegionType::Emotion }
         else if idx >= rs && idx < re { RegionType::Reason }
         else {
-            // 입력/출력: input_idx에 있으면 Input, output_idx에 있으면 Output
             if self.output_idx.contains(&idx) { RegionType::Output }
             else { RegionType::Input }
         }
@@ -207,6 +229,8 @@ impl Network {
             Some(candidates.last()?.0)
         }
 
+        let w = INITIAL_WEIGHT;
+
         // 입력 → 감정/이성
         let input_indices: Vec<usize> = self.input_idx.clone();
         for &idx in &input_indices {
@@ -214,139 +238,368 @@ impl Network {
             for _ in 0..per_neuron {
                 if let Some(target) = pick_nearby(&mut rng, x, y, &middle_info, idx) {
                     let tid = self.neurons[target].id;
-                    self.neurons[idx].add_synapse(tid, INITIAL_WEIGHT);
+                    self.neurons[idx].add_seed_synapse(tid, w);
                 }
             }
         }
 
-        // 감정/이성 내부 + 상호 연결 + 일부 → 출력
+        // 감정/이성: 내부/상호 80% + 출력 20%
         let output_info: Vec<(usize, f32, f32)> = self.output_idx.iter()
             .map(|&i| (i, self.neurons[i].x, self.neurons[i].y)).collect();
+        let middle_per = 30usize;
         let middle_copy = middle_info.clone();
         for &(idx, x, y) in &middle_copy {
-            for _ in 0..per_neuron {
-                // 80% 내부/상호, 20% → 출력
+            for _ in 0..middle_per {
                 if rng.random_bool(0.8) {
                     if let Some(target) = pick_nearby(&mut rng, x, y, &middle_info, idx) {
                         let tid = self.neurons[target].id;
-                        self.neurons[idx].add_synapse(tid, INITIAL_WEIGHT);
+                        self.neurons[idx].add_seed_synapse(tid, w);
                     }
-                } else {
+                } else if !output_info.is_empty() {
                     let target = &output_info[rng.random_range(0..output_info.len())];
                     let tid = self.neurons[target.0].id;
-                    self.neurons[idx].add_synapse(tid, INITIAL_WEIGHT);
+                    self.neurons[idx].add_seed_synapse(tid, 1.0);
                 }
             }
         }
     }
 
-    /// 발화
-    pub fn fire(&mut self, text: &str) -> u64 {
+    /// 자극 주입
+    pub fn inject_stimulus(&mut self, text: &str) -> u64 {
         let fire_id = self.next_fire_id;
         self.next_fire_id += 1;
-        let fire_start = std::time::Instant::now();
-
         let jamo_list = tokenizer::decompose_to_jamo(text);
         let seqs: Vec<u32> = jamo_list.iter().map(|j| self.get_seq(j)).collect();
-
-        // 모든 뉴런 potential 리셋
-        for n in &mut self.neurons {
-            n.potential = 0.0;
-        }
-
-        // 입력 뉴런 활성화
-        for &seq in &seqs {
-            let idx = self.input_neuron(seq);
+        let input_indices: Vec<usize> = seqs.iter().map(|&s| self.input_neuron(s)).collect();
+        for &idx in &input_indices {
             self.neurons[idx].potential = 1.0;
         }
+        self.active_stimuli.push(ActiveStimulus {
+            fire_id,
+            input_indices,
+            remaining_sustain: 4,
+            elapsed_ticks: 0,
+            silent_ticks: 0,
+            all_spikes: Vec::new(),
+            output_spikes: Vec::new(),
+            traces: Vec::new(),
+            collect_traces: self.debug,
+        });
+        fire_id
+    }
 
-        let mut all_spikes: Vec<(NeuronId, u64)> = Vec::new();
-        let mut output_spikes: Vec<(NeuronId, u64)> = Vec::new();
-        let mut traces: Vec<DeliveryTrace> = Vec::new();
-        let collect_traces = self.debug;
+    /// idle 틱
+    pub fn idle_tick(&mut self) {
+        self.global_tick += 1;
+        let global_tick = self.global_tick;
+
+        for n in &mut self.neurons {
+            n.decay();
+        }
+
         let threshold = self.threshold;
+        let noise_range = self.noise_range;
+        let fired: Vec<(NeuronId, Vec<(NeuronId, f64)>)> = self.neurons
+            .par_iter_mut()
+            .filter_map(|n| {
+                n.try_fire(global_tick, threshold, noise_range, false)
+                    .map(|deliveries| (n.id, deliveries))
+            })
+            .collect();
 
-        for tick in 0..MAX_TICKS {
-            self.global_tick += 1;
+        let mut tick_spikes: Vec<NeuronId> = Vec::new();
+        for (nid, deliveries) in &fired {
+            tick_spikes.push(*nid);
+            for (target, weight) in deliveries {
+                let tidx = *target as usize;
+                if tidx < self.neurons.len() {
+                    self.neurons[tidx].receive(*weight);
+                }
+            }
+        }
 
-            // 병렬 발화 판정
-            let fired: Vec<(NeuronId, f64, Vec<(NeuronId, f64)>)> = self.neurons
-                .par_iter_mut()
-                .filter_map(|n| {
-                    let pot = n.potential;
-                    n.try_fire(tick, threshold).map(|deliveries| (n.id, pot, deliveries))
-                })
-                .collect();
+        for &nid in &tick_spikes {
+            self.recent_spikes.push((nid, global_tick));
+        }
 
-            if fired.is_empty() {
-                break;
+        if global_tick % 10_000 == 0 {
+            for n in &mut self.neurons {
+                n.homeostasis();
+            }
+        }
+
+        if global_tick % 500 == 0 && !self.recent_spikes.is_empty() {
+            let spikes: Vec<(NeuronId, u64)> = self.recent_spikes.drain(..).collect();
+            self.sprout(&spikes);
+        }
+    }
+
+    pub fn tick(&mut self) -> Vec<u64> {
+        self.global_tick += 1;
+        let global_tick = self.global_tick;
+
+        for stim in &mut self.active_stimuli {
+            stim.elapsed_ticks += 1;
+            if stim.remaining_sustain > 0 {
+                for &idx in &stim.input_indices {
+                    self.neurons[idx].potential = 1.0;
+                }
+                stim.remaining_sustain -= 1;
+            }
+        }
+
+        for n in &mut self.neurons {
+            n.decay();
+        }
+
+        let threshold = self.threshold;
+        let noise_range = self.noise_range;
+
+        let fired: Vec<(NeuronId, f64, Vec<(NeuronId, f64)>)> = self.neurons
+            .par_iter_mut()
+            .filter_map(|n| {
+                let pot = n.potential;
+                n.try_fire(global_tick, threshold, noise_range, true)
+                    .map(|deliveries| (n.id, pot, deliveries))
+            })
+            .collect();
+
+        let mut tick_spikes: Vec<NeuronId> = Vec::new();
+        let output_idx_snapshot = self.output_idx.clone();
+
+        for (nid, from_potential, deliveries) in &fired {
+            let nid = *nid;
+            let from_potential = *from_potential;
+            tick_spikes.push(nid);
+
+            let is_output = output_idx_snapshot.contains(&(nid as usize));
+
+            for stim in &mut self.active_stimuli {
+                if stim.elapsed_ticks <= 14 {
+                    stim.all_spikes.push((nid, global_tick));
+                }
+                if is_output {
+                    stim.output_spikes.push((nid, global_tick));
+                }
             }
 
-            for (nid, from_potential, deliveries) in fired {
-                all_spikes.push((nid, tick));
-                if self.is_output_neuron(nid as usize) {
-                    output_spikes.push((nid, tick));
+            for (target, weight) in deliveries {
+                let target = *target;
+                let weight = *weight;
+                let tidx = target as usize;
+                if tidx >= self.neurons.len() { continue; }
+
+                let to_before = self.neurons[tidx].potential;
+                self.neurons[tidx].receive(weight);
+
+                for stim in &mut self.active_stimuli {
+                    if stim.collect_traces {
+                        stim.traces.push(DeliveryTrace {
+                            from: nid, to: target, from_potential,
+                            to_before, weight, delivered: weight,
+                            tick: global_tick,
+                        });
+                    }
                 }
-                for (target, weight) in deliveries {
-                    let tidx = target as usize;
-                    if tidx < self.neurons.len() {
-                        if collect_traces {
-                            let to_before = self.neurons[tidx].potential;
-                            self.neurons[tidx].receive(weight);
-                            traces.push(DeliveryTrace {
-                                from: nid, to: target, from_potential,
-                                to_before, weight, delivered: weight, tick,
-                            });
-                        } else {
-                            self.neurons[tidx].receive(weight);
+            }
+        }
+
+        // STDP + 헤비안: 발화 타이밍 기반 강화/약화 + 동시 발화 강화
+        const STDP_A_PLUS_BASE: f64 = 0.015;
+        const STDP_A_MINUS_BASE: f64 = 0.006;
+        const STDP_TAU: f64 = 20.0;
+        const HEBBIAN_DW: f64 = 0.01;
+        const BCM_TARGET_RATE: f64 = 25.0; // 목표 발화 수
+        // borrow 충돌 방지: last_spike_tick 스냅샷
+        let spike_ticks: Vec<Option<u64>> = self.neurons.iter()
+            .map(|n| n.last_spike_tick).collect();
+        let tick_spike_set: std::collections::HashSet<NeuronId> =
+            tick_spikes.iter().cloned().collect();
+        // BCM: 뉴런별 fire_count_window 스냅샷
+        let fire_counts: Vec<u32> = self.neurons.iter()
+            .map(|n| n.fire_count_window).collect();
+        for &nid in &tick_spikes {
+            let pidx = nid as usize;
+            if pidx >= self.neurons.len() { continue; }
+            // BCM 스케일: 많이 발화한 뉴런은 LTP 약화, 적게 발화한 뉴런은 LTP 강화
+            let bcm_scale = BCM_TARGET_RATE / (fire_counts[pidx] as f64 + BCM_TARGET_RATE);
+            let stdp_a_plus = STDP_A_PLUS_BASE * bcm_scale;
+            let stdp_a_minus = STDP_A_MINUS_BASE * (2.0 - bcm_scale); // 과활성 뉴런은 LTD 강화
+            for syn in &mut self.neurons[pidx].synapses {
+                let tidx = syn.target as usize;
+                if tidx >= spike_ticks.len() { continue; }
+
+                // 헤비안: pre와 post가 같은 틱에 동시 발화
+                if tick_spike_set.contains(&syn.target) {
+                    let ltp_bonus = syn.accumulate_ltp();
+                    syn.weight = (syn.weight + HEBBIAN_DW + ltp_bonus).min(1.0);
+                    continue;
+                }
+
+                if let Some(post_tick) = spike_ticks[tidx] {
+                    let dt = post_tick as f64 - global_tick as f64;
+                    if dt > 0.0 && dt < 50.0 {
+                        let ltp_bonus = syn.accumulate_ltp();
+                        let dw = stdp_a_plus * (-dt / STDP_TAU).exp() + ltp_bonus;
+                        syn.weight = (syn.weight + dw).min(1.0);
+                    } else if dt < 0.0 && dt > -50.0 {
+                        let dw = stdp_a_minus * (dt / STDP_TAU).exp();
+                        syn.weight = (syn.weight - dw).max(0.0);
+                    }
+                }
+            }
+        }
+
+        for &nid in &tick_spikes {
+            self.recent_spikes.push((nid, global_tick));
+        }
+
+        let has_spikes = !tick_spikes.is_empty();
+        for stim in &mut self.active_stimuli {
+            if has_spikes {
+                stim.silent_ticks = 0;
+            } else if stim.remaining_sustain == 0 {
+                stim.silent_ticks += 1;
+            }
+        }
+
+        let mut completed_ids: Vec<u64> = Vec::new();
+        let mut completed_stimuli: Vec<ActiveStimulus> = Vec::new();
+        let mut remaining: Vec<ActiveStimulus> = Vec::new();
+
+        for stim in self.active_stimuli.drain(..) {
+            if stim.silent_ticks >= 1 {
+                completed_ids.push(stim.fire_id);
+                completed_stimuli.push(stim);
+            } else {
+                remaining.push(stim);
+            }
+        }
+        self.active_stimuli = remaining;
+
+        for stim in completed_stimuli {
+            let eligibility = self.compute_eligibility(&stim.all_spikes);
+
+            let mut output_tokens: Vec<(String, f64)> = Vec::new();
+            let mut seen_seqs = std::collections::HashSet::new();
+            for &(nid, _) in &stim.output_spikes {
+                let idx = nid as usize;
+                if let Some(seq) = self.output_idx.iter().position(|&oi| oi == idx) {
+                    if seen_seqs.insert(seq) {
+                        if let Some(token) = self.reverse_vocab.get(seq) {
+                            output_tokens.push((token.clone(), 1.0));
                         }
                     }
                 }
             }
 
-            if output_spikes.len() >= 50 {
-                break;
+            let token_strs: Vec<String> = output_tokens.iter().map(|(t, _)| t.clone()).collect();
+            let output = tokenizer::recompose_tokens(&token_strs);
+
+            eprintln!(
+                "  [fire #{}] ticks={}, spikes={}, output_spikes={}",
+                stim.fire_id, stim.elapsed_ticks,
+                stim.all_spikes.len(), stim.output_spikes.len(),
+            );
+
+            self.fire_records.push(FireRecord {
+                id: stim.fire_id,
+                output,
+                output_tokens,
+                traces: stim.traces,
+                spiked_neurons: stim.all_spikes,
+                eligibility,
+            });
+            if self.fire_records.len() > 100 {
+                self.fire_records.remove(0);
             }
         }
 
-        // STDP
-        self.apply_stdp(&all_spikes);
-
-        // 축삭발아
-        self.sprout(&all_spikes);
-
-        // 출력: 발화한 출력 뉴런 → seq → 토큰
-        let mut output_tokens: Vec<(String, f64)> = Vec::new();
-        let mut seen_seqs = std::collections::HashSet::new();
-        for &(nid, _) in &output_spikes {
-            let idx = nid as usize;
-            // output_idx에서 seq 찾기
-            if let Some(seq) = self.output_idx.iter().position(|&oi| oi == idx) {
-                if seen_seqs.insert(seq) {
-                    if let Some(token) = self.reverse_vocab.get(seq) {
-                        output_tokens.push((token.clone(), 1.0));
-                    }
-                }
+        if global_tick % 10_000 == 0 {
+            for n in &mut self.neurons {
+                n.homeostasis();
             }
         }
 
-        let token_strs: Vec<String> = output_tokens.iter().map(|(t, _)| t.clone()).collect();
-        let output = tokenizer::recompose_tokens(&token_strs);
+        if global_tick % 500 == 0 && !self.recent_spikes.is_empty() {
+            let spikes: Vec<(NeuronId, u64)> = self.recent_spikes.drain(..).collect();
+            self.sprout(&spikes);
+        }
 
-        let elapsed = fire_start.elapsed();
-        eprint!(
-            "  [fire #{fire_id}] {:.1}ms, spikes={}, output_spikes={}\n",
-            elapsed.as_secs_f64() * 1000.0,
-            all_spikes.len(),
-            output_spikes.len(),
+        completed_ids
+    }
+
+    /// 수면
+    pub fn enter_sleep(&mut self) {
+        let enter_tick = self.global_tick;
+        let fires = self.fires_since_sleep;
+
+        // 1. 시냅스 fatigue 감소 + sleep LTD (wake 초과분 정리)
+        const SLEEP_LTD: f64 = 0.002;
+        let mut scaled = 0usize;
+        for n in &mut self.neurons {
+            for s in &mut n.synapses {
+                s.fatigue *= SLEEP_WEIGHT_SCALE;
+                s.weight = (s.weight - SLEEP_LTD).max(0.0);
+                scaled += 1;
+            }
+        }
+
+        // 2. 전역 흥분 상태 리셋
+        for n in &mut self.neurons {
+            n.potential = 0.0;
+            n.excitability = 1.0;
+            n.fire_count_window = 0;
+        }
+
+        // 3. 휴지기: 순수 감쇠 (fatigue 자연 회복 포함)
+        for _ in 0..SLEEP_DURATION_TICKS {
+            self.global_tick += 1;
+            for n in &mut self.neurons {
+                n.decay();
+            }
+        }
+
+        // 4. 수면 중 가지치기 비활성 — BCM이 과강화 억제, 일반 prune에 위임
+        let pruned = 0usize;
+
+        self.fires_since_sleep = 0;
+        self.last_sleep_tick = self.global_tick;
+        self.recent_spikes.clear();
+
+        eprintln!(
+            "  [sleep] tick {} → {} (지속 {}틱, 누적 {}fire, {}시냅스 fatigue×{})",
+            enter_tick, self.global_tick, SLEEP_DURATION_TICKS,
+            fires, scaled, SLEEP_WEIGHT_SCALE,
         );
+    }
 
-        self.fire_records.push(FireRecord {
-            id: fire_id, output: output.clone(), output_tokens,
-            traces, spiked_neurons: all_spikes,
-        });
-        if self.fire_records.len() > 100 {
-            self.fire_records.remove(0);
+    fn should_sleep(&self) -> bool {
+        self.fires_since_sleep >= SLEEP_FIRE_INTERVAL
+            || self.global_tick.saturating_sub(self.last_sleep_tick) >= SLEEP_TICK_INTERVAL
+    }
+
+    /// 발화 (동기 방식)
+    pub fn fire(&mut self, text: &str) -> u64 {
+        if self.should_sleep() {
+            self.enter_sleep();
+        }
+        self.fires_since_sleep += 1;
+
+        let fire_id = self.inject_stimulus(text);
+        loop {
+            let completed = self.tick();
+            if completed.contains(&fire_id) { break; }
+        }
+
+        if self.threshold < 1.0 {
+            let new_threshold = (0.72 + (fire_id / 10_000) as f64 * 0.001).min(1.0);
+            if new_threshold > self.threshold {
+                self.threshold = new_threshold;
+            }
+        }
+        if self.noise_range > 0.1 {
+            self.noise_range = (0.2 - (fire_id / 10_000) as f64 * 0.001).max(0.1);
         }
 
         if fire_id % PRUNE_INTERVAL == 0 {
@@ -356,55 +609,45 @@ impl Network {
             }
         }
 
-        // 임계값 점진 상승: 0.5 → 1.0 (10만 fire마다 0.001씩)
-        if self.threshold < 1.0 {
-            self.threshold = (0.5 + (fire_id / 100_000) as f64 * 0.001).min(1.0);
-        }
-
         fire_id
     }
 
-    fn apply_stdp(&mut self, spikes: &[(NeuronId, u64)]) {
+    fn compute_eligibility(&self, spikes: &[(NeuronId, u64)]) -> Vec<EligibilityTrace> {
         let spike_map: HashMap<NeuronId, u64> = spikes.iter().cloned().collect();
+        let mut eligibility = Vec::new();
 
         for &(pre_id, pre_tick) in spikes {
             let pidx = pre_id as usize;
             if pidx >= self.neurons.len() { continue; }
-            let targets: Vec<(usize, NeuronId)> = self.neurons[pidx]
-                .synapses.iter().enumerate()
-                .map(|(i, s)| (i, s.target)).collect();
 
-            for (syn_idx, target) in targets {
-                if let Some(&post_tick) = spike_map.get(&target) {
+            for (syn_idx, syn) in self.neurons[pidx].synapses.iter().enumerate() {
+                if let Some(&post_tick) = spike_map.get(&syn.target) {
                     let dt = post_tick as f64 - pre_tick as f64;
-                    let w = self.neurons[pidx].synapses[syn_idx].weight;
                     let dw = if dt > 0.0 {
-                        0.01 * (1.0 - w) * (-dt.abs() / 20.0).exp()
+                        0.01 * (-dt.abs() / 20.0).exp()
                     } else if dt < 0.0 {
-                        -0.012 * w * (-dt.abs() / 20.0).exp()
-                    } else {
-                        0.0
-                    };
+                        -0.01 * (-dt.abs() / 20.0).exp()
+                    } else { 0.0 };
                     if dw != 0.0 {
-                        let w = &mut self.neurons[pidx].synapses[syn_idx].weight;
-                        *w = (*w + dw).clamp(0.0, 1.0);
+                        eligibility.push(EligibilityTrace {
+                            neuron_idx: pidx, synapse_idx: syn_idx, dw,
+                        });
                     }
                 }
             }
         }
+        eligibility
     }
 
     fn sprout(&mut self, spikes: &[(NeuronId, u64)]) {
         use rand::prelude::*;
         let mut rng = rand::rng();
 
-        const SPROUT_WEIGHT: f64 = 0.1;
+        let sprout_weight = INITIAL_WEIGHT;
         const SPROUT_RADIUS: f32 = 5.0;
         const MAX_SPROUT_PER_NEURON: usize = 1;
         const SPROUT_COOLDOWN_TICKS: u64 = 500;
-        const SPROUT_PROBABILITY: f64 = 0.05;
-        const MAX_SYNAPSES_PER_NEURON: usize = 30;
-
+        const SPROUT_PROBABILITY: f64 = 0.1;
         let current_tick = self.global_tick;
 
         let spiked_info: Vec<(NeuronId, f32, f32)> = spikes.iter()
@@ -419,30 +662,26 @@ impl Network {
 
         for &(nid, x, y) in &spiked_info {
             let idx = nid as usize;
-            let (es, ee) = self.emotion_range;
-            let (rs, re) = self.reason_range;
             let is_input = self.input_idx.contains(&idx);
             let is_output = self.is_output_neuron(idx);
             if !rng.random_bool(SPROUT_PROBABILITY) { continue; }
             if let Some(&last) = self.sprout_cooldown.get(&nid) {
                 if current_tick - last < SPROUT_COOLDOWN_TICKS { continue; }
             }
-            if self.neurons[idx].synapses.len() >= MAX_SYNAPSES_PER_NEURON { continue; }
 
             let existing: std::collections::HashSet<NeuronId> =
                 self.neurons[idx].synapses.iter().map(|s| s.target).collect();
 
-            let mut candidates: Vec<(NeuronId, f32)> = spiked_info.iter()
-                .filter_map(|&(oid, ox, oy)| {
-                    if oid == nid || existing.contains(&oid) { return None; }
-                    let oidx = oid as usize;
+            let mut candidates: Vec<(NeuronId, f32)> = self.neurons.iter()
+                .filter_map(|n| {
+                    let oidx = n.id as usize;
+                    if n.id == nid || existing.contains(&n.id) { return None; }
                     let target_is_input = self.input_idx.contains(&oidx);
                     let target_is_output = self.output_idx.contains(&oidx);
-                    // 입력↔입력, 출력↔출력, 입력↔출력 차단
                     if is_input && (target_is_input || target_is_output) { return None; }
                     if is_output && (target_is_output || target_is_input) { return None; }
-                    let dist = ((x - ox).powi(2) + (y - oy).powi(2)).sqrt();
-                    if dist <= SPROUT_RADIUS { Some((oid, dist)) } else { None }
+                    let dist = ((x - n.x).powi(2) + (y - n.y).powi(2)).sqrt();
+                    if dist <= SPROUT_RADIUS { Some((n.id, dist)) } else { None }
                 }).collect();
 
             candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
@@ -459,29 +698,37 @@ impl Network {
         }
 
         for (pre_idx, post_id) in new_synapses {
-            self.neurons[pre_idx].add_synapse(post_id, SPROUT_WEIGHT);
+            self.neurons[pre_idx].add_synapse(post_id, sprout_weight);
         }
     }
-
 
     pub fn feedback(&mut self, fire_id: u64, positive: bool, strength: f64) {
         let record = match self.fire_records.iter().find(|r| r.id == fire_id) {
             Some(r) => r, None => return,
         };
-        let spiked: Vec<(NeuronId, u64)> = record.spiked_neurons.clone();
+        let eligibility: Vec<(usize, usize, f64)> = record.eligibility.iter()
+            .map(|e| (e.neuron_idx, e.synapse_idx, e.dw))
+            .collect();
 
-        for &(nid, _) in &spiked {
-            let idx = nid as usize;
-            if idx >= self.neurons.len() { continue; }
-            for syn in &mut self.neurons[idx].synapses {
-                let dw = if positive {
-                    0.01 * strength * (1.0 - syn.weight)
-                } else {
-                    -0.015 * strength * syn.weight
-                };
-                syn.weight = (syn.weight + dw).clamp(0.0, 1.0);
-            }
+        let reward = if positive { strength } else { -strength };
+        for (nidx, sidx, dw) in eligibility {
+            if nidx >= self.neurons.len() { continue; }
+            if sidx >= self.neurons[nidx].synapses.len() { continue; }
+            let change = dw * reward;
+            let w = &mut self.neurons[nidx].synapses[sidx].weight;
+            *w = (*w + change).clamp(0.0, 1.0);
         }
+    }
+
+    /// teach: 정답 출력 뉴런 사전 활성화 → fire
+    pub fn teach(&mut self, input: &str, target: &str) -> u64 {
+        let target_jamo = tokenizer::decompose_to_jamo(target);
+        let target_seqs: Vec<u32> = target_jamo.iter().map(|j| self.get_seq(j)).collect();
+        for &seq in &target_seqs {
+            let idx = self.output_neuron(seq);
+            self.neurons[idx].potential += 0.6;
+        }
+        self.fire(input)
     }
 
     fn prune(&mut self, min_weight: f64) -> usize {
@@ -549,6 +796,13 @@ impl Network {
         println!("  뉴런: {}개, 시냅스: {}개", self.neurons.len(), self.synapse_count());
     }
 
+    // ── 서버용 헬퍼 ──
+
+    pub fn get_seq_pub(&mut self, token: &str) -> u32 { self.get_seq(token) }
+    pub fn output_neuron_pub(&self, seq: u32) -> usize { self.output_neuron(seq) }
+    pub fn neurons_mut(&mut self) -> &mut Vec<Neuron> { &mut self.neurons }
+    pub fn has_active_stimuli(&self) -> bool { !self.active_stimuli.is_empty() }
+
     // ── 저장/불러오기 ──
 
     pub fn save(&self, path: &Path) {
@@ -562,6 +816,7 @@ impl Network {
             reason_range: self.reason_range,
             next_fire_id: self.next_fire_id,
             threshold: self.threshold,
+            noise_range: self.noise_range,
         };
         let data = serde_json::to_vec(&snap).expect("직렬화 실패");
         std::fs::write(path, &data).expect("저장 실패");
@@ -587,9 +842,14 @@ impl Network {
             fire_records: Vec::new(),
             next_fire_id: snap.next_fire_id,
             debug: false,
+            active_stimuli: Vec::new(),
+            recent_spikes: Vec::new(),
             threshold: snap.threshold,
+            noise_range: snap.noise_range,
             sprout_cooldown: HashMap::new(),
             global_tick: 0,
+            fires_since_sleep: 0,
+            last_sleep_tick: 0,
         })
     }
 }
@@ -606,5 +866,8 @@ struct Snapshot {
     next_fire_id: u64,
     #[serde(default = "default_threshold")]
     threshold: f64,
+    #[serde(default = "default_noise")]
+    noise_range: f64,
 }
-fn default_threshold() -> f64 { 0.5 }
+fn default_threshold() -> f64 { 0.72 }
+fn default_noise() -> f64 { 0.2 }

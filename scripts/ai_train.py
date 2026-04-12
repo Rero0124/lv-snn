@@ -22,8 +22,9 @@ sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
 
 SSN_URL = "http://127.0.0.1:8081"
 OLLAMA_SERVERS = [
-    {"url": "http://192.168.0.31:11434", "model": "exaone3.5:7.8b"},
-    {"url": "http://192.168.1.14:11434", "model": "exaone3.5:7.8b"},
+#    {"url": "http://192.168.0.31:11434", "model": "exaone3.5:7.8b"},
+#    {"url": "http://127.0.0.1:11434", "model": "exaone3.5:7.8b"},
+    {"url": "http://192.168.55.150:11434", "model": "exaone3.5:7.8b"},
 ]
 THREADS_PER_SERVER = 2
 MAX_RETRY = 5
@@ -151,37 +152,38 @@ def process_one_input(topic, context, stats, server=None):
         out = resp.get("output", "")
         fire_id = resp.get("fire_id", 0)
 
-        if not out or out in tried_outputs:
-            # 무출력/중복도 약화
+        if not out:
+            # 무출력만 약화
             if fire_id:
                 ssn_request_locked("/feedback", {
-                    "fire_id": fire_id, "positive": False, "strength": 0.5
+                    "fire_id": fire_id, "positive": False, "strength": 0.3
                 })
                 with stats["lock"]:
                     stats["total_neg"] += 1
-            if out:
-                print(f"    {attempt}) \"{out[:40]}\" (중복, 약화)")
-            else:
-                print(f"    {attempt}) (무출력, 약화)")
+            print(f"    {attempt}) (무출력, 약화)")
+            continue
+
+        if out in tried_outputs:
+            print(f"    {attempt}) \"{out[:40]}\" (중복, skip)")
             continue
 
         tried_outputs.append(out)
         score = judge(inp, out, server=server)
 
-        if score >= 0.4 and fire_id:
-            # 점수에 비례하여 강화
+        # 출력이 나오면 약화 안 함 — 점수에 비례해서 강화
+        if fire_id and score > 0:
             ssn_request_locked("/feedback", {
                 "fire_id": fire_id, "positive": True, "strength": score
             })
             with stats["lock"]:
                 stats["total_pos"] += 1
-        elif fire_id:
-            # 낮은 점수 → 약화
+        elif fire_id and score == 0:
+            # 점수 0이라도 출력 있으면 아주 약하게 강화
             ssn_request_locked("/feedback", {
-                "fire_id": fire_id, "positive": False, "strength": 1.0 - score
+                "fire_id": fire_id, "positive": True, "strength": 0.05
             })
             with stats["lock"]:
-                stats["total_neg"] += 1
+                stats["total_pos"] += 1
 
         if score >= 0.6:
             found = True
