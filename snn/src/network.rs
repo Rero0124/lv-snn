@@ -13,9 +13,11 @@ const MIN_WEIGHT: f64 = 0.1;
 const PRUNE_INTERVAL: u64 = 5_000;
 const EMOTION_COUNT: usize = 5000;
 const REASON_COUNT: usize = 5000;
+const MEMORY_COUNT: usize = 2000;
+const HIPPOCAMPUS_COUNT: usize = 500;
 
 // ── 수면 파라미터 ──
-const SLEEP_FIRE_INTERVAL: u64 = 60_000;
+const SLEEP_FIRE_INTERVAL: u64 = 30_000;
 const SLEEP_TICK_INTERVAL: u64 = 500_000;
 const SLEEP_DURATION_TICKS: u64 = 1_000;
 const SLEEP_WEIGHT_SCALE: f64 = 0.92;
@@ -68,7 +70,13 @@ pub struct Network {
     input_idx: Vec<usize>,
     output_idx: Vec<usize>,
     emotion_range: (usize, usize),
+    emotion_main_range: (usize, usize),
+    emotion_map_range: (usize, usize),
     reason_range: (usize, usize),
+    reason_main_range: (usize, usize),
+    reason_map_range: (usize, usize),
+    memory_range: (usize, usize),
+    hippocampus_range: (usize, usize),
 
     pub fire_records: Vec<FireRecord>,
     next_fire_id: u64,
@@ -86,10 +94,11 @@ pub struct Network {
 impl Network {
     pub fn new() -> Self {
         let mut neurons: Vec<Neuron> = Vec::new();
-
-        // 감정 뉴런 (30% 억제성)
-        let emotion_start = neurons.len();
         let cols = 50usize;
+
+        // 감정 뉴런: Main 80% + Map 20% (30% 억제성)
+        let emotion_start = neurons.len();
+        let emotion_main_count = EMOTION_COUNT * 80 / 100;
         for i in 0..EMOTION_COUNT {
             let x = (i % cols) as f32;
             let y = (i / cols) as f32;
@@ -101,9 +110,16 @@ impl Network {
             }
         }
         let emotion_end = neurons.len();
+        let emotion_main_range = (emotion_start, emotion_start + emotion_main_count);
+        let emotion_map_range = (emotion_start + emotion_main_count, emotion_end);
+        // Map 영역 threshold_scale 설정 (0.85 / 0.50 = 1.7)
+        for idx in emotion_map_range.0..emotion_map_range.1 {
+            neurons[idx].threshold_scale = 1.7;
+        }
 
-        // 이성 뉴런 (30% 억제성)
+        // 이성 뉴런: Main 80% + Map 20% (30% 억제성)
         let reason_start = neurons.len();
+        let reason_main_count = REASON_COUNT * 80 / 100;
         for i in 0..REASON_COUNT {
             let x = (i % cols) as f32;
             let y = (i / cols) as f32 + 100.0;
@@ -115,6 +131,33 @@ impl Network {
             }
         }
         let reason_end = neurons.len();
+        let reason_main_range = (reason_start, reason_start + reason_main_count);
+        let reason_map_range = (reason_start + reason_main_count, reason_end);
+        for idx in reason_map_range.0..reason_map_range.1 {
+            neurons[idx].threshold_scale = 1.7;
+        }
+
+        // 기억 피질 뉴런 (30% 억제성, 느린 감쇠 0.85)
+        let memory_start = neurons.len();
+        for i in 0..MEMORY_COUNT {
+            let x = (i % cols) as f32 + 50.0;
+            let y = (i / cols) as f32 + 50.0;
+            let id = neurons.len() as NeuronId;
+            let inhibitory = i % 10 >= 7;
+            neurons.push(Neuron::new_slow_decay(id, x, y, inhibitory));
+        }
+        let memory_end = neurons.len();
+
+        // 해마 뉴런 (20% 억제성, 느린 감쇠 0.85)
+        let hippo_start = neurons.len();
+        for i in 0..HIPPOCAMPUS_COUNT {
+            let x = (i % 25) as f32 + 60.0;
+            let y = (i / 25) as f32 + 75.0;
+            let id = neurons.len() as NeuronId;
+            let inhibitory = i % 10 >= 8;
+            neurons.push(Neuron::new_slow_decay(id, x, y, inhibitory));
+        }
+        let hippo_end = neurons.len();
 
         let mut net = Network {
             neurons,
@@ -123,7 +166,13 @@ impl Network {
             input_idx: Vec::new(),
             output_idx: Vec::new(),
             emotion_range: (emotion_start, emotion_end),
+            emotion_main_range,
+            emotion_map_range,
             reason_range: (reason_start, reason_end),
+            reason_main_range,
+            reason_map_range,
+            memory_range: (memory_start, memory_end),
+            hippocampus_range: (hippo_start, hippo_end),
             fire_records: Vec::new(),
             next_fire_id: 1,
             debug: false,
@@ -147,9 +196,10 @@ impl Network {
         net.seed_random_synapses(10);
 
         let total_synapses: usize = net.neurons.iter().map(|n| n.synapses.len()).sum();
-        eprintln!("  [초기화] 어휘 {}개, 뉴런 {}개 (감정 {}, 이성 {}, 입출력 {}), 시냅스 {}개",
+        eprintln!("  [초기화] 어휘 {}개, 뉴런 {}개 (감정 {}, 이성 {}, 기억 {}, 해마 {}, 입출력 {}), 시냅스 {}개",
             net.vocab.len(), net.neurons.len(),
-            EMOTION_COUNT, REASON_COUNT, net.input_idx.len() * 2, total_synapses);
+            EMOTION_COUNT, REASON_COUNT, MEMORY_COUNT, HIPPOCAMPUS_COUNT,
+            net.input_idx.len() * 2, total_synapses);
         net
     }
 
@@ -189,8 +239,12 @@ impl Network {
     fn neuron_region(&self, idx: usize) -> RegionType {
         let (es, ee) = self.emotion_range;
         let (rs, re) = self.reason_range;
+        let (ms, me) = self.memory_range;
+        let (hs, he) = self.hippocampus_range;
         if idx >= es && idx < ee { RegionType::Emotion }
         else if idx >= rs && idx < re { RegionType::Reason }
+        else if idx >= ms && idx < me { RegionType::Memory }
+        else if idx >= hs && idx < he { RegionType::Hippocampus }
         else {
             if self.output_idx.contains(&idx) { RegionType::Output }
             else { RegionType::Input }
@@ -201,64 +255,175 @@ impl Network {
         self.output_idx.contains(&idx)
     }
 
-    /// 거리 기반 랜덤 시냅스 생성
+    /// 구조 기반 랜덤 시냅스 생성
     fn seed_random_synapses(&mut self, per_neuron: usize) {
         use rand::prelude::*;
         let mut rng = rand::rng();
 
-        let (es, ee) = self.emotion_range;
-        let (rs, re) = self.reason_range;
-        let middle: Vec<usize> = (es..ee).chain(rs..re).collect();
-        let middle_info: Vec<(usize, f32, f32)> = middle.iter()
+        let (em_s, em_e) = self.emotion_main_range;
+        let (emap_s, emap_e) = self.emotion_map_range;
+        let (rm_s, rm_e) = self.reason_main_range;
+        let (rmap_s, rmap_e) = self.reason_map_range;
+        let (ms, me) = self.memory_range;
+        let (hs, he) = self.hippocampus_range;
+
+        fn to_info(neurons: &[Neuron], range: std::ops::Range<usize>) -> Vec<(usize, f32, f32)> {
+            range.map(|i| (i, neurons[i].x, neurons[i].y)).collect()
+        }
+
+        let emo_main_info = to_info(&self.neurons, em_s..em_e);
+        let emo_map_info = to_info(&self.neurons, emap_s..emap_e);
+        let rea_main_info = to_info(&self.neurons, rm_s..rm_e);
+        let rea_map_info = to_info(&self.neurons, rmap_s..rmap_e);
+        let mem_info = to_info(&self.neurons, ms..me);
+        let hippo_info = to_info(&self.neurons, hs..he);
+        let output_info: Vec<(usize, f32, f32)> = self.output_idx.iter()
             .map(|&i| (i, self.neurons[i].x, self.neurons[i].y)).collect();
 
-        fn pick_nearby(rng: &mut rand::rngs::ThreadRng, sx: f32, sy: f32, candidates: &[(usize, f32, f32)], exclude: usize) -> Option<usize> {
-            let weights: Vec<f64> = candidates.iter()
-                .map(|&(ci, cx, cy)| {
-                    if ci == exclude { return 0.0; }
-                    let d = ((sx - cx).powi(2) + (sy - cy).powi(2)).sqrt() as f64 + 1.0;
-                    1.0 / d
-                }).collect();
-            let total: f64 = weights.iter().sum();
-            if total <= 0.0 { return None; }
-            let mut r = rng.random_range(0.0..total);
-            for (i, &w) in weights.iter().enumerate() {
-                r -= w;
-                if r <= 0.0 { return Some(candidates[i].0); }
+        // Main 영역 (입력이 연결되는 곳): 감정_Main + 이성_Main + 기억
+        let main_areas: Vec<(usize, f32, f32)> = emo_main_info.iter()
+            .chain(rea_main_info.iter())
+            .chain(mem_info.iter())
+            .cloned().collect();
+
+        // Map 영역: 감정_Map + 이성_Map
+        let map_areas: Vec<(usize, f32, f32)> = emo_map_info.iter()
+            .chain(rea_map_info.iter())
+            .cloned().collect();
+
+        fn pick_random(rng: &mut rand::rngs::ThreadRng, candidates: &[(usize, f32, f32)], exclude: usize) -> Option<usize> {
+            if candidates.len() <= 1 { return None; }
+            for _ in 0..10 {
+                let idx = rng.random_range(0..candidates.len());
+                if candidates[idx].0 != exclude {
+                    return Some(candidates[idx].0);
+                }
             }
-            Some(candidates.last()?.0)
+            None
         }
 
         let w = INITIAL_WEIGHT;
 
-        // 입력 → 감정/이성 (시상피질 시냅스: 내피질의 2.5배)
+        // 1. 입력 → 감정_Main, 이성_Main, 기억 (병렬)
         let input_indices: Vec<usize> = self.input_idx.clone();
         for &idx in &input_indices {
-            let (x, y) = (self.neurons[idx].x, self.neurons[idx].y);
             for _ in 0..per_neuron {
-                if let Some(target) = pick_nearby(&mut rng, x, y, &middle_info, idx) {
+                if let Some(target) = pick_random(&mut rng, &main_areas, idx) {
                     let tid = self.neurons[target].id;
                     self.neurons[idx].add_seed_synapse(tid, 0.35);
                 }
             }
         }
 
-        // 감정/이성: 내부/상호 80% + 출력 20%
-        let output_info: Vec<(usize, f32, f32)> = self.output_idx.iter()
-            .map(|&i| (i, self.neurons[i].x, self.neurons[i].y)).collect();
-        let middle_per = 10usize;
-        let middle_copy = middle_info.clone();
-        for &(idx, x, y) in &middle_copy {
-            for _ in 0..middle_per {
-                if rng.random_bool(0.8) {
-                    if let Some(target) = pick_nearby(&mut rng, x, y, &middle_info, idx) {
-                        let tid = self.neurons[target].id;
-                        self.neurons[idx].add_seed_synapse(tid, w);
+        // 2. 감정_Main: 내부 + → 감정_Map + → 출력
+        for &(idx, _, _) in &emo_main_info {
+            for _ in 0..per_neuron {
+                let r: f64 = rng.random();
+                if r < 0.5 {
+                    // 내부 연결
+                    if let Some(t) = pick_random(&mut rng, &emo_main_info, idx) {
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, w);
                     }
-                } else if !output_info.is_empty() {
-                    let target = &output_info[rng.random_range(0..output_info.len())];
-                    let tid = self.neurons[target.0].id;
-                    self.neurons[idx].add_seed_synapse(tid, 1.0);
+                } else if r < 0.7 {
+                    // → 감정_Map
+                    if let Some(t) = pick_random(&mut rng, &emo_map_info, idx) {
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, w);
+                    }
+                } else {
+                    // → 출력
+                    if let Some(t) = pick_random(&mut rng, &output_info, idx) {
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, 1.0);
+                    }
+                }
+            }
+        }
+
+        // 3. 이성_Main: 내부 + → 이성_Map + → 출력
+        for &(idx, _, _) in &rea_main_info {
+            for _ in 0..per_neuron {
+                let r: f64 = rng.random();
+                if r < 0.5 {
+                    if let Some(t) = pick_random(&mut rng, &rea_main_info, idx) {
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, w);
+                    }
+                } else if r < 0.7 {
+                    if let Some(t) = pick_random(&mut rng, &rea_map_info, idx) {
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, w);
+                    }
+                } else {
+                    if let Some(t) = pick_random(&mut rng, &output_info, idx) {
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, 1.0);
+                    }
+                }
+            }
+        }
+
+        // 4. 기억: → 출력 + → 해마
+        for &(idx, _, _) in &mem_info {
+            for _ in 0..per_neuron {
+                let r: f64 = rng.random();
+                if r < 0.5 {
+                    // 내부
+                    if let Some(t) = pick_random(&mut rng, &mem_info, idx) {
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, w);
+                    }
+                } else if r < 0.7 {
+                    // → 출력
+                    if let Some(t) = pick_random(&mut rng, &output_info, idx) {
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, 1.0);
+                    }
+                } else {
+                    // → 해마
+                    if let Some(t) = pick_random(&mut rng, &hippo_info, idx) {
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, w);
+                    }
+                }
+            }
+        }
+
+        // 5. 감정_Map ↔ 기억, 해마
+        let mem_hippo: Vec<(usize, f32, f32)> = mem_info.iter()
+            .chain(hippo_info.iter()).cloned().collect();
+        for &(idx, _, _) in &emo_map_info {
+            for _ in 0..per_neuron {
+                let r: f64 = rng.random();
+                if r < 0.4 {
+                    // → 감정_Main (역방향)
+                    if let Some(t) = pick_random(&mut rng, &emo_main_info, idx) {
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, w);
+                    }
+                } else {
+                    // → 기억 or 해마
+                    if let Some(t) = pick_random(&mut rng, &mem_hippo, idx) {
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, w);
+                    }
+                }
+            }
+        }
+
+        // 6. 이성_Map ↔ 기억, 해마
+        for &(idx, _, _) in &rea_map_info {
+            for _ in 0..per_neuron {
+                let r: f64 = rng.random();
+                if r < 0.4 {
+                    if let Some(t) = pick_random(&mut rng, &rea_main_info, idx) {
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, w);
+                    }
+                } else {
+                    if let Some(t) = pick_random(&mut rng, &mem_hippo, idx) {
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, w);
+                    }
+                }
+            }
+        }
+
+        // 7. 해마 → Map 영역 + 기억 (역방향)
+        let map_and_mem: Vec<(usize, f32, f32)> = map_areas.iter()
+            .chain(mem_info.iter()).cloned().collect();
+        for &(idx, _, _) in &hippo_info {
+            for _ in 0..per_neuron {
+                if let Some(t) = pick_random(&mut rng, &map_and_mem, idx) {
+                    self.neurons[idx].add_seed_synapse(t as NeuronId, w);
                 }
             }
         }
@@ -405,8 +570,8 @@ impl Network {
         }
 
         // STDP: 발화 타이밍 기반 강화/약화 (LTD = LTP × 1.2)
-        const STDP_A_PLUS_BASE: f64 = 0.006;
-        const STDP_A_MINUS_BASE: f64 = 0.005; // LTP:LTD = 1.2:1
+        const STDP_A_PLUS_BASE: f64 = 0.004;
+        const STDP_A_MINUS_BASE: f64 = 0.0048; // LTD:LTP = 1.2:1
         const STDP_TAU: f64 = 20.0;
         const BCM_TARGET_RATE: f64 = 25.0;
         let spike_ticks: Vec<Option<u64>> = self.neurons.iter()
@@ -429,11 +594,11 @@ impl Network {
                 if let Some(post_tick) = spike_ticks[tidx] {
                     let dt = post_tick as f64 - global_tick as f64;
                     if dt == 0.0 {
-                        // 동시 발화: LTP 적용 (Hebbian 대체)
+                        // 동시 발화: LTP
                         let ltp_bonus = syn.accumulate_ltp();
                         syn.weight = (syn.weight + stdp_a_plus + ltp_bonus).min(1.0);
                     } else if dt < 0.0 && dt > -50.0 {
-                        // LTD: post가 pre보다 먼저 발화
+                        // LTD
                         let dw = stdp_a_minus * (dt / STDP_TAU).exp();
                         syn.weight = (syn.weight - dw).max(0.0);
                     }
@@ -561,7 +726,53 @@ impl Network {
             n.fire_count_window = 0;
         }
 
-        // 3. 휴지기: 순수 감쇠 (fatigue 자연 회복 포함)
+        // 3. 해마 재생: 해마 뉴런을 주기적으로 자극 → 시냅스 통해 기억 피질로 전파
+        let (hs, he) = self.hippocampus_range;
+        const REPLAY_ROUNDS: usize = 5;
+        const REPLAY_TICKS: u64 = 10;
+        for _ in 0..REPLAY_ROUNDS {
+            // 해마 뉴런 전체를 약하게 자극
+            for idx in hs..he {
+                if idx < self.neurons.len() {
+                    self.neurons[idx].potential = 0.5;
+                }
+            }
+            // 전파 (STDP 없이 발화+전달만)
+            for _ in 0..REPLAY_TICKS {
+                self.global_tick += 1;
+                let threshold = self.threshold;
+                for n in &mut self.neurons {
+                    n.decay();
+                }
+                let fired: Vec<(NeuronId, Vec<(NeuronId, f64)>)> = self.neurons
+                    .iter_mut()
+                    .filter_map(|n| {
+                        if n.potential >= threshold {
+                            n.potential = 0.0;
+                            let sign = if n.inhibitory { -1.0 } else { 1.0 };
+                            let deliveries: Vec<_> = n.synapses.iter()
+                                .map(|s| (s.target, s.effective_weight() * sign))
+                                .collect();
+                            Some((n.id, deliveries))
+                        } else { None }
+                    })
+                    .collect();
+                for (_, deliveries) in &fired {
+                    for &(target, weight) in deliveries {
+                        let tidx = target as usize;
+                        if tidx < self.neurons.len() {
+                            self.neurons[tidx].receive(weight);
+                        }
+                    }
+                }
+            }
+            // 라운드 후 리셋
+            for n in &mut self.neurons {
+                n.potential = 0.0;
+            }
+        }
+
+        // 4. 휴지기: 순수 감쇠 (fatigue 자연 회복 포함)
         for _ in 0..SLEEP_DURATION_TICKS {
             self.global_tick += 1;
             for n in &mut self.neurons {
@@ -569,17 +780,14 @@ impl Network {
             }
         }
 
-        // 4. 수면 중 가지치기 비활성 — BCM이 과강화 억제, 일반 prune에 위임
-        let pruned = 0usize;
-
         self.fires_since_sleep = 0;
         self.last_sleep_tick = self.global_tick;
         self.recent_spikes.clear();
 
         eprintln!(
-            "  [sleep] tick {} → {} (지속 {}틱, 누적 {}fire, {}시냅스 fatigue×{})",
+            "  [sleep] tick {} → {} (지속 {}틱, 누적 {}fire, {}시냅스 fatigue×{}, 해마재생 {}회)",
             enter_tick, self.global_tick, SLEEP_DURATION_TICKS,
-            fires, scaled, SLEEP_WEIGHT_SCALE,
+            fires, scaled, SLEEP_WEIGHT_SCALE, REPLAY_ROUNDS,
         );
     }
 
@@ -778,6 +986,8 @@ impl Network {
             RegionType::Input => "입력",
             RegionType::Emotion => "감정",
             RegionType::Reason => "이성",
+            RegionType::Memory => "기억",
+            RegionType::Hippocampus => "해마",
             RegionType::Output => "출력",
         };
         format!("{name} #{nid}")
@@ -786,8 +996,12 @@ impl Network {
     pub fn get_status(&self) -> serde_json::Value {
         let (es, ee) = self.emotion_range;
         let (rs, re) = self.reason_range;
+        let (ms, me) = self.memory_range;
+        let (hs, he) = self.hippocampus_range;
         let emotion_s: usize = (es..ee).map(|i| self.neurons[i].synapses.len()).sum();
         let reason_s: usize = (rs..re).map(|i| self.neurons[i].synapses.len()).sum();
+        let memory_s: usize = (ms..me).map(|i| self.neurons[i].synapses.len()).sum();
+        let hippo_s: usize = (hs..he).map(|i| self.neurons[i].synapses.len()).sum();
         let input_s: usize = self.input_idx.iter().map(|&i| self.neurons[i].synapses.len()).sum();
         let output_s: usize = self.output_idx.iter().map(|&i| self.neurons[i].synapses.len()).sum();
 
@@ -815,6 +1029,8 @@ impl Network {
                 "입력": { "neurons": self.input_idx.len(), "synapses": input_s },
                 "감정": { "neurons": EMOTION_COUNT, "synapses": emotion_s },
                 "이성": { "neurons": REASON_COUNT, "synapses": reason_s },
+                "기억": { "neurons": MEMORY_COUNT, "synapses": memory_s },
+                "해마": { "neurons": HIPPOCAMPUS_COUNT, "synapses": hippo_s },
                 "출력": { "neurons": self.output_idx.len(), "synapses": output_s },
             },
             "weight_dist": {
@@ -855,7 +1071,13 @@ impl Network {
             input_idx: self.input_idx.clone(),
             output_idx: self.output_idx.clone(),
             emotion_range: self.emotion_range,
+            emotion_main_range: self.emotion_main_range,
+            emotion_map_range: self.emotion_map_range,
             reason_range: self.reason_range,
+            reason_main_range: self.reason_main_range,
+            reason_map_range: self.reason_map_range,
+            memory_range: self.memory_range,
+            hippocampus_range: self.hippocampus_range,
             next_fire_id: self.next_fire_id,
             threshold: self.threshold,
             noise_range: self.noise_range,
@@ -880,7 +1102,13 @@ impl Network {
             input_idx: snap.input_idx,
             output_idx: snap.output_idx,
             emotion_range: snap.emotion_range,
+            emotion_main_range: snap.emotion_main_range,
+            emotion_map_range: snap.emotion_map_range,
             reason_range: snap.reason_range,
+            reason_main_range: snap.reason_main_range,
+            reason_map_range: snap.reason_map_range,
+            memory_range: snap.memory_range,
+            hippocampus_range: snap.hippocampus_range,
             fire_records: Vec::new(),
             next_fire_id: snap.next_fire_id,
             debug: false,
@@ -896,6 +1124,13 @@ impl Network {
     }
 }
 
+fn default_emotion_main_range() -> (usize, usize) { (0, 4000) }
+fn default_emotion_map_range() -> (usize, usize) { (4000, 5000) }
+fn default_reason_main_range() -> (usize, usize) { (5000, 9000) }
+fn default_reason_map_range() -> (usize, usize) { (9000, 10000) }
+fn default_memory_range() -> (usize, usize) { (10000, 12000) }
+fn default_hippo_range() -> (usize, usize) { (12000, 12500) }
+
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
     neurons: Vec<Neuron>,
@@ -904,12 +1139,24 @@ struct Snapshot {
     input_idx: Vec<usize>,
     output_idx: Vec<usize>,
     emotion_range: (usize, usize),
+    #[serde(default = "default_emotion_main_range")]
+    emotion_main_range: (usize, usize),
+    #[serde(default = "default_emotion_map_range")]
+    emotion_map_range: (usize, usize),
     reason_range: (usize, usize),
+    #[serde(default = "default_reason_main_range")]
+    reason_main_range: (usize, usize),
+    #[serde(default = "default_reason_map_range")]
+    reason_map_range: (usize, usize),
+    #[serde(default = "default_memory_range")]
+    memory_range: (usize, usize),
+    #[serde(default = "default_hippo_range")]
+    hippocampus_range: (usize, usize),
     next_fire_id: u64,
     #[serde(default = "default_threshold")]
     threshold: f64,
     #[serde(default = "default_noise")]
     noise_range: f64,
 }
-fn default_threshold() -> f64 { 0.72 }
+fn default_threshold() -> f64 { 0.50 }
 fn default_noise() -> f64 { 0.2 }

@@ -28,7 +28,16 @@ pub struct Neuron {
     /// 최근 1000틱 발화 횟수
     #[serde(default)]
     pub fire_count_window: u32,
+    /// 막전위 감쇠율 (기본 0.7, 기억/해마는 0.85)
+    #[serde(default = "default_decay_rate")]
+    pub decay_rate: f64,
+    /// 뉴런별 임계값 오프셋 (기본 1.0, map 영역은 1.7 = 0.5*1.7=0.85)
+    #[serde(default = "default_threshold_scale")]
+    pub threshold_scale: f64,
 }
+
+fn default_decay_rate() -> f64 { 0.7 }
+fn default_threshold_scale() -> f64 { 1.0 }
 
 fn default_excitability() -> f64 { 1.0 }
 
@@ -37,7 +46,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: false, skip_refractory: false,
-            excitability: 1.0, fire_count_window: 0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0,
         }
     }
 
@@ -45,7 +54,16 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: true, skip_refractory: false,
-            excitability: 1.0, fire_count_window: 0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0,
+        }
+    }
+
+    /// 기억/해마용: 느린 감쇠
+    pub fn new_slow_decay(id: NeuronId, x: f32, y: f32, inhibitory: bool) -> Self {
+        Self {
+            id, potential: 0.0, last_spike_tick: None,
+            synapses: Vec::new(), x, y, inhibitory, skip_refractory: false,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.85, threshold_scale: 1.0,
         }
     }
 
@@ -53,13 +71,13 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: false, skip_refractory: true,
-            excitability: 1.0, fire_count_window: 0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0,
         }
     }
 
     #[inline]
     pub fn decay(&mut self) {
-        self.potential *= 0.7;
+        self.potential *= self.decay_rate;
         // 시냅스 피로 회복
         for s in &mut self.synapses {
             s.recover();
@@ -86,7 +104,7 @@ impl Neuron {
                     let noise = if noise_range > 0.0 {
                         (rand::random::<f64>() * 2.0 - 1.0) * noise_range
                     } else { 0.0 };
-                    if self.potential + noise < (threshold / self.excitability) * 2.0 {
+                    if self.potential + noise < (threshold * self.threshold_scale / self.excitability) * 2.0 {
                         return None;
                     }
                 }
@@ -97,7 +115,7 @@ impl Neuron {
             (rand::random::<f64>() * 2.0 - 1.0) * noise_range
         } else { 0.0 };
         let effective = self.potential + noise;
-        let adj_threshold = threshold / self.excitability;
+        let adj_threshold = threshold * self.threshold_scale / self.excitability;
         let should_fire = effective >= adj_threshold
             || (!self.skip_refractory && rand::random_bool(if stimulated { 0.000001 } else { 0.00001 }));
 
