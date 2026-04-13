@@ -4,8 +4,10 @@ use serde::{Deserialize, Serialize};
 pub type NeuronId = u32;
 
 /// 불응기 상수
-const ABSOLUTE_REFRACTORY: u64 = 4;  // 절대 불응기: 발화 후 2틱 동안 발화 불가
-const RELATIVE_REFRACTORY: u64 = 10;  // 상대 불응기: 이후 4틱 동안 threshold × 2 필요
+const ABSOLUTE_REFRACTORY: u64 = 4;
+const ABSOLUTE_REFRACTORY_INH: u64 = 2;   // 억제성: 빠른 재발화로 지속 억제
+const RELATIVE_REFRACTORY: u64 = 10;
+const RELATIVE_REFRACTORY_INH: u64 = 4;   // 억제성: 짧은 상대 불응기
 
 /// 뉴런: potential + 시냅스 리스트 + 2D 위치
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,10 +77,12 @@ impl Neuron {
         if !self.skip_refractory {
             if let Some(last) = self.last_spike_tick {
                 let elapsed = tick.saturating_sub(last);
-                if elapsed < ABSOLUTE_REFRACTORY {
+                let abs_ref = if self.inhibitory { ABSOLUTE_REFRACTORY_INH } else { ABSOLUTE_REFRACTORY };
+                let rel_ref = if self.inhibitory { RELATIVE_REFRACTORY_INH } else { RELATIVE_REFRACTORY };
+                if elapsed < abs_ref {
                     return None;
                 }
-                if elapsed < RELATIVE_REFRACTORY {
+                if elapsed < rel_ref {
                     let noise = if noise_range > 0.0 {
                         (rand::random::<f64>() * 2.0 - 1.0) * noise_range
                     } else { 0.0 };

@@ -31,6 +31,16 @@ tests = [
     ("배고파", "밥먹자"),
 ]
 
+def syllable_len(s):
+    """완성형 한글 = 1, 낱자모/특수문자 = 0.3 (조합 안 된 불완전 출력)"""
+    count = 0.0
+    for c in s:
+        if '가' <= c <= '힣':
+            count += 1.0
+        else:
+            count += 0.3
+    return count
+
 DURATION = 3600
 start = time.time()
 round_count = 0
@@ -59,30 +69,32 @@ while time.time() - start < DURATION:
             total_correct += 1
             ssn("/feedback", {"fire_id": fire_id, "positive": True, "strength": 1.0})
         elif not out:
-            # 무출력 — 정답률에 따라 약화
-            if accuracy > 0.7:
-                ssn("/feedback", {"fire_id": fire_id, "positive": False, "strength": 0.3})
-            elif accuracy > 0.3:
-                ssn("/feedback", {"fire_id": fire_id, "positive": False, "strength": 0.1})
-            # 정답률 30% 이하면 약화 없음
+            # 무출력 — 약하게 약화
+            ssn("/feedback", {"fire_id": fire_id, "positive": False, "strength": 0.1})
         else:
             score = 0.0
             if expected in out:
                 score += 0.5
             if out and out[0] == expected[0]:
                 score += 0.2
-            len_diff = abs(len(out) - len(expected))
-            if len_diff <= 3:
-                score += 0.3 / (1.0 + len_diff)
+
+            # 자모 겹침: 정답의 자모가 출력에 포함된 비율
+            import sys, os
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from scripts_util import jamo_overlap
+            overlap = jamo_overlap(out, expected)
+            score += overlap * 0.3  # 최대 0.3
+
+            # 음절 길이 비교 (완성형=1, 낱자모/특수문자=0.3)
+            len_diff = abs(syllable_len(out) - syllable_len(expected))
+            if len_diff <= 1.5:
+                score += 0.2 / (1.0 + len_diff)
 
             if score > 0:
-                ssn("/feedback", {"fire_id": fire_id, "positive": True, "strength": score})
+                ssn("/feedback", {"fire_id": fire_id, "positive": True, "strength": min(score, 1.0)})
             else:
-                # 정답률에 따라 약화
-                if accuracy > 0.7:
-                    ssn("/feedback", {"fire_id": fire_id, "positive": False, "strength": 0.3})
-                elif accuracy > 0.3:
-                    ssn("/feedback", {"fire_id": fire_id, "positive": False, "strength": 0.1})
+                # 오답 — 약화
+                ssn("/feedback", {"fire_id": fire_id, "positive": False, "strength": 0.3})
 
     elapsed = int(time.time() - start)
     if round_count % 100 == 0:

@@ -31,7 +31,7 @@ impl Synapse {
     /// 발화 시 피로 적용
     #[inline]
     pub fn fire_fatigue(&mut self) {
-        self.fatigue *= 0.80;
+        self.fatigue *= 0.90;
     }
 
     /// 매 틱 피로 회복 + LTP trace 감쇠
@@ -47,7 +47,7 @@ impl Synapse {
         self.ltp_trace += 1.0;
         // trace가 2 이상이면 반복 자극 → 추가 LTP
         if self.ltp_trace >= 2.0 {
-            (self.ltp_trace - 1.0) * 0.005
+            (self.ltp_trace - 1.0) * 0.001
         } else {
             0.0
         }

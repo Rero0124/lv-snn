@@ -10,7 +10,7 @@ use std::path::Path;
 
 const INITIAL_WEIGHT: f64 = 0.2;
 const MIN_WEIGHT: f64 = 0.1;
-const PRUNE_INTERVAL: u64 = 10_000;
+const PRUNE_INTERVAL: u64 = 5_000;
 const EMOTION_COUNT: usize = 5000;
 const REASON_COUNT: usize = 5000;
 
@@ -129,7 +129,7 @@ impl Network {
             debug: false,
             active_stimuli: Vec::new(),
             recent_spikes: Vec::new(),
-            threshold: 0.72,
+            threshold: 0.50,
             noise_range: 0.2,
             sprout_cooldown: HashMap::new(),
             global_tick: 0,
@@ -231,14 +231,14 @@ impl Network {
 
         let w = INITIAL_WEIGHT;
 
-        // 입력 → 감정/이성
+        // 입력 → 감정/이성 (시상피질 시냅스: 내피질의 2.5배)
         let input_indices: Vec<usize> = self.input_idx.clone();
         for &idx in &input_indices {
             let (x, y) = (self.neurons[idx].x, self.neurons[idx].y);
             for _ in 0..per_neuron {
                 if let Some(target) = pick_nearby(&mut rng, x, y, &middle_info, idx) {
                     let tid = self.neurons[target].id;
-                    self.neurons[idx].add_seed_synapse(tid, w);
+                    self.neurons[idx].add_seed_synapse(tid, 0.35);
                 }
             }
         }
@@ -246,7 +246,7 @@ impl Network {
         // 감정/이성: 내부/상호 80% + 출력 20%
         let output_info: Vec<(usize, f32, f32)> = self.output_idx.iter()
             .map(|&i| (i, self.neurons[i].x, self.neurons[i].y)).collect();
-        let middle_per = 30usize;
+        let middle_per = 10usize;
         let middle_copy = middle_info.clone();
         for &(idx, x, y) in &middle_copy {
             for _ in 0..middle_per {
@@ -404,48 +404,57 @@ impl Network {
             }
         }
 
-        // STDP + 헤비안: 발화 타이밍 기반 강화/약화 + 동시 발화 강화
-        const STDP_A_PLUS_BASE: f64 = 0.015;
-        const STDP_A_MINUS_BASE: f64 = 0.006;
+        // STDP: 발화 타이밍 기반 강화/약화 (LTD = LTP × 1.2)
+        const STDP_A_PLUS_BASE: f64 = 0.006;
+        const STDP_A_MINUS_BASE: f64 = 0.005; // LTP:LTD = 1.2:1
         const STDP_TAU: f64 = 20.0;
-        const HEBBIAN_DW: f64 = 0.01;
-        const BCM_TARGET_RATE: f64 = 25.0; // 목표 발화 수
-        // borrow 충돌 방지: last_spike_tick 스냅샷
+        const BCM_TARGET_RATE: f64 = 25.0;
         let spike_ticks: Vec<Option<u64>> = self.neurons.iter()
             .map(|n| n.last_spike_tick).collect();
         let tick_spike_set: std::collections::HashSet<NeuronId> =
             tick_spikes.iter().cloned().collect();
-        // BCM: 뉴런별 fire_count_window 스냅샷
         let fire_counts: Vec<u32> = self.neurons.iter()
             .map(|n| n.fire_count_window).collect();
+
         for &nid in &tick_spikes {
             let pidx = nid as usize;
             if pidx >= self.neurons.len() { continue; }
-            // BCM 스케일: 많이 발화한 뉴런은 LTP 약화, 적게 발화한 뉴런은 LTP 강화
             let bcm_scale = BCM_TARGET_RATE / (fire_counts[pidx] as f64 + BCM_TARGET_RATE);
             let stdp_a_plus = STDP_A_PLUS_BASE * bcm_scale;
-            let stdp_a_minus = STDP_A_MINUS_BASE * (2.0 - bcm_scale); // 과활성 뉴런은 LTD 강화
+            let stdp_a_minus = STDP_A_MINUS_BASE * (2.0 - bcm_scale);
             for syn in &mut self.neurons[pidx].synapses {
                 let tidx = syn.target as usize;
                 if tidx >= spike_ticks.len() { continue; }
 
-                // 헤비안: pre와 post가 같은 틱에 동시 발화
-                if tick_spike_set.contains(&syn.target) {
-                    let ltp_bonus = syn.accumulate_ltp();
-                    syn.weight = (syn.weight + HEBBIAN_DW + ltp_bonus).min(1.0);
-                    continue;
-                }
-
                 if let Some(post_tick) = spike_ticks[tidx] {
                     let dt = post_tick as f64 - global_tick as f64;
-                    if dt > 0.0 && dt < 50.0 {
+                    if dt == 0.0 {
+                        // 동시 발화: LTP 적용 (Hebbian 대체)
                         let ltp_bonus = syn.accumulate_ltp();
-                        let dw = stdp_a_plus * (-dt / STDP_TAU).exp() + ltp_bonus;
-                        syn.weight = (syn.weight + dw).min(1.0);
+                        syn.weight = (syn.weight + stdp_a_plus + ltp_bonus).min(1.0);
                     } else if dt < 0.0 && dt > -50.0 {
+                        // LTD: post가 pre보다 먼저 발화
                         let dw = stdp_a_minus * (dt / STDP_TAU).exp();
                         syn.weight = (syn.weight - dw).max(0.0);
                     }
+                }
+            }
+        }
+
+        // iSTDP: 억제성 뉴런 발화 시, 타깃 활동 기반 억제 시냅스 조정
+        const ISTDP_RATE: f64 = 0.04;
+        const ISTDP_TARGET_RATE: f64 = 10.0;
+        for &nid in &tick_spikes {
+            let pidx = nid as usize;
+            if pidx >= self.neurons.len() || !self.neurons[pidx].inhibitory { continue; }
+            for syn in &mut self.neurons[pidx].synapses {
+                let tidx = syn.target as usize;
+                if tidx >= fire_counts.len() { continue; }
+                let target_rate = fire_counts[tidx] as f64;
+                if target_rate > ISTDP_TARGET_RATE {
+                    syn.weight = (syn.weight + ISTDP_RATE).min(1.0);
+                } else {
+                    syn.weight = (syn.weight - ISTDP_RATE * 0.5).max(0.0);
                 }
             }
         }
@@ -535,7 +544,7 @@ impl Network {
         let fires = self.fires_since_sleep;
 
         // 1. 시냅스 fatigue 감소 + sleep LTD (wake 초과분 정리)
-        const SLEEP_LTD: f64 = 0.002;
+        const SLEEP_LTD: f64 = 0.001;
         let mut scaled = 0usize;
         for n in &mut self.neurons {
             for s in &mut n.synapses {
@@ -593,7 +602,7 @@ impl Network {
         }
 
         if self.threshold < 1.0 {
-            let new_threshold = (0.72 + (fire_id / 10_000) as f64 * 0.001).min(1.0);
+            let new_threshold = (0.50 + (fire_id / 10_000) as f64 * 0.001).min(1.0);
             if new_threshold > self.threshold {
                 self.threshold = new_threshold;
             }
@@ -624,9 +633,9 @@ impl Network {
                 if let Some(&post_tick) = spike_map.get(&syn.target) {
                     let dt = post_tick as f64 - pre_tick as f64;
                     let dw = if dt > 0.0 {
-                        0.01 * (-dt.abs() / 20.0).exp()
+                        0.006 * (-dt.abs() / 20.0).exp()
                     } else if dt < 0.0 {
-                        -0.01 * (-dt.abs() / 20.0).exp()
+                        -0.006 * (-dt.abs() / 20.0).exp()
                     } else { 0.0 };
                     if dw != 0.0 {
                         eligibility.push(EligibilityTrace {
@@ -660,10 +669,16 @@ impl Network {
 
         let mut new_synapses: Vec<(usize, NeuronId)> = Vec::new();
 
+        // BCM target rate 근처(발화율 1%~5%)인 뉴런만 발아 허용
+        const SPROUT_MIN_RATE: f64 = 0.01;
+        const SPROUT_MAX_RATE: f64 = 0.05;
         for &(nid, x, y) in &spiked_info {
             let idx = nid as usize;
             let is_input = self.input_idx.contains(&idx);
             let is_output = self.is_output_neuron(idx);
+            // 발화율 체크: 과활성 뉴런은 발아 금지
+            let fire_rate = self.neurons[idx].fire_count_window as f64 / 10_000.0;
+            if fire_rate > SPROUT_MAX_RATE || fire_rate < SPROUT_MIN_RATE { continue; }
             if !rng.random_bool(SPROUT_PROBABILITY) { continue; }
             if let Some(&last) = self.sprout_cooldown.get(&nid) {
                 if current_tick - last < SPROUT_COOLDOWN_TICKS { continue; }
@@ -776,6 +791,20 @@ impl Network {
         let input_s: usize = self.input_idx.iter().map(|&i| self.neurons[i].synapses.len()).sum();
         let output_s: usize = self.output_idx.iter().map(|&i| self.neurons[i].synapses.len()).sum();
 
+        // weight 분포 계산
+        let mut w_bins = [0usize; 10]; // 0.0-0.1, 0.1-0.2, ..., 0.9-1.0
+        let mut w_sum = 0.0f64;
+        let mut w_count = 0usize;
+        for n in &self.neurons {
+            for s in &n.synapses {
+                let bin = ((s.weight * 10.0) as usize).min(9);
+                w_bins[bin] += 1;
+                w_sum += s.weight;
+                w_count += 1;
+            }
+        }
+        let w_avg = if w_count > 0 { w_sum / w_count as f64 } else { 0.0 };
+
         serde_json::json!({
             "neurons": self.neurons.len(),
             "synapses": self.synapse_count(),
@@ -787,6 +816,19 @@ impl Network {
                 "감정": { "neurons": EMOTION_COUNT, "synapses": emotion_s },
                 "이성": { "neurons": REASON_COUNT, "synapses": reason_s },
                 "출력": { "neurons": self.output_idx.len(), "synapses": output_s },
+            },
+            "weight_dist": {
+                "avg": format!("{:.4}", w_avg),
+                "0.0-0.1": w_bins[0],
+                "0.1-0.2": w_bins[1],
+                "0.2-0.3": w_bins[2],
+                "0.3-0.4": w_bins[3],
+                "0.4-0.5": w_bins[4],
+                "0.5-0.6": w_bins[5],
+                "0.6-0.7": w_bins[6],
+                "0.7-0.8": w_bins[7],
+                "0.8-0.9": w_bins[8],
+                "0.9-1.0": w_bins[9],
             },
         })
     }

@@ -22,9 +22,9 @@ sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, line_buffering=True)
 
 SSN_URL = "http://127.0.0.1:8081"
 OLLAMA_SERVERS = [
-#    {"url": "http://192.168.0.31:11434", "model": "exaone3.5:7.8b"},
+    {"url": "http://192.168.0.31:11434", "model": "exaone3.5:7.8b"},
 #    {"url": "http://127.0.0.1:11434", "model": "exaone3.5:7.8b"},
-    {"url": "http://192.168.55.150:11434", "model": "exaone3.5:7.8b"},
+#    {"url": "http://192.168.55.150:11434", "model": "exaone3.5:7.8b"},
 ]
 THREADS_PER_SERVER = 2
 MAX_RETRY = 5
