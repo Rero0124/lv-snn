@@ -78,7 +78,6 @@ impl Neuron {
     #[inline]
     pub fn decay(&mut self) {
         self.potential *= self.decay_rate;
-        // 시냅스 피로 회복
         for s in &mut self.synapses {
             s.recover();
         }
@@ -128,6 +127,7 @@ impl Neuron {
                 .map(|s| {
                     let w = s.effective_weight() * sign;
                     s.fire_fatigue();
+                    s.last_used_tick = tick;
                     (s.target, w)
                 })
                 .collect();

@@ -15,17 +15,20 @@ pub struct Synapse {
     /// LTP 누적 카운터: 짧은 시간 내 반복 활성화 횟수
     #[serde(default)]
     pub ltp_trace: f64,
+    /// 마지막 사용 tick (자체 prune 판정용)
+    #[serde(default)]
+    pub last_used_tick: u64,
 }
 
 fn default_fatigue() -> f64 { 1.0 }
 
 impl Synapse {
     pub fn new(target: NeuronId, weight: f64) -> Self {
-        Self { target, weight, seed: false, fatigue: 1.0, ltp_trace: 0.0 }
+        Self { target, weight, seed: false, fatigue: 1.0, ltp_trace: 0.0, last_used_tick: 0 }
     }
 
     pub fn new_seed(target: NeuronId, weight: f64) -> Self {
-        Self { target, weight, seed: true, fatigue: 1.0, ltp_trace: 0.0 }
+        Self { target, weight, seed: true, fatigue: 1.0, ltp_trace: 0.0, last_used_tick: 0 }
     }
 
     /// 발화 시 피로 적용
@@ -38,7 +41,7 @@ impl Synapse {
     #[inline]
     pub fn recover(&mut self) {
         self.fatigue = (self.fatigue + 0.01).min(1.0);
-        self.ltp_trace *= 0.95; // 자연 감쇠
+        self.ltp_trace *= 0.95;
     }
 
     /// LTP 누적: 활성화될 때마다 trace 증가, 누적된 만큼 추가 강화 반환

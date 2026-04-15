@@ -304,13 +304,14 @@ impl Network {
 
         let w = INITIAL_WEIGHT;
 
-        // 1. 입력 → 감정_Main, 이성_Main, 기억 (병렬)
+        // 1. 입력 → 감정_Main, 이성_Main, 기억 (병렬, weight 0.4~0.8 랜덤)
         let input_indices: Vec<usize> = self.input_idx.clone();
         for &idx in &input_indices {
             for _ in 0..per_neuron {
                 if let Some(target) = pick_random(&mut rng, &main_areas, idx) {
                     let tid = self.neurons[target].id;
-                    self.neurons[idx].add_seed_synapse(tid, 0.35);
+                    let w = 0.4 + rng.random::<f64>() * 0.4;
+                    self.neurons[idx].add_seed_synapse(tid, w);
                 }
             }
         }
@@ -332,7 +333,10 @@ impl Network {
                 } else {
                     // → 출력
                     if let Some(t) = pick_random(&mut rng, &output_info, idx) {
-                        self.neurons[idx].add_seed_synapse(t as NeuronId, 1.0);
+                        {
+                        let w = 0.4 + rng.random::<f64>() * 0.4;
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, w);
+                    }
                     }
                 }
             }
@@ -352,7 +356,10 @@ impl Network {
                     }
                 } else {
                     if let Some(t) = pick_random(&mut rng, &output_info, idx) {
-                        self.neurons[idx].add_seed_synapse(t as NeuronId, 1.0);
+                        {
+                        let w = 0.4 + rng.random::<f64>() * 0.4;
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, w);
+                    }
                     }
                 }
             }
@@ -370,7 +377,10 @@ impl Network {
                 } else if r < 0.7 {
                     // → 출력
                     if let Some(t) = pick_random(&mut rng, &output_info, idx) {
-                        self.neurons[idx].add_seed_synapse(t as NeuronId, 1.0);
+                        {
+                        let w = 0.4 + rng.random::<f64>() * 0.4;
+                        self.neurons[idx].add_seed_synapse(t as NeuronId, w);
+                    }
                     }
                 } else {
                     // → 해마
@@ -570,8 +580,8 @@ impl Network {
         }
 
         // STDP: 발화 타이밍 기반 강화/약화 (LTD = LTP × 1.2)
-        const STDP_A_PLUS_BASE: f64 = 0.004;
-        const STDP_A_MINUS_BASE: f64 = 0.0048; // LTD:LTP = 1.2:1
+        const STDP_A_PLUS_BASE: f64 = 0.003;
+        const STDP_A_MINUS_BASE: f64 = 0.0036; // LTD:LTP = 1.2:1
         const STDP_TAU: f64 = 20.0;
         const BCM_TARGET_RATE: f64 = 25.0;
         let spike_ticks: Vec<Option<u64>> = self.neurons.iter()
@@ -593,13 +603,15 @@ impl Network {
 
                 if let Some(post_tick) = spike_ticks[tidx] {
                     let dt = post_tick as f64 - global_tick as f64;
+                    // 가우시안 soft bound (peak 0.2, σ=0.4)
+                    let diff = syn.weight - 0.2;
+                    let factor = (-(diff * diff) / (2.0 * 0.4 * 0.4)).exp();
                     if dt == 0.0 {
-                        // 동시 발화: LTP
                         let ltp_bonus = syn.accumulate_ltp();
-                        syn.weight = (syn.weight + stdp_a_plus + ltp_bonus).min(1.0);
+                        let dw = (stdp_a_plus + ltp_bonus) * factor;
+                        syn.weight = (syn.weight + dw).min(1.0);
                     } else if dt < 0.0 && dt > -50.0 {
-                        // LTD
-                        let dw = stdp_a_minus * (dt / STDP_TAU).exp();
+                        let dw = stdp_a_minus * (dt / STDP_TAU).exp() * factor;
                         syn.weight = (syn.weight - dw).max(0.0);
                     }
                 }
@@ -708,13 +720,13 @@ impl Network {
         let enter_tick = self.global_tick;
         let fires = self.fires_since_sleep;
 
-        // 1. 시냅스 fatigue 감소 + sleep LTD (wake 초과분 정리)
-        const SLEEP_LTD: f64 = 0.001;
+        // 1. 시냅스 fatigue 감소 + 균일 weight scaling (SHY 가설)
+        const SLEEP_WEIGHT_DECAY: f64 = 0.95;
         let mut scaled = 0usize;
         for n in &mut self.neurons {
             for s in &mut n.synapses {
                 s.fatigue *= SLEEP_WEIGHT_SCALE;
-                s.weight = (s.weight - SLEEP_LTD).max(0.0);
+                s.weight *= SLEEP_WEIGHT_DECAY;
                 scaled += 1;
             }
         }
@@ -726,20 +738,22 @@ impl Network {
             n.fire_count_window = 0;
         }
 
-        // 3. 해마 재생: 해마 뉴런을 주기적으로 자극 → 시냅스 통해 기억 피질로 전파
+        // 3. 해마 재생: 해마 뉴런을 주기적으로 자극 → 시냅스 통해 전파 + STDP 적용
         let (hs, he) = self.hippocampus_range;
         const REPLAY_ROUNDS: usize = 5;
         const REPLAY_TICKS: u64 = 10;
+        const STDP_A_PLUS: f64 = 0.003;
+        const STDP_A_MINUS: f64 = 0.0036;
+        const STDP_TAU: f64 = 20.0;
         for _ in 0..REPLAY_ROUNDS {
-            // 해마 뉴런 전체를 약하게 자극
             for idx in hs..he {
                 if idx < self.neurons.len() {
                     self.neurons[idx].potential = 0.5;
                 }
             }
-            // 전파 (STDP 없이 발화+전달만)
             for _ in 0..REPLAY_TICKS {
                 self.global_tick += 1;
+                let global_tick = self.global_tick;
                 let threshold = self.threshold;
                 for n in &mut self.neurons {
                     n.decay();
@@ -749,6 +763,7 @@ impl Network {
                     .filter_map(|n| {
                         if n.potential >= threshold {
                             n.potential = 0.0;
+                            n.last_spike_tick = Some(global_tick);
                             let sign = if n.inhibitory { -1.0 } else { 1.0 };
                             let deliveries: Vec<_> = n.synapses.iter()
                                 .map(|s| (s.target, s.effective_weight() * sign))
@@ -765,8 +780,29 @@ impl Network {
                         }
                     }
                 }
+                // 재생 STDP: 일반 학습과 동일 로직
+                let tick_spikes: Vec<NeuronId> = fired.iter().map(|(nid, _)| *nid).collect();
+                let spike_ticks: Vec<Option<u64>> = self.neurons.iter().map(|n| n.last_spike_tick).collect();
+                for &nid in &tick_spikes {
+                    let pidx = nid as usize;
+                    if pidx >= self.neurons.len() { continue; }
+                    for syn in &mut self.neurons[pidx].synapses {
+                        let tidx = syn.target as usize;
+                        if tidx >= spike_ticks.len() { continue; }
+                        if let Some(post_tick) = spike_ticks[tidx] {
+                            let dt = post_tick as f64 - global_tick as f64;
+                            let diff = syn.weight - 0.2;
+                            let factor = (-(diff * diff) / (2.0 * 0.4 * 0.4)).exp();
+                            if dt == 0.0 {
+                                syn.weight = (syn.weight + STDP_A_PLUS * factor).min(1.0);
+                            } else if dt < 0.0 && dt > -50.0 {
+                                let dw = STDP_A_MINUS * (dt / STDP_TAU).exp() * factor;
+                                syn.weight = (syn.weight - dw).max(0.0);
+                            }
+                        }
+                    }
+                }
             }
-            // 라운드 후 리셋
             for n in &mut self.neurons {
                 n.potential = 0.0;
             }
@@ -785,9 +821,9 @@ impl Network {
         self.recent_spikes.clear();
 
         eprintln!(
-            "  [sleep] tick {} → {} (지속 {}틱, 누적 {}fire, {}시냅스 fatigue×{}, 해마재생 {}회)",
+            "  [sleep] tick {} → {} (지속 {}틱, 누적 {}fire, {}시냅스, 해마재생 {}회)",
             enter_tick, self.global_tick, SLEEP_DURATION_TICKS,
-            fires, scaled, SLEEP_WEIGHT_SCALE, REPLAY_ROUNDS,
+            fires, scaled, REPLAY_ROUNDS,
         );
     }
 
@@ -841,7 +877,7 @@ impl Network {
                 if let Some(&post_tick) = spike_map.get(&syn.target) {
                     let dt = post_tick as f64 - pre_tick as f64;
                     let dw = if dt > 0.0 {
-                        0.006 * (-dt.abs() / 20.0).exp()
+                        0.0072 * (-dt.abs() / 20.0).exp()
                     } else if dt < 0.0 {
                         -0.006 * (-dt.abs() / 20.0).exp()
                     } else { 0.0 };
@@ -864,7 +900,7 @@ impl Network {
         const SPROUT_RADIUS: f32 = 5.0;
         const MAX_SPROUT_PER_NEURON: usize = 1;
         const SPROUT_COOLDOWN_TICKS: u64 = 500;
-        const SPROUT_PROBABILITY: f64 = 0.1;
+        const SPROUT_PROBABILITY: f64 = 0.01;
         let current_tick = self.global_tick;
 
         let spiked_info: Vec<(NeuronId, f32, f32)> = spikes.iter()
@@ -955,8 +991,11 @@ impl Network {
     }
 
     fn prune(&mut self, min_weight: f64) -> usize {
+        let input_set: std::collections::HashSet<usize> =
+            self.input_idx.iter().cloned().collect();
         let mut removed = 0;
-        for neuron in &mut self.neurons {
+        for (idx, neuron) in self.neurons.iter_mut().enumerate() {
+            if input_set.contains(&idx) { continue; }
             let before = neuron.synapses.len();
             neuron.synapses.retain(|s| s.weight >= min_weight);
             removed += before - neuron.synapses.len();
