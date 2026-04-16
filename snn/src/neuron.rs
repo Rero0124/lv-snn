@@ -34,10 +34,17 @@ pub struct Neuron {
     /// 뉴런별 임계값 오프셋 (기본 1.0, map 영역은 1.7 = 0.5*1.7=0.85)
     #[serde(default = "default_threshold_scale")]
     pub threshold_scale: f64,
+    /// 뉴런별 자가 임계값 (기본 0.5, 발화 시 +0.001, 미발화 시 -0.001, 범위 0.5~1.0)
+    #[serde(default = "default_self_threshold")]
+    pub self_threshold: f64,
+    /// 자신에게로 들어오는 시냅스 역참조 (pre_neuron_idx, syn_idx)
+    #[serde(default)]
+    pub incoming: Vec<(usize, usize)>,
 }
 
 fn default_decay_rate() -> f64 { 0.7 }
 fn default_threshold_scale() -> f64 { 1.0 }
+fn default_self_threshold() -> f64 { 0.5 }
 
 fn default_excitability() -> f64 { 1.0 }
 
@@ -46,7 +53,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: false, skip_refractory: false,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, incoming: Vec::new(),
         }
     }
 
@@ -54,7 +61,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: true, skip_refractory: false,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, incoming: Vec::new(),
         }
     }
 
@@ -63,7 +70,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory, skip_refractory: false,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.85, threshold_scale: 1.0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.85, threshold_scale: 1.0, self_threshold: 0.5, incoming: Vec::new(),
         }
     }
 
@@ -71,7 +78,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: false, skip_refractory: true,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.3, incoming: Vec::new(),
         }
     }
 
@@ -103,25 +110,31 @@ impl Neuron {
                     let noise = if noise_range > 0.0 {
                         (rand::random::<f64>() * 2.0 - 1.0) * noise_range
                     } else { 0.0 };
-                    if self.potential + noise < (threshold * self.threshold_scale / self.excitability) * 2.0 {
+                    if self.potential + noise < (self.self_threshold * self.threshold_scale / self.excitability) * 2.0 {
                         return None;
                     }
                 }
             }
         }
+        let _ = threshold; // 전역 threshold 미사용 (뉴런별 self_threshold로 대체)
 
         let noise = if noise_range > 0.0 {
             (rand::random::<f64>() * 2.0 - 1.0) * noise_range
         } else { 0.0 };
         let effective = self.potential + noise;
-        let adj_threshold = threshold * self.threshold_scale / self.excitability;
+        let adj_threshold = self.self_threshold * self.threshold_scale / self.excitability;
         let should_fire = effective >= adj_threshold
             || (!self.skip_refractory && rand::random_bool(if stimulated { 0.000001 } else { 0.00001 }));
+
+        // 신호 받은 상태인지 (potential > 0: 입력이 있었다는 뜻)
+        let received_signal = self.potential > 0.01;
 
         if should_fire {
             self.potential = 0.0;
             self.last_spike_tick = Some(tick);
             self.fire_count_window += 1;
+            // 발화 시: self_threshold +0.001 (최대 1.0)
+            self.self_threshold = (self.self_threshold + 0.001).min(1.0);
             let sign = if self.inhibitory { -1.0 } else { 1.0 };
             let deliveries: Vec<_> = self.synapses.iter_mut()
                 .map(|s| {
@@ -133,6 +146,12 @@ impl Neuron {
                 .collect();
             Some(deliveries)
         } else {
+            // 미발화 + 신호 받음: self_threshold -0.001 (최소 0.5)
+            if received_signal {
+                // 입출력 뉴런은 최소 0.3, 일반 뉴런은 최소 0.5
+                let min_thr = if self.skip_refractory { 0.3 } else { 0.5 };
+                self.self_threshold = (self.self_threshold - 0.001).max(min_thr);
+            }
             None
         }
     }

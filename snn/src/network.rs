@@ -194,6 +194,7 @@ impl Network {
 
         // 초기 랜덤 시냅스
         net.seed_random_synapses(10);
+        net.rebuild_incoming();
 
         let total_synapses: usize = net.neurons.iter().map(|n| n.synapses.len()).sum();
         eprintln!("  [초기화] 어휘 {}개, 뉴런 {}개 (감정 {}, 이성 {}, 기억 {}, 해마 {}, 입출력 {}), 시냅스 {}개",
@@ -591,6 +592,7 @@ impl Network {
         let fire_counts: Vec<u32> = self.neurons.iter()
             .map(|n| n.fire_count_window).collect();
 
+        // Pass 1: pre가 지금 발화 → post의 과거 발화 확인 → dt ≤ 0 케이스 처리
         for &nid in &tick_spikes {
             let pidx = nid as usize;
             if pidx >= self.neurons.len() { continue; }
@@ -603,18 +605,46 @@ impl Network {
 
                 if let Some(post_tick) = spike_ticks[tidx] {
                     let dt = post_tick as f64 - global_tick as f64;
-                    // 가우시안 soft bound (peak 0.2, σ=0.4)
-                    let diff = syn.weight - 0.2;
-                    let factor = (-(diff * diff) / (2.0 * 0.4 * 0.4)).exp();
+                    let diff_ltp = syn.weight - 0.2;
+                    let diff_ltd = syn.weight - 1.0;
+                    let f_ltp = (-(diff_ltp * diff_ltp) / (2.0 * 0.4 * 0.4)).exp();
+                    let f_ltd = (-(diff_ltd * diff_ltd) / (2.0 * 0.4 * 0.4)).exp();
                     if dt == 0.0 {
+                        // 동시 발화: LTP
                         let ltp_bonus = syn.accumulate_ltp();
-                        let dw = (stdp_a_plus + ltp_bonus) * factor;
+                        let dw = (stdp_a_plus + ltp_bonus) * f_ltp;
                         syn.weight = (syn.weight + dw).min(1.0);
                     } else if dt < 0.0 && dt > -50.0 {
-                        let dw = stdp_a_minus * (dt / STDP_TAU).exp() * factor;
+                        // post가 먼저 발화: LTD
+                        let dw = stdp_a_minus * (dt / STDP_TAU).exp() * f_ltd;
                         syn.weight = (syn.weight - dw).max(0.0);
                     }
                 }
+            }
+        }
+
+        // Pass 2: 진짜 LTP — post가 지금 발화, pre가 과거 발화 (dt > 0)
+        // 뉴런의 incoming 역참조로 해당 post의 incoming 시냅스만 순회
+        for &post_id in &tick_spikes {
+            let post_idx = post_id as usize;
+            if post_idx >= self.neurons.len() { continue; }
+            let pairs = self.neurons[post_idx].incoming.clone();
+            for (pre_idx, syn_idx) in pairs {
+                let pre_tick = match spike_ticks.get(pre_idx).copied().flatten() {
+                    Some(t) if t < global_tick && global_tick - t < 50 => t,
+                    _ => continue,
+                };
+                if syn_idx >= self.neurons[pre_idx].synapses.len() { continue; }
+                let bcm_scale = BCM_TARGET_RATE / (fire_counts[pre_idx] as f64 + BCM_TARGET_RATE);
+                let stdp_a_plus = STDP_A_PLUS_BASE * bcm_scale;
+                let dt = (global_tick - pre_tick) as f64;
+                let syn = &mut self.neurons[pre_idx].synapses[syn_idx];
+                let diff_ltp = syn.weight - 0.2;
+                let f_ltp = (-(diff_ltp * diff_ltp) / (2.0 * 0.4 * 0.4)).exp();
+                let base = stdp_a_plus * (-dt / STDP_TAU).exp();
+                let ltp_bonus = syn.accumulate_ltp();
+                let dw = (base + ltp_bonus) * f_ltp;
+                syn.weight = (syn.weight + dw).min(1.0);
             }
         }
 
@@ -791,12 +821,14 @@ impl Network {
                         if tidx >= spike_ticks.len() { continue; }
                         if let Some(post_tick) = spike_ticks[tidx] {
                             let dt = post_tick as f64 - global_tick as f64;
-                            let diff = syn.weight - 0.2;
-                            let factor = (-(diff * diff) / (2.0 * 0.4 * 0.4)).exp();
+                            let diff_ltp = syn.weight - 0.2;
+                            let diff_ltd = syn.weight - 1.0;
+                            let f_ltp = (-(diff_ltp * diff_ltp) / (2.0 * 0.4 * 0.4)).exp();
+                            let f_ltd = (-(diff_ltd * diff_ltd) / (2.0 * 0.4 * 0.4)).exp();
                             if dt == 0.0 {
-                                syn.weight = (syn.weight + STDP_A_PLUS * factor).min(1.0);
+                                syn.weight = (syn.weight + STDP_A_PLUS * f_ltp).min(1.0);
                             } else if dt < 0.0 && dt > -50.0 {
-                                let dw = STDP_A_MINUS * (dt / STDP_TAU).exp() * factor;
+                                let dw = STDP_A_MINUS * (dt / STDP_TAU).exp() * f_ltd;
                                 syn.weight = (syn.weight - dw).max(0.0);
                             }
                         }
@@ -958,6 +990,11 @@ impl Network {
 
         for (pre_idx, post_id) in new_synapses {
             self.neurons[pre_idx].add_synapse(post_id, sprout_weight);
+            let syn_idx = self.neurons[pre_idx].synapses.len() - 1;
+            let post_idx = post_id as usize;
+            if post_idx < self.neurons.len() {
+                self.neurons[post_idx].incoming.push((pre_idx, syn_idx));
+            }
         }
     }
 
@@ -1000,7 +1037,27 @@ impl Network {
             neuron.synapses.retain(|s| s.weight >= min_weight);
             removed += before - neuron.synapses.len();
         }
+        // syn_idx 재배치 후 역참조 재구축
+        if removed > 0 {
+            self.rebuild_incoming();
+        }
         removed
+    }
+
+    /// 각 뉴런의 incoming 역참조 재구축
+    fn rebuild_incoming(&mut self) {
+        for n in &mut self.neurons {
+            n.incoming.clear();
+        }
+        for pre_idx in 0..self.neurons.len() {
+            let synapses_len = self.neurons[pre_idx].synapses.len();
+            for syn_idx in 0..synapses_len {
+                let target = self.neurons[pre_idx].synapses[syn_idx].target as usize;
+                if target < self.neurons.len() {
+                    self.neurons[target].incoming.push((pre_idx, syn_idx));
+                }
+            }
+        }
     }
 
     // ── 상태 조회 ──
@@ -1134,7 +1191,7 @@ impl Network {
         let synapse_count: usize = snap.neurons.iter().map(|n| n.synapses.len()).sum();
         eprintln!("  [불러오기] {} (뉴런 {}개, 시냅스 {}개, 어휘 {}개)",
             path.display(), snap.neurons.len(), synapse_count, snap.vocab.len());
-        Some(Network {
+        let mut net = Network {
             neurons: snap.neurons,
             vocab: snap.vocab,
             reverse_vocab: snap.reverse_vocab,
@@ -1159,7 +1216,9 @@ impl Network {
             global_tick: 0,
             fires_since_sleep: 0,
             last_sleep_tick: 0,
-        })
+        };
+        net.rebuild_incoming();
+        Some(net)
     }
 }
 

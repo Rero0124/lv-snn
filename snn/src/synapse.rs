@@ -18,30 +18,38 @@ pub struct Synapse {
     /// 마지막 사용 tick (자체 prune 판정용)
     #[serde(default)]
     pub last_used_tick: u64,
+    /// 전달 빈도 (자주 쓰일수록 약화)
+    #[serde(default)]
+    pub recent_rate: f64,
 }
 
 fn default_fatigue() -> f64 { 1.0 }
 
 impl Synapse {
     pub fn new(target: NeuronId, weight: f64) -> Self {
-        Self { target, weight, seed: false, fatigue: 1.0, ltp_trace: 0.0, last_used_tick: 0 }
+        Self { target, weight, seed: false, fatigue: 1.0, ltp_trace: 0.0, last_used_tick: 0, recent_rate: 0.0 }
     }
 
     pub fn new_seed(target: NeuronId, weight: f64) -> Self {
-        Self { target, weight, seed: true, fatigue: 1.0, ltp_trace: 0.0, last_used_tick: 0 }
+        Self { target, weight, seed: true, fatigue: 1.0, ltp_trace: 0.0, last_used_tick: 0, recent_rate: 0.0 }
     }
 
-    /// 발화 시 피로 적용
+    /// 발화 시 피로 + 전달 빈도 기반 자동 약화
+    /// 반환: weight 감소량 (rate × 0.01)
     #[inline]
     pub fn fire_fatigue(&mut self) {
         self.fatigue *= 0.90;
+        self.recent_rate = (self.recent_rate + 0.1).min(1.0);
+        // 자주 전달할수록 weight 약화 (rate 1.0 시 -0.01)
+        self.weight = (self.weight - 0.01 * self.recent_rate).max(0.0);
     }
 
-    /// 매 틱 피로 회복 + LTP trace 감쇠
+    /// 매 틱 피로 회복 + LTP trace 감쇠 + rate 감쇠
     #[inline]
     pub fn recover(&mut self) {
         self.fatigue = (self.fatigue + 0.01).min(1.0);
         self.ltp_trace *= 0.95;
+        self.recent_rate *= 0.99;
     }
 
     /// LTP 누적: 활성화될 때마다 trace 증가, 누적된 만큼 추가 강화 반환
