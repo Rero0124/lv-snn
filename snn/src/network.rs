@@ -594,9 +594,10 @@ impl Network {
             .map(|n| n.fire_count_window).collect();
 
         // Pass 1: pre가 지금 발화 → post의 과거 발화 확인 → dt ≤ 0 케이스 처리
+        // (흥분성 시냅스 전용 — 억제성 뉴런은 아래 iSTDP 가 담당)
         for &nid in &tick_spikes {
             let pidx = nid as usize;
-            if pidx >= self.neurons.len() { continue; }
+            if pidx >= self.neurons.len() || self.neurons[pidx].inhibitory { continue; }
             let bcm_scale = BCM_TARGET_RATE / (fire_counts[pidx] as f64 + BCM_TARGET_RATE);
             let stdp_a_plus = STDP_A_PLUS_BASE * bcm_scale;
             let stdp_a_minus = STDP_A_MINUS_BASE * (config::BCM_LTD_ANCHOR - bcm_scale);
@@ -612,8 +613,7 @@ impl Network {
                     let f_ltd = (-(diff_ltd * diff_ltd) / (2.0 * config::STDP_WEIGHT_SIGMA * config::STDP_WEIGHT_SIGMA)).exp();
                     if dt == 0.0 {
                         // 동시 발화: LTP
-                        let ltp_bonus = syn.accumulate_ltp();
-                        let dw = (stdp_a_plus + ltp_bonus) * f_ltp;
+                        let dw = stdp_a_plus * f_ltp;
                         syn.weight = (syn.weight + dw).min(1.0);
                     } else if dt < 0.0 && dt > -config::STDP_WINDOW {
                         // post가 먼저 발화: LTD
@@ -626,11 +626,13 @@ impl Network {
 
         // Pass 2: 진짜 LTP — post가 지금 발화, pre가 과거 발화 (dt > 0)
         // 뉴런의 incoming 역참조로 해당 post의 incoming 시냅스만 순회
+        // (흥분성 시냅스 전용 — 억제성 pre 는 아래 iSTDP 가 담당)
         for &post_id in &tick_spikes {
             let post_idx = post_id as usize;
             if post_idx >= self.neurons.len() { continue; }
             let pairs = self.neurons[post_idx].incoming.clone();
             for (pre_idx, syn_idx) in pairs {
+                if pre_idx >= self.neurons.len() || self.neurons[pre_idx].inhibitory { continue; }
                 let pre_tick = match spike_ticks.get(pre_idx).copied().flatten() {
                     Some(t) if t < global_tick && global_tick - t < config::STDP_WINDOW as u64 => t,
                     _ => continue,
@@ -642,30 +644,14 @@ impl Network {
                 let syn = &mut self.neurons[pre_idx].synapses[syn_idx];
                 let diff_ltp = syn.weight - config::STDP_WEIGHT_TARGET_LTP;
                 let f_ltp = (-(diff_ltp * diff_ltp) / (2.0 * config::STDP_WEIGHT_SIGMA * config::STDP_WEIGHT_SIGMA)).exp();
-                let base = stdp_a_plus * (-dt / STDP_TAU).exp();
-                let ltp_bonus = syn.accumulate_ltp();
-                let dw = (base + ltp_bonus) * f_ltp;
+                let dw = stdp_a_plus * (-dt / STDP_TAU).exp() * f_ltp;
                 syn.weight = (syn.weight + dw).min(1.0);
             }
         }
 
-        // iSTDP: 억제성 뉴런 발화 시, 타깃 활동 기반 억제 시냅스 조정
-        const ISTDP_RATE: f64 = config::ISTDP_RATE;
-        const ISTDP_TARGET_RATE: f64 = config::ISTDP_TARGET_RATE;
-        for &nid in &tick_spikes {
-            let pidx = nid as usize;
-            if pidx >= self.neurons.len() || !self.neurons[pidx].inhibitory { continue; }
-            for syn in &mut self.neurons[pidx].synapses {
-                let tidx = syn.target as usize;
-                if tidx >= fire_counts.len() { continue; }
-                let target_rate = fire_counts[tidx] as f64;
-                if target_rate > ISTDP_TARGET_RATE {
-                    syn.weight = (syn.weight + ISTDP_RATE).min(1.0);
-                } else {
-                    syn.weight = (syn.weight - ISTDP_RATE * config::ISTDP_DOWN_FACTOR).max(0.0);
-                }
-            }
-        }
+        // iSTDP: 억제 시냅스는 흥분성 STDP 와 동일하게 발화 타이밍 기반으로
+        // LTP/LTD 학습 (단, 대칭형 규칙 — apply_istdp 참고)
+        self.apply_istdp(&tick_spikes, &spike_ticks, global_tick);
 
         for &nid in &tick_spikes {
             self.recent_spikes.push((nid, global_tick));
@@ -746,6 +732,66 @@ impl Network {
         completed_ids
     }
 
+    /// iSTDP (억제 가소성) — Vogels et al. (2011) 대칭형 스파이크-타이밍 규칙.
+    ///
+    /// 흥분성 STDP 와 마찬가지로 발화 타이밍(dt)에 기반하지만, 억제 시냅스는
+    /// 인과 방향과 무관하게 **동시발화면 강화**되는 대칭형이다:
+    ///   • LTP(억제 강화, weight↑): pre·post 가 시간창 안에서 함께 발화
+    ///       Δw = +η · exp(−|dt|/τ)
+    ///   • LTD(억제 약화, weight↓): pre 가 발화할 때마다 상수 감압항 α
+    ///       Δw = −η · α
+    /// 두 항의 평형점이 목표 발화율이 되어 E/I 균형으로 수렴한다.
+    /// 억제성 pre 뉴런(과 그 시냅스)만 대상으로 한다.
+    ///
+    /// `tick_spikes`: 이번 틱에 발화한 뉴런, `spike_ticks`: 각 뉴런의
+    /// `last_spike_tick` 스냅샷.
+    fn apply_istdp(&mut self, tick_spikes: &[NeuronId], spike_ticks: &[Option<u64>], global_tick: u64) {
+        const ETA: f64 = config::ISTDP_LR;
+        const TAU: f64 = config::ISTDP_TAU;
+        const WINDOW: f64 = config::ISTDP_WINDOW;
+        const ALPHA: f64 = config::ISTDP_DEPRESSION;
+
+        // Pass A: 억제성 pre 가 지금 발화 → 발화마다 상수 감압(LTD).
+        //         post 가 시간창 내(과거~동시, dt ≤ 0)에 발화했으면 강화(LTP).
+        for &nid in tick_spikes {
+            let pidx = nid as usize;
+            if pidx >= self.neurons.len() || !self.neurons[pidx].inhibitory { continue; }
+            for syn in &mut self.neurons[pidx].synapses {
+                let tidx = syn.target as usize;
+                if tidx >= spike_ticks.len() { continue; }
+                // 상수 감압항 (LTD): pre 발화 1회당 무조건 적용
+                let mut dw = -ETA * ALPHA;
+                // 동시/직전 발화 강화항 (LTP): post 가 시간창 내 발화했을 때
+                if let Some(post_tick) = spike_ticks[tidx] {
+                    let dt = post_tick as f64 - global_tick as f64; // ≤ 0
+                    if dt > -WINDOW {
+                        dw += ETA * (dt / TAU).exp();
+                    }
+                }
+                syn.weight = (syn.weight + dw).clamp(0.0, 1.0);
+            }
+        }
+
+        // Pass B: post 가 지금 발화 → 억제성 pre 가 시간창 내 과거(dt > 0)에
+        //         발화했으면 강화(LTP). 대칭 커널의 나머지 절반.
+        for &post_id in tick_spikes {
+            let post_idx = post_id as usize;
+            if post_idx >= self.neurons.len() { continue; }
+            let pairs = self.neurons[post_idx].incoming.clone();
+            for (pre_idx, syn_idx) in pairs {
+                if pre_idx >= self.neurons.len() || !self.neurons[pre_idx].inhibitory { continue; }
+                let pre_tick = match spike_ticks.get(pre_idx).copied().flatten() {
+                    Some(t) if t < global_tick && global_tick - t < WINDOW as u64 => t,
+                    _ => continue,
+                };
+                if syn_idx >= self.neurons[pre_idx].synapses.len() { continue; }
+                let dt = (global_tick - pre_tick) as f64; // > 0
+                let syn = &mut self.neurons[pre_idx].synapses[syn_idx];
+                syn.weight = (syn.weight + ETA * (-dt / TAU).exp()).clamp(0.0, 1.0);
+            }
+        }
+    }
+
     /// 수면
     pub fn enter_sleep(&mut self) {
         let enter_tick = self.global_tick;
@@ -812,11 +858,12 @@ impl Network {
                     }
                 }
                 // 재생 STDP: 일반 학습과 동일 로직
+                // (흥분성 시냅스는 STDP, 억제성 시냅스는 iSTDP 로 분리 적용)
                 let tick_spikes: Vec<NeuronId> = fired.iter().map(|(nid, _)| *nid).collect();
                 let spike_ticks: Vec<Option<u64>> = self.neurons.iter().map(|n| n.last_spike_tick).collect();
                 for &nid in &tick_spikes {
                     let pidx = nid as usize;
-                    if pidx >= self.neurons.len() { continue; }
+                    if pidx >= self.neurons.len() || self.neurons[pidx].inhibitory { continue; }
                     for syn in &mut self.neurons[pidx].synapses {
                         let tidx = syn.target as usize;
                         if tidx >= spike_ticks.len() { continue; }
@@ -835,6 +882,7 @@ impl Network {
                         }
                     }
                 }
+                self.apply_istdp(&tick_spikes, &spike_ticks, global_tick);
             }
             for n in &mut self.neurons {
                 n.potential = 0.0;

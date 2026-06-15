@@ -13,9 +13,6 @@ pub struct Synapse {
     /// 시냅스 피로도 (1.0 = 정상, 0.0 = 완전 고갈)
     #[serde(default = "default_fatigue")]
     pub fatigue: f64,
-    /// LTP 누적 카운터: 짧은 시간 내 반복 활성화 횟수
-    #[serde(default)]
-    pub ltp_trace: f64,
     /// 마지막 사용 tick (자체 prune 판정용)
     #[serde(default)]
     pub last_used_tick: u64,
@@ -28,11 +25,11 @@ fn default_fatigue() -> f64 { config::FATIGUE_INIT }
 
 impl Synapse {
     pub fn new(target: NeuronId, weight: f64) -> Self {
-        Self { target, weight, seed: false, fatigue: config::FATIGUE_INIT, ltp_trace: 0.0, last_used_tick: 0, recent_rate: 0.0 }
+        Self { target, weight, seed: false, fatigue: config::FATIGUE_INIT, last_used_tick: 0, recent_rate: 0.0 }
     }
 
     pub fn new_seed(target: NeuronId, weight: f64) -> Self {
-        Self { target, weight, seed: true, fatigue: config::FATIGUE_INIT, ltp_trace: 0.0, last_used_tick: 0, recent_rate: 0.0 }
+        Self { target, weight, seed: true, fatigue: config::FATIGUE_INIT, last_used_tick: 0, recent_rate: 0.0 }
     }
 
     /// 발화 시 피로(fatigue) 누적. recent_rate 는 전달 빈도 추적용으로만 갱신
@@ -43,24 +40,11 @@ impl Synapse {
         self.recent_rate = (self.recent_rate + config::RECENT_RATE_STEP).min(config::RECENT_RATE_MAX);
     }
 
-    /// 매 틱 피로 회복 + LTP trace 감쇠 + rate 감쇠
+    /// 매 틱 피로 회복 + rate 감쇠
     #[inline]
     pub fn recover(&mut self) {
         self.fatigue = (self.fatigue + config::FATIGUE_RECOVER).min(config::FATIGUE_MAX);
-        self.ltp_trace *= config::LTP_TRACE_DECAY;
         self.recent_rate *= config::RECENT_RATE_DECAY;
-    }
-
-    /// LTP 누적: 활성화될 때마다 trace 증가, 누적된 만큼 추가 강화 반환
-    #[inline]
-    pub fn accumulate_ltp(&mut self) -> f64 {
-        self.ltp_trace += 1.0;
-        // trace가 2 이상이면 반복 자극 → 추가 LTP
-        if self.ltp_trace >= config::LTP_TRACE_THRESHOLD {
-            (self.ltp_trace - 1.0) * config::LTP_TRACE_GAIN
-        } else {
-            0.0
-        }
     }
 
     /// 실효 가중치 (weight × fatigue)

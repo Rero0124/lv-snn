@@ -84,13 +84,13 @@ pub const RELATIVE_REFRACTORY_INH: u64 = 4;
 pub const RELATIVE_REFRACTORY_FACTOR: f64 = 2.0;
 
 /// 막전위 감쇠율
-pub const DECAY_RATE: f64 = 0.7; // 기본
-pub const DECAY_RATE_SLOW: f64 = 0.85; // 기억 / 해마
+pub const DECAY_RATE: f64 = 0.87; // sweep
+pub const DECAY_RATE_SLOW: f64 = 0.95; // 기억 / 해마
 pub const THRESHOLD_SCALE: f64 = 1.0; // 기본 임계 스케일
 
 /// 자가 임계값 (self_threshold)
-pub const SELF_THRESHOLD_INIT: f64 = 0.5; // 일반 뉴런 기본값 = 하한
-pub const SELF_THRESHOLD_IO: f64 = 0.3; // 입출력 뉴런 기본값 = 하한
+pub const SELF_THRESHOLD_INIT: f64 = 0.6; // 일반 뉴런 기본값 = 하한
+pub const SELF_THRESHOLD_IO: f64 = 0.4; // 입출력 뉴런 기본값 = 하한
 pub const SELF_THRESHOLD_MAX: f64 = 1.0; // 상한
 pub const SELF_THRESHOLD_STEP: f64 = 0.001; // 발화 시 +, 미발화 시 -
 
@@ -123,10 +123,6 @@ pub const RECENT_RATE_STEP: f64 = 0.1; // 발화 시 전달 빈도 증가
 pub const RECENT_RATE_MAX: f64 = 1.0;
 pub const RECENT_RATE_DECAY: f64 = 0.99; // 매 틱 감쇠
 
-pub const LTP_TRACE_DECAY: f64 = 0.95; // 매 틱 trace 감쇠
-pub const LTP_TRACE_THRESHOLD: f64 = 2.0; // 이 값 이상이면 추가 LTP
-pub const LTP_TRACE_GAIN: f64 = 0.001; // (trace - 1) * gain
-
 // ─────────────────────────────────────────────────────────────
 // STDP / BCM (network.rs :: tick)
 // ─────────────────────────────────────────────────────────────
@@ -144,12 +140,22 @@ pub const STDP_WEIGHT_TARGET_LTD: f64 = 1.0; // LTD 가우시안 중심
 pub const STDP_WEIGHT_SIGMA: f64 = 0.4; // 가우시안 표준편차
 
 // ─────────────────────────────────────────────────────────────
-// iSTDP (억제 가소성, network.rs :: tick)
+// iSTDP (억제 가소성, network.rs :: apply_istdp)
+//   Vogels et al. (2011) 대칭형 스파이크-타이밍 규칙. 흥분성 STDP 와 똑같이
+//   발화 타이밍(dt)에 기반하지만, 억제 시냅스는 인과 방향과 무관하게
+//   "동시발화면 강화"되는 대칭형이라는 점이 다르다.
+//     • LTP(억제 강화, weight↑): pre·post 가 시간창 안에서 함께 발화
+//         Δw = +η · exp(−|dt|/τ)
+//     • LTD(억제 약화, weight↓): pre 가 발화할 때마다 상수 감압항 α
+//         Δw = −η · α
+//   두 항의 평형점이 목표 발화율이 되어 흥분/억제(E/I) 균형으로 수렴한다.
+//   (억제 시냅스에는 iSTDP 만, 흥분 시냅스에는 STDP 만 적용된다.)
 // ─────────────────────────────────────────────────────────────
 
-pub const ISTDP_RATE: f64 = 0.04;
-pub const ISTDP_TARGET_RATE: f64 = 10.0;
-pub const ISTDP_DOWN_FACTOR: f64 = 0.5; // 목표 미만 시 감소 배수
+pub const ISTDP_LR: f64 = 0.005; // η: 이벤트당 학습률 (흥분성 STDP_A_PLUS≈0.003 와 동급)
+pub const ISTDP_TAU: f64 = 20.0; // 타이밍 커널 시간 상수 (틱)
+pub const ISTDP_WINDOW: f64 = 50.0; // dt 유효 범위 (틱)
+pub const ISTDP_DEPRESSION: f64 = 0.5; // α: pre 발화당 상수 감압항 (목표 발화율 설정)
 
 // ─────────────────────────────────────────────────────────────
 // 자극 / 틱 주기 (network.rs)
