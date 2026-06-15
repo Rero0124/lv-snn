@@ -122,7 +122,6 @@ pub const FATIGUE_MAX: f64 = 1.0;
 pub const RECENT_RATE_STEP: f64 = 0.1; // 발화 시 전달 빈도 증가
 pub const RECENT_RATE_MAX: f64 = 1.0;
 pub const RECENT_RATE_DECAY: f64 = 0.99; // 매 틱 감쇠
-pub const RATE_WEIGHT_PENALTY: f64 = 0.01; // weight -= penalty * rate
 
 pub const LTP_TRACE_DECAY: f64 = 0.95; // 매 틱 trace 감쇠
 pub const LTP_TRACE_THRESHOLD: f64 = 2.0; // 이 값 이상이면 추가 LTP

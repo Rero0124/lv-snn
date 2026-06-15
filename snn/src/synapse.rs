@@ -35,14 +35,12 @@ impl Synapse {
         Self { target, weight, seed: true, fatigue: config::FATIGUE_INIT, ltp_trace: 0.0, last_used_tick: 0, recent_rate: 0.0 }
     }
 
-    /// 발화 시 피로 + 전달 빈도 기반 자동 약화
-    /// 반환: weight 감소량 (rate × 0.01)
+    /// 발화 시 피로(fatigue) 누적. recent_rate 는 전달 빈도 추적용으로만 갱신
+    /// (현재 전달력에는 미반영 — 쿨다운 페널티/할인 제거됨).
     #[inline]
     pub fn fire_fatigue(&mut self) {
         self.fatigue *= config::FATIGUE_DECAY;
         self.recent_rate = (self.recent_rate + config::RECENT_RATE_STEP).min(config::RECENT_RATE_MAX);
-        // 자주 전달할수록 weight 약화 (rate 1.0 시 -0.01)
-        self.weight = (self.weight - config::RATE_WEIGHT_PENALTY * self.recent_rate).max(config::WEIGHT_MIN);
     }
 
     /// 매 틱 피로 회복 + LTP trace 감쇠 + rate 감쇠
