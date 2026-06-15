@@ -1,3 +1,4 @@
+use crate::config;
 use crate::neuron::{Neuron, NeuronId};
 use crate::region::RegionType;
 use crate::tokenizer;
@@ -6,21 +7,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-// ── 상수 ──
+// ── 상수 (config.rs 에서 관리) ──
 
-const INITIAL_WEIGHT: f64 = 0.2;
-const MIN_WEIGHT: f64 = 0.1;
-const PRUNE_INTERVAL: u64 = 5_000;
-const EMOTION_COUNT: usize = 5000;
-const REASON_COUNT: usize = 5000;
-const MEMORY_COUNT: usize = 2000;
-const HIPPOCAMPUS_COUNT: usize = 500;
+const INITIAL_WEIGHT: f64 = config::INITIAL_WEIGHT;
+const MIN_WEIGHT: f64 = config::MIN_WEIGHT;
+const PRUNE_INTERVAL: u64 = config::PRUNE_INTERVAL;
+const EMOTION_COUNT: usize = config::EMOTION_COUNT;
+const REASON_COUNT: usize = config::REASON_COUNT;
+const MEMORY_COUNT: usize = config::MEMORY_COUNT;
+const HIPPOCAMPUS_COUNT: usize = config::HIPPOCAMPUS_COUNT;
 
 // ── 수면 파라미터 ──
-const SLEEP_FIRE_INTERVAL: u64 = 30_000;
-const SLEEP_TICK_INTERVAL: u64 = 500_000;
-const SLEEP_DURATION_TICKS: u64 = 1_000;
-const SLEEP_WEIGHT_SCALE: f64 = 0.92;
+const SLEEP_FIRE_INTERVAL: u64 = config::SLEEP_FIRE_INTERVAL;
+const SLEEP_TICK_INTERVAL: u64 = config::SLEEP_TICK_INTERVAL;
+const SLEEP_DURATION_TICKS: u64 = config::SLEEP_DURATION_TICKS;
+const SLEEP_WEIGHT_SCALE: f64 = config::SLEEP_WEIGHT_SCALE;
 
 // ── 발화 기록 ──
 
@@ -94,16 +95,16 @@ pub struct Network {
 impl Network {
     pub fn new() -> Self {
         let mut neurons: Vec<Neuron> = Vec::new();
-        let cols = 50usize;
+        let cols = config::GRID_COLS;
 
         // 감정 뉴런: Main 80% + Map 20% (30% 억제성)
         let emotion_start = neurons.len();
-        let emotion_main_count = EMOTION_COUNT * 80 / 100;
+        let emotion_main_count = EMOTION_COUNT * config::MAIN_AREA_PCT / 100;
         for i in 0..EMOTION_COUNT {
             let x = (i % cols) as f32;
             let y = (i / cols) as f32;
             let id = neurons.len() as NeuronId;
-            if i % 10 >= 7 {
+            if i % config::INHIBITORY_MOD >= config::INHIBITORY_THRESHOLD {
                 neurons.push(Neuron::new_inhibitory(id, x, y));
             } else {
                 neurons.push(Neuron::new(id, x, y));
@@ -114,17 +115,17 @@ impl Network {
         let emotion_map_range = (emotion_start + emotion_main_count, emotion_end);
         // Map 영역 threshold_scale 설정 (0.85 / 0.50 = 1.7)
         for idx in emotion_map_range.0..emotion_map_range.1 {
-            neurons[idx].threshold_scale = 1.7;
+            neurons[idx].threshold_scale = config::MAP_THRESHOLD_SCALE;
         }
 
         // 이성 뉴런: Main 80% + Map 20% (30% 억제성)
         let reason_start = neurons.len();
-        let reason_main_count = REASON_COUNT * 80 / 100;
+        let reason_main_count = REASON_COUNT * config::MAIN_AREA_PCT / 100;
         for i in 0..REASON_COUNT {
             let x = (i % cols) as f32;
-            let y = (i / cols) as f32 + 100.0;
+            let y = (i / cols) as f32 + config::REASON_Y_OFFSET;
             let id = neurons.len() as NeuronId;
-            if i % 10 >= 7 {
+            if i % config::INHIBITORY_MOD >= config::INHIBITORY_THRESHOLD {
                 neurons.push(Neuron::new_inhibitory(id, x, y));
             } else {
                 neurons.push(Neuron::new(id, x, y));
@@ -134,16 +135,16 @@ impl Network {
         let reason_main_range = (reason_start, reason_start + reason_main_count);
         let reason_map_range = (reason_start + reason_main_count, reason_end);
         for idx in reason_map_range.0..reason_map_range.1 {
-            neurons[idx].threshold_scale = 1.7;
+            neurons[idx].threshold_scale = config::MAP_THRESHOLD_SCALE;
         }
 
         // 기억 피질 뉴런 (30% 억제성, 느린 감쇠 0.85)
         let memory_start = neurons.len();
         for i in 0..MEMORY_COUNT {
-            let x = (i % cols) as f32 + 50.0;
-            let y = (i / cols) as f32 + 50.0;
+            let x = (i % cols) as f32 + config::MEMORY_X_OFFSET;
+            let y = (i / cols) as f32 + config::MEMORY_Y_OFFSET;
             let id = neurons.len() as NeuronId;
-            let inhibitory = i % 10 >= 7;
+            let inhibitory = i % config::INHIBITORY_MOD >= config::INHIBITORY_THRESHOLD;
             neurons.push(Neuron::new_slow_decay(id, x, y, inhibitory));
         }
         let memory_end = neurons.len();
@@ -151,10 +152,10 @@ impl Network {
         // 해마 뉴런 (20% 억제성, 느린 감쇠 0.85)
         let hippo_start = neurons.len();
         for i in 0..HIPPOCAMPUS_COUNT {
-            let x = (i % 25) as f32 + 60.0;
-            let y = (i / 25) as f32 + 75.0;
+            let x = (i % config::HIPPO_COLS) as f32 + config::HIPPO_X_OFFSET;
+            let y = (i / config::HIPPO_COLS) as f32 + config::HIPPO_Y_OFFSET;
             let id = neurons.len() as NeuronId;
-            let inhibitory = i % 10 >= 8;
+            let inhibitory = i % config::INHIBITORY_MOD >= config::HIPPO_INHIBITORY_THRESHOLD;
             neurons.push(Neuron::new_slow_decay(id, x, y, inhibitory));
         }
         let hippo_end = neurons.len();
@@ -178,8 +179,8 @@ impl Network {
             debug: false,
             active_stimuli: Vec::new(),
             recent_spikes: Vec::new(),
-            threshold: 0.50,
-            noise_range: 0.2,
+            threshold: config::THRESHOLD_INIT,
+            noise_range: config::NOISE_INIT,
             sprout_cooldown: HashMap::new(),
             global_tick: 0,
             fires_since_sleep: 0,
@@ -193,7 +194,7 @@ impl Network {
         }
 
         // 초기 랜덤 시냅스
-        net.seed_random_synapses(10);
+        net.seed_random_synapses(config::SEED_SYNAPSES_PER_NEURON);
         net.rebuild_incoming();
 
         let total_synapses: usize = net.neurons.iter().map(|n| n.synapses.len()).sum();
@@ -212,15 +213,15 @@ impl Network {
         self.vocab.insert(token.to_string(), seq);
         self.reverse_vocab.push(token.to_string());
 
-        let x = (seq % 20) as f32;
-        let y_in = -10.0 + (seq / 20) as f32;
+        let x = (seq % config::IO_COLS) as f32;
+        let y_in = config::INPUT_Y_BASE + (seq / config::IO_COLS) as f32;
         let input_id = self.neurons.len() as NeuronId;
         self.neurons.push(Neuron::new_io(input_id, x, y_in));
         self.input_idx.push(input_id as usize);
 
-        let y_out = 200.0 + (seq / 20) as f32;
+        let y_out = config::OUTPUT_Y_BASE + (seq / config::IO_COLS) as f32;
         let output_id = self.neurons.len() as NeuronId;
-        let mut out_neuron = Neuron::new_io(output_id, x, y_out);
+        let out_neuron = Neuron::new_io(output_id, x, y_out);
         // 출력 뉴런 excitability 기본값(1.0) 유지
         self.neurons.push(out_neuron);
         self.output_idx.push(output_id as usize);
@@ -311,7 +312,7 @@ impl Network {
             for _ in 0..per_neuron {
                 if let Some(target) = pick_random(&mut rng, &main_areas, idx) {
                     let tid = self.neurons[target].id;
-                    let w = 0.4 + rng.random::<f64>() * 0.4;
+                    let w = config::SEED_WEIGHT_MIN + rng.random::<f64>() * config::SEED_WEIGHT_RANGE;
                     self.neurons[idx].add_seed_synapse(tid, w);
                 }
             }
@@ -321,12 +322,12 @@ impl Network {
         for &(idx, _, _) in &emo_main_info {
             for _ in 0..per_neuron {
                 let r: f64 = rng.random();
-                if r < 0.5 {
+                if r < config::SEED_P_INTERNAL {
                     // 내부 연결
                     if let Some(t) = pick_random(&mut rng, &emo_main_info, idx) {
                         self.neurons[idx].add_seed_synapse(t as NeuronId, w);
                     }
-                } else if r < 0.7 {
+                } else if r < config::SEED_P_MAP {
                     // → 감정_Map
                     if let Some(t) = pick_random(&mut rng, &emo_map_info, idx) {
                         self.neurons[idx].add_seed_synapse(t as NeuronId, w);
@@ -335,7 +336,7 @@ impl Network {
                     // → 출력
                     if let Some(t) = pick_random(&mut rng, &output_info, idx) {
                         {
-                        let w = 0.4 + rng.random::<f64>() * 0.4;
+                        let w = config::SEED_WEIGHT_MIN + rng.random::<f64>() * config::SEED_WEIGHT_RANGE;
                         self.neurons[idx].add_seed_synapse(t as NeuronId, w);
                     }
                     }
@@ -347,18 +348,18 @@ impl Network {
         for &(idx, _, _) in &rea_main_info {
             for _ in 0..per_neuron {
                 let r: f64 = rng.random();
-                if r < 0.5 {
+                if r < config::SEED_P_INTERNAL {
                     if let Some(t) = pick_random(&mut rng, &rea_main_info, idx) {
                         self.neurons[idx].add_seed_synapse(t as NeuronId, w);
                     }
-                } else if r < 0.7 {
+                } else if r < config::SEED_P_MAP {
                     if let Some(t) = pick_random(&mut rng, &rea_map_info, idx) {
                         self.neurons[idx].add_seed_synapse(t as NeuronId, w);
                     }
                 } else {
                     if let Some(t) = pick_random(&mut rng, &output_info, idx) {
                         {
-                        let w = 0.4 + rng.random::<f64>() * 0.4;
+                        let w = config::SEED_WEIGHT_MIN + rng.random::<f64>() * config::SEED_WEIGHT_RANGE;
                         self.neurons[idx].add_seed_synapse(t as NeuronId, w);
                     }
                     }
@@ -370,16 +371,16 @@ impl Network {
         for &(idx, _, _) in &mem_info {
             for _ in 0..per_neuron {
                 let r: f64 = rng.random();
-                if r < 0.5 {
+                if r < config::SEED_P_INTERNAL {
                     // 내부
                     if let Some(t) = pick_random(&mut rng, &mem_info, idx) {
                         self.neurons[idx].add_seed_synapse(t as NeuronId, w);
                     }
-                } else if r < 0.7 {
+                } else if r < config::SEED_P_MAP {
                     // → 출력
                     if let Some(t) = pick_random(&mut rng, &output_info, idx) {
                         {
-                        let w = 0.4 + rng.random::<f64>() * 0.4;
+                        let w = config::SEED_WEIGHT_MIN + rng.random::<f64>() * config::SEED_WEIGHT_RANGE;
                         self.neurons[idx].add_seed_synapse(t as NeuronId, w);
                     }
                     }
@@ -398,7 +399,7 @@ impl Network {
         for &(idx, _, _) in &emo_map_info {
             for _ in 0..per_neuron {
                 let r: f64 = rng.random();
-                if r < 0.4 {
+                if r < config::SEED_P_MAP_BACK {
                     // → 감정_Main (역방향)
                     if let Some(t) = pick_random(&mut rng, &emo_main_info, idx) {
                         self.neurons[idx].add_seed_synapse(t as NeuronId, w);
@@ -416,7 +417,7 @@ impl Network {
         for &(idx, _, _) in &rea_map_info {
             for _ in 0..per_neuron {
                 let r: f64 = rng.random();
-                if r < 0.4 {
+                if r < config::SEED_P_MAP_BACK {
                     if let Some(t) = pick_random(&mut rng, &rea_main_info, idx) {
                         self.neurons[idx].add_seed_synapse(t as NeuronId, w);
                     }
@@ -448,12 +449,12 @@ impl Network {
         let seqs: Vec<u32> = jamo_list.iter().map(|j| self.get_seq(j)).collect();
         let input_indices: Vec<usize> = seqs.iter().map(|&s| self.input_neuron(s)).collect();
         for &idx in &input_indices {
-            self.neurons[idx].potential = 1.0;
+            self.neurons[idx].potential = config::STIMULUS_POTENTIAL;
         }
         self.active_stimuli.push(ActiveStimulus {
             fire_id,
             input_indices,
-            remaining_sustain: 4,
+            remaining_sustain: config::STIMULUS_SUSTAIN,
             elapsed_ticks: 0,
             silent_ticks: 0,
             all_spikes: Vec::new(),
@@ -498,13 +499,13 @@ impl Network {
             self.recent_spikes.push((nid, global_tick));
         }
 
-        if global_tick % 10_000 == 0 {
+        if global_tick % config::HOMEOSTASIS_INTERVAL == 0 {
             for n in &mut self.neurons {
                 n.homeostasis();
             }
         }
 
-        if global_tick % 500 == 0 && !self.recent_spikes.is_empty() {
+        if global_tick % config::SPROUT_INTERVAL == 0 && !self.recent_spikes.is_empty() {
             let spikes: Vec<(NeuronId, u64)> = self.recent_spikes.drain(..).collect();
             self.sprout(&spikes);
         }
@@ -518,7 +519,7 @@ impl Network {
             stim.elapsed_ticks += 1;
             if stim.remaining_sustain > 0 {
                 for &idx in &stim.input_indices {
-                    self.neurons[idx].potential = 1.0;
+                    self.neurons[idx].potential = config::STIMULUS_POTENTIAL;
                 }
                 stim.remaining_sustain -= 1;
             }
@@ -551,7 +552,7 @@ impl Network {
             let is_output = output_idx_snapshot.contains(&(nid as usize));
 
             for stim in &mut self.active_stimuli {
-                if stim.elapsed_ticks <= 14 {
+                if stim.elapsed_ticks <= config::SPIKE_COLLECT_WINDOW {
                     stim.all_spikes.push((nid, global_tick));
                 }
                 if is_output {
@@ -581,10 +582,10 @@ impl Network {
         }
 
         // STDP: 발화 타이밍 기반 강화/약화 (LTD = LTP × 1.2)
-        const STDP_A_PLUS_BASE: f64 = 0.003;
-        const STDP_A_MINUS_BASE: f64 = 0.0036; // LTD:LTP = 1.2:1
-        const STDP_TAU: f64 = 20.0;
-        const BCM_TARGET_RATE: f64 = 25.0;
+        const STDP_A_PLUS_BASE: f64 = config::STDP_A_PLUS;
+        const STDP_A_MINUS_BASE: f64 = config::STDP_A_MINUS; // LTD:LTP = 1.2:1
+        const STDP_TAU: f64 = config::STDP_TAU;
+        const BCM_TARGET_RATE: f64 = config::BCM_TARGET_RATE;
         let spike_ticks: Vec<Option<u64>> = self.neurons.iter()
             .map(|n| n.last_spike_tick).collect();
         let tick_spike_set: std::collections::HashSet<NeuronId> =
@@ -598,23 +599,23 @@ impl Network {
             if pidx >= self.neurons.len() { continue; }
             let bcm_scale = BCM_TARGET_RATE / (fire_counts[pidx] as f64 + BCM_TARGET_RATE);
             let stdp_a_plus = STDP_A_PLUS_BASE * bcm_scale;
-            let stdp_a_minus = STDP_A_MINUS_BASE * (2.0 - bcm_scale);
+            let stdp_a_minus = STDP_A_MINUS_BASE * (config::BCM_LTD_ANCHOR - bcm_scale);
             for syn in &mut self.neurons[pidx].synapses {
                 let tidx = syn.target as usize;
                 if tidx >= spike_ticks.len() { continue; }
 
                 if let Some(post_tick) = spike_ticks[tidx] {
                     let dt = post_tick as f64 - global_tick as f64;
-                    let diff_ltp = syn.weight - 0.2;
-                    let diff_ltd = syn.weight - 1.0;
-                    let f_ltp = (-(diff_ltp * diff_ltp) / (2.0 * 0.4 * 0.4)).exp();
-                    let f_ltd = (-(diff_ltd * diff_ltd) / (2.0 * 0.4 * 0.4)).exp();
+                    let diff_ltp = syn.weight - config::STDP_WEIGHT_TARGET_LTP;
+                    let diff_ltd = syn.weight - config::STDP_WEIGHT_TARGET_LTD;
+                    let f_ltp = (-(diff_ltp * diff_ltp) / (2.0 * config::STDP_WEIGHT_SIGMA * config::STDP_WEIGHT_SIGMA)).exp();
+                    let f_ltd = (-(diff_ltd * diff_ltd) / (2.0 * config::STDP_WEIGHT_SIGMA * config::STDP_WEIGHT_SIGMA)).exp();
                     if dt == 0.0 {
                         // 동시 발화: LTP
                         let ltp_bonus = syn.accumulate_ltp();
                         let dw = (stdp_a_plus + ltp_bonus) * f_ltp;
                         syn.weight = (syn.weight + dw).min(1.0);
-                    } else if dt < 0.0 && dt > -50.0 {
+                    } else if dt < 0.0 && dt > -config::STDP_WINDOW {
                         // post가 먼저 발화: LTD
                         let dw = stdp_a_minus * (dt / STDP_TAU).exp() * f_ltd;
                         syn.weight = (syn.weight - dw).max(0.0);
@@ -631,7 +632,7 @@ impl Network {
             let pairs = self.neurons[post_idx].incoming.clone();
             for (pre_idx, syn_idx) in pairs {
                 let pre_tick = match spike_ticks.get(pre_idx).copied().flatten() {
-                    Some(t) if t < global_tick && global_tick - t < 50 => t,
+                    Some(t) if t < global_tick && global_tick - t < config::STDP_WINDOW as u64 => t,
                     _ => continue,
                 };
                 if syn_idx >= self.neurons[pre_idx].synapses.len() { continue; }
@@ -639,8 +640,8 @@ impl Network {
                 let stdp_a_plus = STDP_A_PLUS_BASE * bcm_scale;
                 let dt = (global_tick - pre_tick) as f64;
                 let syn = &mut self.neurons[pre_idx].synapses[syn_idx];
-                let diff_ltp = syn.weight - 0.2;
-                let f_ltp = (-(diff_ltp * diff_ltp) / (2.0 * 0.4 * 0.4)).exp();
+                let diff_ltp = syn.weight - config::STDP_WEIGHT_TARGET_LTP;
+                let f_ltp = (-(diff_ltp * diff_ltp) / (2.0 * config::STDP_WEIGHT_SIGMA * config::STDP_WEIGHT_SIGMA)).exp();
                 let base = stdp_a_plus * (-dt / STDP_TAU).exp();
                 let ltp_bonus = syn.accumulate_ltp();
                 let dw = (base + ltp_bonus) * f_ltp;
@@ -649,8 +650,8 @@ impl Network {
         }
 
         // iSTDP: 억제성 뉴런 발화 시, 타깃 활동 기반 억제 시냅스 조정
-        const ISTDP_RATE: f64 = 0.04;
-        const ISTDP_TARGET_RATE: f64 = 10.0;
+        const ISTDP_RATE: f64 = config::ISTDP_RATE;
+        const ISTDP_TARGET_RATE: f64 = config::ISTDP_TARGET_RATE;
         for &nid in &tick_spikes {
             let pidx = nid as usize;
             if pidx >= self.neurons.len() || !self.neurons[pidx].inhibitory { continue; }
@@ -661,7 +662,7 @@ impl Network {
                 if target_rate > ISTDP_TARGET_RATE {
                     syn.weight = (syn.weight + ISTDP_RATE).min(1.0);
                 } else {
-                    syn.weight = (syn.weight - ISTDP_RATE * 0.5).max(0.0);
+                    syn.weight = (syn.weight - ISTDP_RATE * config::ISTDP_DOWN_FACTOR).max(0.0);
                 }
             }
         }
@@ -684,7 +685,7 @@ impl Network {
         let mut remaining: Vec<ActiveStimulus> = Vec::new();
 
         for stim in self.active_stimuli.drain(..) {
-            if stim.silent_ticks >= 1 {
+            if stim.silent_ticks >= config::STIMULUS_SILENCE_TICKS {
                 completed_ids.push(stim.fire_id);
                 completed_stimuli.push(stim);
             } else {
@@ -726,18 +727,18 @@ impl Network {
                 spiked_neurons: stim.all_spikes,
                 eligibility,
             });
-            if self.fire_records.len() > 100 {
+            if self.fire_records.len() > config::FIRE_RECORDS_MAX {
                 self.fire_records.remove(0);
             }
         }
 
-        if global_tick % 10_000 == 0 {
+        if global_tick % config::HOMEOSTASIS_INTERVAL == 0 {
             for n in &mut self.neurons {
                 n.homeostasis();
             }
         }
 
-        if global_tick % 500 == 0 && !self.recent_spikes.is_empty() {
+        if global_tick % config::SPROUT_INTERVAL == 0 && !self.recent_spikes.is_empty() {
             let spikes: Vec<(NeuronId, u64)> = self.recent_spikes.drain(..).collect();
             self.sprout(&spikes);
         }
@@ -751,7 +752,7 @@ impl Network {
         let fires = self.fires_since_sleep;
 
         // 1. 시냅스 fatigue 감소 + 균일 weight scaling (SHY 가설)
-        const SLEEP_WEIGHT_DECAY: f64 = 0.95;
+        const SLEEP_WEIGHT_DECAY: f64 = config::SLEEP_WEIGHT_DECAY;
         let mut scaled = 0usize;
         for n in &mut self.neurons {
             for s in &mut n.synapses {
@@ -764,21 +765,21 @@ impl Network {
         // 2. 전역 흥분 상태 리셋
         for n in &mut self.neurons {
             n.potential = 0.0;
-            n.excitability = 1.0;
+            n.excitability = config::EXCITABILITY_INIT;
             n.fire_count_window = 0;
         }
 
         // 3. 해마 재생: 해마 뉴런을 주기적으로 자극 → 시냅스 통해 전파 + STDP 적용
         let (hs, he) = self.hippocampus_range;
-        const REPLAY_ROUNDS: usize = 5;
-        const REPLAY_TICKS: u64 = 10;
-        const STDP_A_PLUS: f64 = 0.003;
-        const STDP_A_MINUS: f64 = 0.0036;
-        const STDP_TAU: f64 = 20.0;
+        const REPLAY_ROUNDS: usize = config::REPLAY_ROUNDS;
+        const REPLAY_TICKS: u64 = config::REPLAY_TICKS;
+        const STDP_A_PLUS: f64 = config::STDP_A_PLUS;
+        const STDP_A_MINUS: f64 = config::STDP_A_MINUS;
+        const STDP_TAU: f64 = config::STDP_TAU;
         for _ in 0..REPLAY_ROUNDS {
             for idx in hs..he {
                 if idx < self.neurons.len() {
-                    self.neurons[idx].potential = 0.5;
+                    self.neurons[idx].potential = config::REPLAY_POTENTIAL;
                 }
             }
             for _ in 0..REPLAY_TICKS {
@@ -821,13 +822,13 @@ impl Network {
                         if tidx >= spike_ticks.len() { continue; }
                         if let Some(post_tick) = spike_ticks[tidx] {
                             let dt = post_tick as f64 - global_tick as f64;
-                            let diff_ltp = syn.weight - 0.2;
-                            let diff_ltd = syn.weight - 1.0;
-                            let f_ltp = (-(diff_ltp * diff_ltp) / (2.0 * 0.4 * 0.4)).exp();
-                            let f_ltd = (-(diff_ltd * diff_ltd) / (2.0 * 0.4 * 0.4)).exp();
+                            let diff_ltp = syn.weight - config::STDP_WEIGHT_TARGET_LTP;
+                            let diff_ltd = syn.weight - config::STDP_WEIGHT_TARGET_LTD;
+                            let f_ltp = (-(diff_ltp * diff_ltp) / (2.0 * config::STDP_WEIGHT_SIGMA * config::STDP_WEIGHT_SIGMA)).exp();
+                            let f_ltd = (-(diff_ltd * diff_ltd) / (2.0 * config::STDP_WEIGHT_SIGMA * config::STDP_WEIGHT_SIGMA)).exp();
                             if dt == 0.0 {
                                 syn.weight = (syn.weight + STDP_A_PLUS * f_ltp).min(1.0);
-                            } else if dt < 0.0 && dt > -50.0 {
+                            } else if dt < 0.0 && dt > -config::STDP_WINDOW {
                                 let dw = STDP_A_MINUS * (dt / STDP_TAU).exp() * f_ltd;
                                 syn.weight = (syn.weight - dw).max(0.0);
                             }
@@ -877,14 +878,14 @@ impl Network {
             if completed.contains(&fire_id) { break; }
         }
 
-        if self.threshold < 1.0 {
-            let new_threshold = (0.50 + (fire_id / 10_000) as f64 * 0.001).min(1.0);
+        if self.threshold < config::THRESHOLD_MAX {
+            let new_threshold = (config::THRESHOLD_INIT + (fire_id / config::RAMP_PERIOD) as f64 * config::RAMP_STEP).min(config::THRESHOLD_MAX);
             if new_threshold > self.threshold {
                 self.threshold = new_threshold;
             }
         }
-        if self.noise_range > 0.1 {
-            self.noise_range = (0.2 - (fire_id / 10_000) as f64 * 0.001).max(0.1);
+        if self.noise_range > config::NOISE_MIN {
+            self.noise_range = (config::NOISE_INIT - (fire_id / config::RAMP_PERIOD) as f64 * config::RAMP_STEP).max(config::NOISE_MIN);
         }
 
         if fire_id % PRUNE_INTERVAL == 0 {
@@ -909,9 +910,9 @@ impl Network {
                 if let Some(&post_tick) = spike_map.get(&syn.target) {
                     let dt = post_tick as f64 - pre_tick as f64;
                     let dw = if dt > 0.0 {
-                        0.0072 * (-dt.abs() / 20.0).exp()
+                        config::ELIGIBILITY_LTP * (-dt.abs() / config::ELIGIBILITY_TAU).exp()
                     } else if dt < 0.0 {
-                        -0.006 * (-dt.abs() / 20.0).exp()
+                        -config::ELIGIBILITY_LTD * (-dt.abs() / config::ELIGIBILITY_TAU).exp()
                     } else { 0.0 };
                     if dw != 0.0 {
                         eligibility.push(EligibilityTrace {
@@ -929,10 +930,10 @@ impl Network {
         let mut rng = rand::rng();
 
         let sprout_weight = INITIAL_WEIGHT;
-        const SPROUT_RADIUS: f32 = 5.0;
-        const MAX_SPROUT_PER_NEURON: usize = 1;
-        const SPROUT_COOLDOWN_TICKS: u64 = 500;
-        const SPROUT_PROBABILITY: f64 = 0.01;
+        const SPROUT_RADIUS: f32 = config::SPROUT_RADIUS;
+        const MAX_SPROUT_PER_NEURON: usize = config::MAX_SPROUT_PER_NEURON;
+        const SPROUT_COOLDOWN_TICKS: u64 = config::SPROUT_COOLDOWN_TICKS;
+        const SPROUT_PROBABILITY: f64 = config::SPROUT_PROBABILITY;
         let current_tick = self.global_tick;
 
         let spiked_info: Vec<(NeuronId, f32, f32)> = spikes.iter()
@@ -946,14 +947,14 @@ impl Network {
         let mut new_synapses: Vec<(usize, NeuronId)> = Vec::new();
 
         // BCM target rate 근처(발화율 1%~5%)인 뉴런만 발아 허용
-        const SPROUT_MIN_RATE: f64 = 0.01;
-        const SPROUT_MAX_RATE: f64 = 0.05;
+        const SPROUT_MIN_RATE: f64 = config::SPROUT_MIN_RATE;
+        const SPROUT_MAX_RATE: f64 = config::SPROUT_MAX_RATE;
         for &(nid, x, y) in &spiked_info {
             let idx = nid as usize;
             let is_input = self.input_idx.contains(&idx);
             let is_output = self.is_output_neuron(idx);
             // 발화율 체크: 과활성 뉴런은 발아 금지
-            let fire_rate = self.neurons[idx].fire_count_window as f64 / 10_000.0;
+            let fire_rate = self.neurons[idx].fire_count_window as f64 / config::FIRE_RATE_WINDOW;
             if fire_rate > SPROUT_MAX_RATE || fire_rate < SPROUT_MIN_RATE { continue; }
             if !rng.random_bool(SPROUT_PROBABILITY) { continue; }
             if let Some(&last) = self.sprout_cooldown.get(&nid) {
@@ -1012,7 +1013,7 @@ impl Network {
             if sidx >= self.neurons[nidx].synapses.len() { continue; }
             let change = dw * reward;
             let w = &mut self.neurons[nidx].synapses[sidx].weight;
-            *w = (*w + change).clamp(0.0, 1.0);
+            *w = (*w + change).clamp(config::WEIGHT_MIN, config::WEIGHT_MAX);
         }
     }
 
@@ -1022,7 +1023,7 @@ impl Network {
         let target_seqs: Vec<u32> = target_jamo.iter().map(|j| self.get_seq(j)).collect();
         for &seq in &target_seqs {
             let idx = self.output_neuron(seq);
-            self.neurons[idx].potential += 0.6;
+            self.neurons[idx].potential += config::TEACH_POTENTIAL;
         }
         self.fire(input)
     }
@@ -1222,12 +1223,22 @@ impl Network {
     }
 }
 
-fn default_emotion_main_range() -> (usize, usize) { (0, 4000) }
-fn default_emotion_map_range() -> (usize, usize) { (4000, 5000) }
-fn default_reason_main_range() -> (usize, usize) { (5000, 9000) }
-fn default_reason_map_range() -> (usize, usize) { (9000, 10000) }
-fn default_memory_range() -> (usize, usize) { (10000, 12000) }
-fn default_hippo_range() -> (usize, usize) { (12000, 12500) }
+// 구버전 스냅샷 마이그레이션용 serde 기본 영역 경계 — config 카운트로부터 유도
+// (감정 → 이성 → 기억 → 해마 순서, 각 영역 Main/Map 분할은 MAIN_AREA_PCT 기준)
+const DEF_EMOTION_MAIN_END: usize = config::EMOTION_COUNT * config::MAIN_AREA_PCT / 100;
+const DEF_REASON_START: usize = config::EMOTION_COUNT;
+const DEF_REASON_MAIN_END: usize = DEF_REASON_START + config::REASON_COUNT * config::MAIN_AREA_PCT / 100;
+const DEF_REASON_END: usize = DEF_REASON_START + config::REASON_COUNT;
+const DEF_MEMORY_START: usize = config::EMOTION_COUNT + config::REASON_COUNT;
+const DEF_MEMORY_END: usize = DEF_MEMORY_START + config::MEMORY_COUNT;
+const DEF_HIPPO_END: usize = DEF_MEMORY_END + config::HIPPOCAMPUS_COUNT;
+
+fn default_emotion_main_range() -> (usize, usize) { (0, DEF_EMOTION_MAIN_END) }
+fn default_emotion_map_range() -> (usize, usize) { (DEF_EMOTION_MAIN_END, config::EMOTION_COUNT) }
+fn default_reason_main_range() -> (usize, usize) { (DEF_REASON_START, DEF_REASON_MAIN_END) }
+fn default_reason_map_range() -> (usize, usize) { (DEF_REASON_MAIN_END, DEF_REASON_END) }
+fn default_memory_range() -> (usize, usize) { (DEF_MEMORY_START, DEF_MEMORY_END) }
+fn default_hippo_range() -> (usize, usize) { (DEF_MEMORY_END, DEF_HIPPO_END) }
 
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
@@ -1256,5 +1267,5 @@ struct Snapshot {
     #[serde(default = "default_noise")]
     noise_range: f64,
 }
-fn default_threshold() -> f64 { 0.50 }
-fn default_noise() -> f64 { 0.2 }
+fn default_threshold() -> f64 { config::THRESHOLD_INIT }
+fn default_noise() -> f64 { config::NOISE_INIT }

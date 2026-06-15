@@ -1,3 +1,4 @@
+use crate::config;
 use crate::network::Network;
 use actix_web::{web, App, HttpServer, HttpResponse};
 use serde::Deserialize;
@@ -7,7 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use crossbeam::channel;
 
-const AUTO_SAVE_INTERVAL: Duration = Duration::from_secs(300);
+const AUTO_SAVE_INTERVAL: Duration = Duration::from_secs(config::AUTO_SAVE_SECS);
 
 enum NetRequest {
     Fire { text: String, reply: oneshot::Sender<serde_json::Value> },
@@ -35,7 +36,7 @@ pub struct FeedbackReq {
     #[serde(default = "default_strength")]
     pub strength: f64,
 }
-fn default_strength() -> f64 { 1.0 }
+fn default_strength() -> f64 { config::DEFAULT_FEEDBACK_STRENGTH }
 
 async fn fire(state: web::Data<AppState>, req: web::Json<FireReq>) -> HttpResponse {
     let (tx, rx) = oneshot::channel();
@@ -80,7 +81,7 @@ async fn save(state: web::Data<AppState>) -> HttpResponse {
 }
 
 pub async fn run_server(net: Network, port: u16, save_path: PathBuf, debug: bool) -> std::io::Result<()> {
-    let (tx, rx) = channel::bounded::<NetRequest>(256);
+    let (tx, rx) = channel::bounded::<NetRequest>(config::REQUEST_CHANNEL_CAP);
     let cached_status = Arc::new(Mutex::new(net.get_status()));
     let busy = Arc::new(AtomicBool::new(false));
 
@@ -159,7 +160,7 @@ pub async fn run_server(net: Network, port: u16, save_path: PathBuf, debug: bool
                     Err(crossbeam::channel::TryRecvError::Empty) => {
                         net.idle_tick();
                         // 1초마다 status 캐시 갱신
-                        if last_status_update.elapsed() >= Duration::from_secs(1) {
+                        if last_status_update.elapsed() >= Duration::from_secs(config::STATUS_UPDATE_SECS) {
                             *cached_status.lock().unwrap() = net.get_status();
                             last_status_update = Instant::now();
                         }
@@ -184,15 +185,15 @@ pub async fn run_server(net: Network, port: u16, save_path: PathBuf, debug: bool
     HttpServer::new(move || {
         App::new()
             .app_data(state.clone())
-            .app_data(web::JsonConfig::default().limit(1048576))
+            .app_data(web::JsonConfig::default().limit(config::JSON_LIMIT_BYTES))
             .route("/fire", web::post().to(fire))
             .route("/teach", web::post().to(teach))
             .route("/feedback", web::post().to(feedback))
             .route("/status", web::get().to(status))
             .route("/save", web::post().to(save))
     })
-    .keep_alive(Duration::from_secs(300))
-    .client_request_timeout(Duration::from_secs(300))
+    .keep_alive(Duration::from_secs(config::KEEP_ALIVE_SECS))
+    .client_request_timeout(Duration::from_secs(config::CLIENT_TIMEOUT_SECS))
     .bind(("127.0.0.1", port))?
     .run()
     .await

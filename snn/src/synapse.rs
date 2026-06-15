@@ -1,3 +1,4 @@
+use crate::config;
 use crate::neuron::NeuronId;
 use serde::{Deserialize, Serialize};
 
@@ -23,33 +24,33 @@ pub struct Synapse {
     pub recent_rate: f64,
 }
 
-fn default_fatigue() -> f64 { 1.0 }
+fn default_fatigue() -> f64 { config::FATIGUE_INIT }
 
 impl Synapse {
     pub fn new(target: NeuronId, weight: f64) -> Self {
-        Self { target, weight, seed: false, fatigue: 1.0, ltp_trace: 0.0, last_used_tick: 0, recent_rate: 0.0 }
+        Self { target, weight, seed: false, fatigue: config::FATIGUE_INIT, ltp_trace: 0.0, last_used_tick: 0, recent_rate: 0.0 }
     }
 
     pub fn new_seed(target: NeuronId, weight: f64) -> Self {
-        Self { target, weight, seed: true, fatigue: 1.0, ltp_trace: 0.0, last_used_tick: 0, recent_rate: 0.0 }
+        Self { target, weight, seed: true, fatigue: config::FATIGUE_INIT, ltp_trace: 0.0, last_used_tick: 0, recent_rate: 0.0 }
     }
 
     /// 발화 시 피로 + 전달 빈도 기반 자동 약화
     /// 반환: weight 감소량 (rate × 0.01)
     #[inline]
     pub fn fire_fatigue(&mut self) {
-        self.fatigue *= 0.90;
-        self.recent_rate = (self.recent_rate + 0.1).min(1.0);
+        self.fatigue *= config::FATIGUE_DECAY;
+        self.recent_rate = (self.recent_rate + config::RECENT_RATE_STEP).min(config::RECENT_RATE_MAX);
         // 자주 전달할수록 weight 약화 (rate 1.0 시 -0.01)
-        self.weight = (self.weight - 0.01 * self.recent_rate).max(0.0);
+        self.weight = (self.weight - config::RATE_WEIGHT_PENALTY * self.recent_rate).max(config::WEIGHT_MIN);
     }
 
     /// 매 틱 피로 회복 + LTP trace 감쇠 + rate 감쇠
     #[inline]
     pub fn recover(&mut self) {
-        self.fatigue = (self.fatigue + 0.01).min(1.0);
-        self.ltp_trace *= 0.95;
-        self.recent_rate *= 0.99;
+        self.fatigue = (self.fatigue + config::FATIGUE_RECOVER).min(config::FATIGUE_MAX);
+        self.ltp_trace *= config::LTP_TRACE_DECAY;
+        self.recent_rate *= config::RECENT_RATE_DECAY;
     }
 
     /// LTP 누적: 활성화될 때마다 trace 증가, 누적된 만큼 추가 강화 반환
@@ -57,8 +58,8 @@ impl Synapse {
     pub fn accumulate_ltp(&mut self) -> f64 {
         self.ltp_trace += 1.0;
         // trace가 2 이상이면 반복 자극 → 추가 LTP
-        if self.ltp_trace >= 2.0 {
-            (self.ltp_trace - 1.0) * 0.001
+        if self.ltp_trace >= config::LTP_TRACE_THRESHOLD {
+            (self.ltp_trace - 1.0) * config::LTP_TRACE_GAIN
         } else {
             0.0
         }

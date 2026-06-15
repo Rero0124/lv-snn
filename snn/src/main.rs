@@ -1,4 +1,5 @@
 mod bitmap;
+mod config;
 mod network;
 mod neuron;
 mod region;
@@ -10,8 +11,6 @@ use network::Network;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
-const DEFAULT_SAVE_PATH: &str = "data/snn.json";
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let serve_mode = args.iter().any(|a| a == "--serve");
@@ -20,13 +19,13 @@ fn main() {
         .position(|a| a == "--port")
         .and_then(|i| args.get(i + 1))
         .and_then(|p| p.parse().ok())
-        .unwrap_or(3000);
+        .unwrap_or(config::DEFAULT_PORT);
     let save_path = PathBuf::from(
         args.iter()
             .position(|a| a == "--data")
             .and_then(|i| args.get(i + 1))
             .map(|s| s.as_str())
-            .unwrap_or(DEFAULT_SAVE_PATH)
+            .unwrap_or(config::DEFAULT_SAVE_PATH)
     );
 
     // 저장 디렉토리 생성
@@ -103,13 +102,13 @@ fn run_interactive(mut net: Network, save_path: PathBuf) {
         }
         if let Some(rest) = line.strip_prefix('+') {
             if let Ok(id) = rest.trim().parse::<u64>() {
-                net.feedback(id, true, 1.0);
+                net.feedback(id, true, config::DEFAULT_FEEDBACK_STRENGTH);
             }
             continue;
         }
         if let Some(rest) = line.strip_prefix('-') {
             if let Ok(id) = rest.trim().parse::<u64>() {
-                net.feedback(id, false, 1.0);
+                net.feedback(id, false, config::DEFAULT_FEEDBACK_STRENGTH);
             }
             continue;
         }

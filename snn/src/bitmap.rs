@@ -12,7 +12,7 @@
 use fontdue::{Font, FontSettings};
 use std::sync::OnceLock;
 
-pub const GRID: usize = 32;
+pub const GRID: usize = crate::config::BITMAP_GRID;
 pub const PIXELS: usize = GRID * GRID; // 1024
 
 /// 폰트 바이너리를 빌드 시 번들
@@ -39,7 +39,7 @@ pub fn char_to_bitmap(c: char) -> [bool; PIXELS] {
 
     let f = font();
     // 28px로 렌더해서 32×32 안에 여백이 생기도록
-    let (metrics, bmp) = f.rasterize(c, 28.0);
+    let (metrics, bmp) = f.rasterize(c, crate::config::BITMAP_RENDER_PX);
 
     if metrics.width == 0 || metrics.height == 0 {
         return out;
@@ -52,7 +52,7 @@ pub fn char_to_bitmap(c: char) -> [bool; PIXELS] {
     for y in 0..metrics.height.min(GRID) {
         for x in 0..metrics.width.min(GRID) {
             let v = bmp[y * metrics.width + x];
-            if v >= 128 {
+            if v >= crate::config::BITMAP_PIXEL_THRESHOLD {
                 let gx = x + ox;
                 let gy = y + oy;
                 if gx < GRID && gy < GRID {

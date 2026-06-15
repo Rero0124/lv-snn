@@ -1,3 +1,4 @@
+use crate::config;
 use serde::{Deserialize, Serialize};
 
 /// 토큰 길이 기반 발화 보너스
@@ -5,12 +6,12 @@ use serde::{Deserialize, Serialize};
 pub fn fire_bonus(token: &str) -> f64 {
     let len = token.chars().count();
     match len {
-        1 => 0.6,       // 자모/단일 글자: 보조 (발화는 쉽지만 출력 기여 낮음)
-        2 => 0.8,       // bigram
-        3 => 0.9,       // trigram
-        4..=5 => 1.2,   // 짧은 단어: 핵심 출력 단위
-        6..=10 => 1.0,  // 일반 단어
-        _ => 0.7,       // 긴 문장/구
+        1 => config::FIRE_BONUS_1,           // 자모/단일 글자: 보조 (발화는 쉽지만 출력 기여 낮음)
+        2 => config::FIRE_BONUS_2,           // bigram
+        3 => config::FIRE_BONUS_3,           // trigram
+        4..=5 => config::FIRE_BONUS_SHORT_WORD, // 짧은 단어: 핵심 출력 단위
+        6..=10 => config::FIRE_BONUS_WORD,   // 일반 단어
+        _ => config::FIRE_BONUS_LONG,        // 긴 문장/구
     }
 }
 
