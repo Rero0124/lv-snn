@@ -96,8 +96,14 @@ impl Neuron {
         self.potential += amount;
     }
 
+    /// 발화 임계값: 자가 임계 × map 스케일 ÷ 감응도 (try_fire·해마 재생 공용)
     #[inline]
-    pub fn try_fire(&mut self, tick: u64, threshold: f64, noise_range: f64, stimulated: bool) -> Option<Vec<(NeuronId, f64)>> {
+    pub fn fire_threshold(&self) -> f64 {
+        self.self_threshold * self.threshold_scale / self.excitability
+    }
+
+    #[inline]
+    pub fn try_fire(&mut self, tick: u64, noise_range: f64, stimulated: bool) -> Option<Vec<(NeuronId, f64)>> {
         // 불응기 체크 (입출력 뉴런은 스킵)
         if !self.skip_refractory {
             if let Some(last) = self.last_spike_tick {
@@ -111,19 +117,17 @@ impl Neuron {
                     let noise = if noise_range > 0.0 {
                         (rand::random::<f64>() * 2.0 - 1.0) * noise_range
                     } else { 0.0 };
-                    if self.potential + noise < (self.self_threshold * self.threshold_scale / self.excitability) * config::RELATIVE_REFRACTORY_FACTOR {
+                    if self.potential + noise < self.fire_threshold() * config::RELATIVE_REFRACTORY_FACTOR {
                         return None;
                     }
                 }
             }
         }
-        let _ = threshold; // 전역 threshold 미사용 (뉴런별 self_threshold로 대체)
-
         let noise = if noise_range > 0.0 {
             (rand::random::<f64>() * 2.0 - 1.0) * noise_range
         } else { 0.0 };
         let effective = self.potential + noise;
-        let adj_threshold = self.self_threshold * self.threshold_scale / self.excitability;
+        let adj_threshold = self.fire_threshold();
         let should_fire = effective >= adj_threshold
             || (!self.skip_refractory && rand::random_bool(if stimulated { config::SPONTANEOUS_FIRE_PROB_STIM } else { config::SPONTANEOUS_FIRE_PROB_IDLE }));
 

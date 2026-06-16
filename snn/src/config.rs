@@ -57,8 +57,9 @@ pub const SEED_SYNAPSES_PER_NEURON: usize = 10;
 // 가중치 (network.rs)
 // ─────────────────────────────────────────────────────────────
 
-pub const INITIAL_WEIGHT: f64 = 0.2; // 기본 시냅스 weight / 발아 weight
-pub const MIN_WEIGHT: f64 = 0.1; // prune 기준
+pub const INITIAL_WEIGHT: f64 = 0.35; // 기본 시냅스 weight / 발아 weight (정규분포 평균 μ)
+pub const INITIAL_WEIGHT_STD: f64 = 0.07; // 초기/발아 weight 정규분포 표준편차 σ (경계로 clamp)
+pub const MIN_WEIGHT: f64 = 0.15; // prune 기준
 pub const WEIGHT_MIN: f64 = 0.0; // weight 정규화 하한
 pub const WEIGHT_MAX: f64 = 1.0; // weight 정규화 상한
 
@@ -84,13 +85,13 @@ pub const RELATIVE_REFRACTORY_INH: u64 = 4;
 pub const RELATIVE_REFRACTORY_FACTOR: f64 = 2.0;
 
 /// 막전위 감쇠율
-pub const DECAY_RATE: f64 = 0.87; // sweep
+pub const DECAY_RATE: f64 = 0.8; // sweep
 pub const DECAY_RATE_SLOW: f64 = 0.95; // 기억 / 해마
 pub const THRESHOLD_SCALE: f64 = 1.0; // 기본 임계 스케일
 
 /// 자가 임계값 (self_threshold)
-pub const SELF_THRESHOLD_INIT: f64 = 0.6; // 일반 뉴런 기본값 = 하한
-pub const SELF_THRESHOLD_IO: f64 = 0.4; // 입출력 뉴런 기본값 = 하한
+pub const SELF_THRESHOLD_INIT: f64 = 0.85; // 일반 뉴런 기본값 = 하한
+pub const SELF_THRESHOLD_IO: f64 = 0.55; // 입출력 뉴런 기본값 = 하한
 pub const SELF_THRESHOLD_MAX: f64 = 1.0; // 상한
 pub const SELF_THRESHOLD_STEP: f64 = 0.001; // 발화 시 +, 미발화 시 -
 
@@ -134,10 +135,14 @@ pub const STDP_WINDOW: f64 = 50.0; // dt 유효 범위 (틱)
 pub const BCM_TARGET_RATE: f64 = 25.0; // BCM 목표 발화율
 pub const BCM_LTD_ANCHOR: f64 = 2.0; // BCM LTD 비대칭 앵커: LTD = A_minus × (anchor − bcm_scale)
 
-/// weight 의존 가우시안 (학습 가능 weight 영역으로 끌어당김)
-pub const STDP_WEIGHT_TARGET_LTP: f64 = 0.2; // LTP 가우시안 중심
-pub const STDP_WEIGHT_TARGET_LTD: f64 = 1.0; // LTD 가우시안 중심
-pub const STDP_WEIGHT_SIGMA: f64 = 0.4; // 가우시안 표준편차
+/// LTP/LTD soft bound (network.rs :: stdp_ltp_gain / stdp_ltd_gain)
+///   weight 가 경계(LTP 상한 / LTD 하한)에 가까울수록 변화폭을 0 으로 줄여
+///   경계 도달을 어렵게 한다 (Gütig 2003 multiplicative STDP, LTP·LTD 대칭).
+///   STDP·iSTDP 의 모든 강화/약화에 동일하게 적용된다.
+pub const STDP_WEIGHT_DEPENDENCE: bool = true; // false 면 계수=1.0 (효과 off)
+pub const STDP_SOFT_EXP: f64 = 1.0; // μ: 1.0=선형, 클수록 경계 근처에서 더 급격히 둔화
+pub const STDP_LTP_CEIL: f64 = 0.8; // LTP 상한 (weight 가 여기 가까울수록 강화 둔화)
+pub const STDP_LTD_FLOOR: f64 = 0.1; // LTD 하한 (weight 가 여기 가까울수록 약화 둔화)
 
 // ─────────────────────────────────────────────────────────────
 // iSTDP (억제 가소성, network.rs :: apply_istdp)
@@ -196,15 +201,14 @@ pub const ELIGIBILITY_TAU: f64 = 20.0;
 pub const TEACH_POTENTIAL: f64 = 0.6; // teach 시 출력 뉴런 사전 활성
 
 // ─────────────────────────────────────────────────────────────
-// 전역 런타임: threshold / noise 램프 (network.rs)
+// 전역 런타임: noise 램프 (network.rs)
+//   발화 임계값은 뉴런별 self_threshold 로 일원화됨 (전역 threshold 제거).
 // ─────────────────────────────────────────────────────────────
 
-pub const THRESHOLD_INIT: f64 = 0.50;
-pub const THRESHOLD_MAX: f64 = 1.0;
 pub const NOISE_INIT: f64 = 0.2;
 pub const NOISE_MIN: f64 = 0.1;
 pub const RAMP_PERIOD: u64 = 10_000; // fire_id / RAMP_PERIOD
-pub const RAMP_STEP: f64 = 0.001; // 주기당 가감량
+pub const RAMP_STEP: f64 = 0.001; // 주기당 가감량 (noise 램프)
 
 // ─────────────────────────────────────────────────────────────
 // 수면 / 해마 재생 (network.rs :: enter_sleep / should_sleep)
