@@ -12,7 +12,7 @@ const AUTO_SAVE_INTERVAL: Duration = Duration::from_secs(300);
 enum NetRequest {
     Fire { text: String, reply: oneshot::Sender<serde_json::Value> },
     Teach { input: String, target: String, reply: oneshot::Sender<serde_json::Value> },
-    Feedback { fire_id: u64, positive: bool, strength: f64, reply: oneshot::Sender<()> },
+    Feedback { fire_id: u64, positive: bool, strength: f64, target: Option<String>, reply: oneshot::Sender<()> },
     Save { reply: oneshot::Sender<()> },
 }
 
@@ -31,7 +31,11 @@ pub struct TeachReq { pub input: String, pub target: String }
 #[derive(Deserialize)]
 pub struct FeedbackReq {
     pub fire_id: u64,
+    #[serde(default)]
     pub positive: bool,
+    /// 정답 문자열. 주어지면 출력별·오차 기반 보상(feedback_target)을 쓰고 positive 는 무시
+    #[serde(default)]
+    pub target: Option<String>,
     #[serde(default = "default_strength")]
     pub strength: f64,
 }
@@ -57,7 +61,7 @@ async fn teach(state: web::Data<AppState>, req: web::Json<TeachReq>) -> HttpResp
 
 async fn feedback(state: web::Data<AppState>, req: web::Json<FeedbackReq>) -> HttpResponse {
     let (tx, rx) = oneshot::channel();
-    let _ = state.tx.send(NetRequest::Feedback { fire_id: req.fire_id, positive: req.positive, strength: req.strength, reply: tx });
+    let _ = state.tx.send(NetRequest::Feedback { fire_id: req.fire_id, positive: req.positive, strength: req.strength, target: req.target.clone(), reply: tx });
     match rx.await {
         Ok(_) => HttpResponse::Ok().json(serde_json::json!({"ok": true})),
         Err(_) => HttpResponse::InternalServerError().json(serde_json::json!({"error": "worker died"})),
@@ -141,8 +145,11 @@ pub async fn run_server(net: Network, port: u16, save_path: PathBuf, debug: bool
                                     "target": target,
                                 }));
                             }
-                            NetRequest::Feedback { fire_id, positive, strength, reply } => {
-                                net.feedback(fire_id, positive, strength);
+                            NetRequest::Feedback { fire_id, positive, strength, target, reply } => {
+                                match target {
+                                    Some(t) => net.feedback_target(fire_id, &t, strength),
+                                    None => net.feedback(fire_id, positive, strength),
+                                }
                                 let _ = reply.send(());
                             }
                             NetRequest::Save { reply } => {

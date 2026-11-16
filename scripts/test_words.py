@@ -70,7 +70,7 @@ while time.time() - start < DURATION:
             ssn("/feedback", {"fire_id": fire_id, "positive": True, "strength": 1.0})
         elif not out:
             # 무출력 — 약하게 약화
-            ssn("/feedback", {"fire_id": fire_id, "positive": False, "strength": 0.1})
+            ssn("/feedback", {"fire_id": fire_id, "positive": False, "strength": 0.05})
         else:
             score = 0.0
             if expected in out:
@@ -83,7 +83,7 @@ while time.time() - start < DURATION:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             from scripts_util import jamo_overlap
             overlap = jamo_overlap(out, expected)
-            score += overlap * 0.3  # 최대 0.3
+            score += overlap * 0.3
 
             # 음절 길이 비교 (완성형=1, 낱자모/특수문자=0.3)
             len_diff = abs(syllable_len(out) - syllable_len(expected))
@@ -93,8 +93,8 @@ while time.time() - start < DURATION:
             if score > 0:
                 ssn("/feedback", {"fire_id": fire_id, "positive": True, "strength": min(score, 1.0)})
             else:
-                # 오답 — 약화
-                ssn("/feedback", {"fire_id": fire_id, "positive": False, "strength": 0.3})
+                # 유사도 0 — 약화
+                ssn("/feedback", {"fire_id": fire_id, "positive": False, "strength": 0.05})
 
     elapsed = int(time.time() - start)
     if round_count % 100 == 0:
