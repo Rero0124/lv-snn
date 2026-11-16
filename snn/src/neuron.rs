@@ -160,15 +160,10 @@ pub const DEND_LEAK: f64 = 0.1;
 pub const BURST_GAIN: f64 = 2.0;
 /// 조절 신호의 기준선을 정하는 데 쓰는 틱 수 (받기 시작한 뒤 이만큼의 평균)
 pub const MOD_BASE_TICKS: u32 = 2000;
+pub const MOD_BASE_SKIP: u32 = 300;
 
-/// Sprout 확률: 발화 시 이 확률로 sprout 요청
-pub const SPROUT_PROBABILITY: f64 = 0.001;
-/// Sprout 반경
-pub const SPROUT_RADIUS: f32 = 5.0;
 /// Sprout 시 초기 가중치
 pub const SPROUT_WEIGHT: f64 = 0.2;
-/// 발아 의욕의 기준 시냅스 수 (이보다 적으면 발아가 활발해지고 많으면 드물어진다)
-pub const SPROUT_REF: f64 = 30.0;
 
 fn default_decay_rate() -> f64 { 0.7 }
 fn default_threshold_scale() -> f64 { 1.0 }
@@ -230,9 +225,12 @@ impl Neuron {
         // 계속 따라가게 하면 보상이 잦을 때는 기준선이 올라가 평소 상태가 "아래"로 읽히고(무관한 입력이 처벌받음),
         // 도파민이 자주 멈출 때는 내려가 평소 상태가 "위"로 읽힌다. 실제 수용체도 감도가 정해져 있어서
         // 평소 농도보다 높을 때와 낮을 때를 고정된 기준으로 구분한다
-        if self.mod_seen < MOD_BASE_TICKS && (self.mod_level > 0.0 || self.mod_seen > 0) {
+        // 처음 MOD_BASE_SKIP 틱은 평균에 넣지 않는다: 조절 수준이 0 에서 평소 수준까지 차오르는 구간이라, 넣으면 기준선이 실제보다 낮게 잡힌다
+        if self.mod_seen < MOD_BASE_SKIP + MOD_BASE_TICKS && (self.mod_level > 0.0 || self.mod_seen > 0) {
             self.mod_seen += 1;
-            self.mod_base += (self.mod_level - self.mod_base) / self.mod_seen as f64;
+            if self.mod_seen > MOD_BASE_SKIP {
+                self.mod_base += (self.mod_level - self.mod_base) / (self.mod_seen - MOD_BASE_SKIP) as f64;
+            }
         }
         self.adapt *= self.adapt_decay;
         self.dend_potential *= 0.85;
@@ -416,13 +414,6 @@ impl Neuron {
         (dx * dx + dy * dy).sqrt()
     }
 
-    /// sprout 여부 자체 결정 (발화 시 호출)
-    /// 억제성은 더 자주 발화하므로 sprout 확률을 절반으로 (비율 동등화)
-    pub fn wants_sprout(&self) -> bool {
-        let prob = if self.inhibitory { SPROUT_PROBABILITY * 0.5 } else { SPROUT_PROBABILITY };
-        rand::random::<f64>() < prob
-    }
-
     /// 자기 시냅스의 가지치기. 기한(마지막으로 함께 활동한 틱 + 수명)이 지난 연결은 접점 하나를 잃는다.
     /// 접점이 0개가 된 연결은 죽은 것으로 표시만 한다(가중치 0, 접점 0) — 자리를 비우는 일은 받는 쪽 목록도 고쳐야 해서 네트워크가 한다
     pub fn prune_own(&mut self, now: u64) {
@@ -448,13 +439,6 @@ impl Neuron {
         self.next_prune = now + 1000;
     }
 
-    /// 축삭 발아 의욕: 내보내는 시냅스가 적을수록 크다 (SPROUT_REF 개일 때 1, 그 절반이면 4배, 두 배면 1/4).
-    /// 뉴런이 자기 시냅스 수만 보고 정한다
-    pub fn sprout_drive(&self) -> f64 {
-        let n = self.synapses.len() as f64;
-        (SPROUT_REF / (n + 1.0)).powi(2).min(100.0)
-    }
-
     /// 자기가 내보내는 시냅스 가중치의 중앙값 (새 시냅스의 초기 가중치로 쓴다. 시냅스가 없으면 SPROUT_WEIGHT)
     pub fn median_out_weight(&self) -> f64 {
         if self.synapses.is_empty() { return SPROUT_WEIGHT; }
@@ -464,17 +448,4 @@ impl Neuron {
         *w.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap()).1
     }
 
-    /// Network로부터 후보 받아서 시냅스 직접 생성
-    /// candidates: (target_id, distance) 리스트 (가까운 순)
-    pub fn sprout_from_candidates(&mut self, candidates: &[(NeuronId, f32)]) -> bool {
-        let existing: std::collections::HashSet<NeuronId> =
-            self.synapses.iter().map(|s| s.target).collect();
-        for &(target, _dist) in candidates {
-            if target == self.id { continue; }
-            if existing.contains(&target) { continue; }
-            self.synapses.push(Synapse::new(target, SPROUT_WEIGHT));
-            return true;
-        }
-        false
-    }
 }

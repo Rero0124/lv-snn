@@ -91,7 +91,8 @@ pub const MOD_DEADBAND: f64 = 0.25;
 pub const BCM_CACHE_TICKS: u64 = 100;
 /// 예측·가치 뉴런의 입력 학습에서 무시하는 벗어남의 크기
 pub const PRED_DEADBAND: f64 = 0.1;
-pub const VALUE_DEADBAND: f64 = 0.5;
+pub const VALUE_UP: f64 = 1.0;
+pub const VALUE_DOWN: f64 = 0.6;
 
 /// STDP 의 변화량 적용: 기존 방식이면 가중치를 바로 바꾸고, 조절 신호 방식이면 흔적에만 더한다
 #[inline]
@@ -553,7 +554,9 @@ pub fn predictor_step(neurons: &mut [Neuron], slow: &[(usize, usize)], now: u64,
         let r = match neurons.get(t) { Some(n) if n.mod_base > 1e-6 => n.mod_level / n.mod_base - 1.0, _ => continue };
         // 작은 벗어남은 양쪽 똑같이 버린다. 가치 뉴런은 도파민을 짧게 읽어서 평소의 흔들림이 크므로 더 넓게(±50%) 버린다:
         // 급증(+수백 %)과 완전한 정지(−100% 근처)만 남는다
-        if r.abs() < if fast { VALUE_DEADBAND } else { PRED_DEADBAND } { continue; }
+        // 가치 뉴런이 읽는 도파민은 흔들림이 한쪽으로 치우쳐 있다 (측정: +50% 초과 6.5%, −50% 미만 0.02%).
+        // 그래서 위쪽은 +100% 를 넘어야, 아래쪽은 −60% 아래여야 신호로 본다. 급증은 +수백 %, 완전한 정지는 −100% 근처라 둘 다 통과한다
+        if fast { if r < VALUE_UP && r > -VALUE_DOWN { continue; } } else if r.abs() < PRED_DEADBAND { continue; }
         let s = &mut neurons[pre].synapses[j];
         s.weight = (s.weight + opt.pred_eta * r * trace).clamp(0.0, 1.0);
     }

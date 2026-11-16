@@ -85,10 +85,6 @@ fn main() {
     if args.iter().any(|a| a == "--value" || a == "--order2-test") { params.value = true; params.dopamine = true; }
     // --release P: 확률적 전달 (은닉 뉴런의 시냅스가 확률 P 로만 전달, 평균 전달량은 유지)
     if let Some(v) = num("--release") { params.release = Some(v); }
-    // --da-select: 도파민이 출력 뉴런과 가치·예측 뉴런에만 닿게 한다 (은닉 뉴런에는 닿지 않음)
-    if args.iter().any(|a| a == "--da-select") { params.da_select_only = true; params.dopamine = true; }
-    // --out-inh W: 출력끼리의 경쟁 (먼저 나온 출력이 나머지를 누른다)
-    if let Some(v) = num("--out-inh") { params.out_inh = v; params.dopamine = true; }
     // --needs: 1차 보상(먹이, 물)과 몸의 상태(배고픔, 목마름)
     if args.iter().any(|a| a == "--needs" || a == "--needs-test") { params.needs = true; params.dopamine = true; }
     // --needs-test: 결핍 정도에 따라 같은 감각 입력이 도파민을 일으키는 정도가 달라지는지
@@ -136,34 +132,35 @@ fn main() {
         op_test(&params, n as usize);
         return;
     }
-    // --val-drift N: 보상 없이 A 만 N번 반복하면서 가치 뉴런과 도파민이 언제부터 벌어지는지 (100번 단위)
+    // --val-drift N: 보상 없이 A 만 N번 반복하면서 가치 뉴런과 도파민이 언제부터 벌어지는지
     if let Some(n) = num("--val-drift") {
         params.value = true; params.dopamine = true;
         println!("{:?}", params);
         let mut net = Network::with_params(params.clone());
         net.rest(300);
-        println!("\n보상 없이 A = 안녕 만 반복. 구간 평균: 가치 뉴런 발화 수 / 예측 뉴런 발화 수 / 자극 뒤 0~20, 20~40, 40~60틱의 도파민 (평소 0.6) / 쉬는 동안 조절 수준이 기준선에서 벗어난 정도");
-        println!("{:>8} {:>10} {:>10} {:>22} {:>12}", "시행", "가치뉴런", "예측뉴런", "도파민 (세 구간)", "쉴 때 벗어남");
-        let block = ((n as usize) / 10).max(1);
-        let (mut v, mut pr, mut b, mut dev, mut k) = (0u64, 0u64, [0.0f64; 3], 0.0f64, 0usize);
+        // 먼저 쉬는 상태에서 가치 뉴런이 읽는 도파민의 흔들림: 평균, 표준편차, +50% 를 넘은 비율, −50% 아래로 내려간 비율
+        let (mut sum, mut sq, mut hi, mut lo, mut cnt) = (0.0, 0.0, 0usize, 0usize, 0usize);
+        for _ in 0..5000 { net.step(); for r in net.value_deviations() { sum += r; sq += r * r; if r > 0.5 { hi += 1; } if r < -0.5 { lo += 1; } cnt += 1; } }
+        let mean = sum / cnt.max(1) as f64;
+        println!("\n쉬는 상태 5000틱, 가치 뉴런이 읽는 도파민의 기준선 대비 벗어남: 평균 {:+.3}, 표준편차 {:.3}, +50% 초과 {:.2}%, −50% 미만 {:.2}%",
+            mean, (sq / cnt.max(1) as f64 - mean * mean).max(0.0).sqrt(), hi as f64 * 100.0 / cnt.max(1) as f64, lo as f64 * 100.0 / cnt.max(1) as f64);
+        let (_, _, set_a) = run_window(&mut net, "안녕", 330, None, None);
+        println!("\n보상 없이 A = 안녕 만 반복. 구간 평균: 가치 뉴런 발화 / 예측 뉴런 발화 / 자극 뒤 0~20, 20~40, 40~60틱의 도파민 (평소 0.6) / 가치 뉴런 입력 가중치 (A 에 반응한 뉴런에서 오는 것, 그 밖)");
+        println!("{:>8} {:>10} {:>10} {:>22} {:>12} {:>12}", "시행", "가치뉴런", "예측뉴런", "도파민 (세 구간)", "A 쪽 입력", "그 밖 입력");
+        let block = ((n as usize) / 16).max(1);
+        let (mut v, mut pr, mut b, mut k) = (0u64, 0u64, [0.0f64; 3], 0usize);
         for t in 1..=(n as usize) {
             let p0 = net.pred_spikes;
             let (bins, vs, _) = run_window(&mut net, "안녕", 330, None, None);
             v += vs; pr += net.pred_spikes - p0;
             for i in 0..3 { b[i] += bins[i]; }
-            dev += net.mod_deviation();
             k += 1;
             if t % block == 0 {
-                println!("{:>8} {:>10.1} {:>10.1} {:>8.2} {:>6.2} {:>6.2} {:>+12.3}", t, v as f64 / k as f64, pr as f64 / k as f64, b[0] / k as f64, b[1] / k as f64, b[2] / k as f64, dev / k as f64);
-                v = 0; pr = 0; b = [0.0; 3]; dev = 0.0; k = 0;
+                let (wa, wo) = net.value_input_weights(&set_a);
+                println!("{:>8} {:>10.1} {:>10.1} {:>8.2} {:>6.2} {:>6.2} {:>12.5} {:>12.5}", t, v as f64 / k as f64, pr as f64 / k as f64, b[0] / k as f64, b[1] / k as f64, b[2] / k as f64, wa, wo);
+                v = 0; pr = 0; b = [0.0; 3]; k = 0;
             }
         }
-        return;
-    }
-    // --op2-test N: 입력 여러 개에 서로 다른 목표 출력. 무작위 순서로 넣고, 그 입력의 목표가 나오면 보상
-    if let Some(n) = num("--op2-test") {
-        params.dopamine = true;
-        op2_test(&params, n as usize);
         return;
     }
     // --order2-test N: 2차 조건화 점검. (1) A → 보상 N번, (2) B → A (보상 없음) N번. 비교: (1) 없이 (2)만 한 네트워크
@@ -201,7 +198,7 @@ fn main() {
         }
         return;
     }
-    // --scale X: 은닉 영역 크기 배수 / --grow R --target N --dev-decay D: 발달 과정 (성장 + 가지치기) / --min-weight W: 가지치기 기준
+    // --scale X: 은닉 영역 크기 배수 / --grow R --target N --prune-tau T: 발달 과정 (성장 + 가지치기) / --min-weight W: 가지치기 기준
     if let Some(v) = num("--scale") { params.scale = v; }
     if let Some(v) = num("--grow") { params.grow = Some(v); }
     if let Some(v) = num("--target") { params.target_syn = v as usize; }
@@ -216,8 +213,6 @@ fn main() {
         dev_test(&params, n as u64);
         return;
     }
-    // --sprout R: 활동 기반 축삭 발아 (R = 발화 한 번당 기본 확률. 시냅스가 적은 뉴런일수록 더 자주 발아)
-    if let Some(v) = num("--sprout") { params.sprout = Some(v); }
     // --persist-test N: 학습 전후로 자극이 끝난 뒤 활동이 얼마나 오래 남는지 (A 를 N번 반복 / A 에 N번 보상)
     if let Some(n) = num("--persist-test") {
         params.dopamine = true;
@@ -627,7 +622,6 @@ fn persist_test(params: &NetParams, trials: usize) {
     let show = |name: &str, label: &str, r: ([usize; 4], u64)| {
         println!("{:<14} {:>8} {:>9} {:>9} {:>9} {:>10} {:>12}", name, label, r.0[0], r.0[1], r.0[2], r.0[3], r.1);
     };
-    let sprout_on = params.sprout.is_some();
     let marks: Vec<usize> = vec![trials / 4, trials / 2, trials];
     for (name, reward) in [("반복만", false), ("A 에 보상", true)] {
         let mut net = Network::with_params(params.clone());
@@ -637,7 +631,6 @@ fn persist_test(params: &NetParams, trials: usize) {
             if reward { net.feedback(id, true, 1.0); } else { net.rest(220); }
             if marks.contains(&t) {
                 show(name, &t.to_string(), after_activity(&mut net));
-                if sprout_on { println!("{:<14} {:>8} 새로 생긴 시냅스 {}개", "", "", net.sprouted); }
             }
         }
         if !reward { continue; }

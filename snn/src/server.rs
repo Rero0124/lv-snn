@@ -33,7 +33,7 @@ pub struct FeedbackReq {
     pub fire_id: u64,
     #[serde(default)]
     pub positive: bool,
-    /// 정답 문자열. 주어지면 출력별·오차 기반 보상(feedback_target)을 쓰고 positive 는 무시
+    /// 정답 문자열. 주어지면 출력이 정답과 같은지로 보상/처벌을 정하고 positive 는 무시
     #[serde(default)]
     pub target: Option<String>,
     #[serde(default = "default_strength")]
@@ -147,7 +147,7 @@ pub async fn run_server(net: Network, port: u16, save_path: PathBuf, debug: bool
                             }
                             NetRequest::Feedback { fire_id, positive, strength, target, reply } => {
                                 match target {
-                                    Some(t) => net.feedback_target(fire_id, &t, strength),
+                                    Some(t) => net.feedback_by_target(fire_id, &t, strength),
                                     None => net.feedback(fire_id, positive, strength),
                                 }
                                 let _ = reply.send(());

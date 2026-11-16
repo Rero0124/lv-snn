@@ -1,5 +1,5 @@
 use crate::neuron::{CellType, Neuron, NeuronId};
-use crate::plasticity::{self, EligibilityTrace, PlasticityOptions};
+use crate::plasticity::{self, PlasticityOptions};
 use crate::region::RegionType;
 use crate::tokenizer;
 use rayon::prelude::*;
@@ -11,7 +11,6 @@ use std::path::Path;
 
 const INITIAL_WEIGHT: f64 = 0.2;
 const MIN_WEIGHT: f64 = 0.1;
-const PRUNE_INTERVAL: u64 = 5_000;
 const EMOTION_COUNT: usize = 5000;
 const REASON_COUNT: usize = 5000;
 const MEMORY_COUNT: usize = 2000;
@@ -77,11 +76,6 @@ pub struct NetParams {
     /// 자발 발화 배수 (은닉 뉴런). None = 기존 동작(기본 구성 1.0, 검증 구성 0).
     ///   뉴런 하나가 입력 없이 한 틱에 발화할 확률 = 0.00001 × 배수 (자극이 들어오는 동안은 그 1/10)
     pub spont: Option<f64>,
-    /// 활동 기반 축삭 발아 (Some(발화 한 번당 기본 확률)). 검증 구성에서도 쓸 수 있다.
-    ///   발화한 은닉 뉴런이 (기본 확률 × 발아 의욕)의 확률로, 반경 안에서 방금(20틱 이내) 같이 발화한 뉴런 중
-    ///   가장 가까운 곳에 새 시냅스를 만든다. 발아 의욕은 내보내는 시냅스가 적을수록 크다.
-    ///   새 시냅스의 가중치는 자기가 내보내는 시냅스 가중치의 중앙값
-    pub sprout: Option<f64>,
     /// 입력의 자리 배치: 입력 뉴런마다 각 영역(감정·이성·기억)에 정해진 자리가 있고, 그 주변(표준편차 TOPO_SIGMA)으로만 연결한다.
     ///   false(기존): 영역 전체에 무작위. true: 같은 입력을 받는 뉴런들이 서로 이웃이 된다
     pub topo: bool,
@@ -96,8 +90,6 @@ pub struct NetParams {
     pub grow: Option<f64>,
     /// 뉴런당 내보내는 시냅스 수의 목표 (발달 과정에서 성장 의욕의 기준)
     pub target_syn: usize,
-    /// (이전 방식, 사용 안 함) 1만 틱마다 시냅스 가중치에 곱하던 값
-    pub dev_decay: f64,
     /// 가지치기 수명의 시간 단위 (틱). 가중치가 min_weight 의 e 배인 연결이 함께 활동하지 않고 버티는 시간
     pub prune_tau: f64,
     /// 성장할 때 가까운 뉴런을 고르는 범위 (격자 칸 단위 표준편차). 뉴런당 시냅스가 많을수록 넓어야 고를 상대가 남는다
@@ -120,17 +112,11 @@ pub struct NetParams {
     /// 확률적 전달: 은닉 뉴런이 내보내는 시냅스가 이 확률로만 전달한다 (None = 항상 전달).
     /// 평균 전달량은 같고, 같은 입력에도 시행마다 전달되는 조합이 달라진다
     pub release: Option<f64>,
-    /// 출력끼리의 경쟁 (dopamine 필요, 0 = 없음): 억제 뉴런 집단이 모든 출력 뉴런에서 입력을 받고 모든 출력 뉴런을 억제한다.
-    /// 먼저 나온 출력이 뒤따르는 출력을 누르므로, 시행마다 일부만 선택된다. 값 = 억제 뉴런 하나가 출력 하나를 누르는 세기
-    pub out_inh: f64,
-    /// 도파민이 닿는 곳을 선택 단계로 제한: 출력 뉴런(은닉 → 출력 시냅스)과 가치·예측 뉴런에만 닿고, 은닉 뉴런에는 닿지 않는다.
-    /// 보상이 "그 시행에 나온 출력으로 가는 경로"만 굳히고, 표현을 담당하는 은닉 전체를 같이 키우지 않게 한다
-    pub da_select_only: bool,
 }
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, sprout: None, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, dev_decay: 0.97, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, short_tau: None, value: false, needs: false, release: None, out_inh: 0.0, da_select_only: false }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, short_tau: None, value: false, needs: false, release: None }
     }
 }
 
@@ -138,7 +124,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, sprout: None, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, dev_decay: 0.97, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, short_tau: None, value: false, needs: false, release: None, out_inh: 0.0, da_select_only: false }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, short_tau: None, value: false, needs: false, release: None }
     }
 }
 
@@ -160,7 +146,6 @@ pub struct FireRecord {
     pub output_tokens: Vec<(String, f64)>,
     pub spiked_neurons: Vec<(NeuronId, u64)>,
     pub traces: Vec<DeliveryTrace>,
-    pub eligibility: Vec<EligibilityTrace>,
 }
 
 pub struct ActiveStimulus {
@@ -199,7 +184,6 @@ pub struct Network {
     recent_spikes: Vec<(NeuronId, u64)>,
     pub threshold: f64,
     pub noise_range: f64,
-    sprout_cooldown: HashMap<NeuronId, u64>,
     global_tick: u64,
     fires_since_sleep: u64,
     last_sleep_tick: u64,
@@ -255,7 +239,7 @@ const PUNISH_WEIGHT: f64 = 0.06;
 pub const REWARD_TICKS: u64 = 20;
 pub const REWARD_TAIL: u64 = 200;
 /// 만든 직후 기준선(mod_base)이 자리 잡도록 돌리는 틱 수
-const DA_WARMUP_TICKS: u64 = 2_000;
+const DA_WARMUP_TICKS: u64 = 2_300;
 /// 예측 뉴런 수, 예측 뉴런 하나가 받는 은닉(흥분성) 입력 수와 초기 가중치, 예측 뉴런 → 도파민 뉴런 시냅스 세기
 /// 입력 자리 배치의 퍼짐, 가까운 내부 연결의 퍼짐 (격자 칸 단위)
 const TOPO_SIGMA: f64 = 3.0;
@@ -276,9 +260,6 @@ const NEED_TO_RELAY: f64 = 0.2;      // 결핍 뉴런의 입력은 중계 뉴런
 const RELAY_TO_DA: f64 = 0.4;
 const RELAY_TO_SATIETY: f64 = 0.3;
 const SATIETY_TO_NEED: f64 = 0.01;  // 포만 뉴런 발화 한 번이 결핍을 낮추는 양
-/// 출력 경쟁용 억제 뉴런 수, 출력 하나가 억제 뉴런을 흥분시키는 세기 (출력 두세 개가 나오면 억제 뉴런이 발화한다)
-const OUT_INH_COUNT: usize = 8;
-const OUT_TO_INH: f64 = 0.2;
 const VALUE_COUNT: usize = 40;
 const VALUE_TO_DA_WEIGHT: f64 = 0.1;
 const VALUE_TRACE_DELAY: f64 = 20.0;
@@ -382,7 +363,6 @@ impl Network {
             recent_spikes: Vec::new(),
             threshold: 0.50,
             noise_range: 0.2,
-            sprout_cooldown: HashMap::new(),
             global_tick: 0,
             fires_since_sleep: 0,
             last_sleep_tick: 0,
@@ -481,7 +461,7 @@ impl Network {
     fn build_dopamine(&mut self) {
         use rand::prelude::*;
         let mut rng = rand::rng();
-        let mut targets: Vec<usize> = if self.params.da_select_only { Vec::new() } else { (0..self.hippocampus_range.1).collect() };
+        let mut targets: Vec<usize> = (0..self.hippocampus_range.1).collect();
         targets.extend(self.output_idx.iter().cloned());
         let da_count = ((DA_COUNT as f64 * self.params.scale).round() as usize).max(1);
         for i in 0..da_count {
@@ -650,19 +630,6 @@ impl Network {
                 self.need_idx.push(need);
             }
         }
-        // 출력끼리의 경쟁: 출력 → 억제 뉴런 집단 → 모든 출력
-        if self.params.out_inh > 0.0 {
-            let outs = self.output_idx.clone();
-            for i in 0..OUT_INH_COUNT {
-                let id = self.neurons.len() as NeuronId;
-                let mut n = Neuron::new_inhibitory(id, (i * 10) as f32, 1200.0);
-                n.abs_refractory = 1; n.rel_refractory = 2;
-                n.slow_adapt = false; n.spont_scale = 0.0;
-                for &o in &outs { n.add_seed_synapse(o as NeuronId, self.params.out_inh); }
-                self.neurons.push(n);
-                for &o in &outs { self.neurons[o].add_seed_synapse(id, OUT_TO_INH); }
-            }
-        }
         self.aux_end = self.neurons.len();
     }
 
@@ -785,6 +752,21 @@ impl Network {
         let len = |r: (usize, usize)| r.1 - r.0;
         [len(self.emotion_main_range), len(self.emotion_map_range), len(self.reason_main_range), len(self.reason_map_range),
          len(self.memory_range), len(self.hippocampus_range), self.output_idx.len()]
+    }
+    /// 가치 뉴런들의 (조절 수준 ÷ 기준선 − 1) 값 목록 (관찰용)
+    pub fn value_deviations(&self) -> Vec<f64> {
+        self.val_idx.iter().map(|&i| &self.neurons[i]).filter(|n| n.mod_base > 1e-6).map(|n| n.mod_level / n.mod_base - 1.0).collect()
+    }
+    /// 가치 뉴런으로 들어오는 시냅스의 가중치 평균: (set 에 속한 뉴런에서 오는 것, 그 밖의 뉴런에서 오는 것)
+    pub fn value_input_weights(&self, set: &[NeuronId]) -> (f64, f64) {
+        let inset: std::collections::HashSet<usize> = set.iter().map(|&x| x as usize).collect();
+        let (mut a, mut na, mut b, mut nb) = (0.0, 0usize, 0.0, 0usize);
+        for &(pre, k) in &self.slow_syn {
+            let Some(s) = self.neurons[pre].synapses.get(k) else { continue };
+            if !s.slow_fast { continue; }
+            if inset.contains(&pre) { a += s.weight; na += 1; } else { b += s.weight; nb += 1; }
+        }
+        (if na > 0 { a / na as f64 } else { 0.0 }, if nb > 0 { b / nb as f64 } else { 0.0 })
     }
     /// 출력 뉴런의 글자 번호 (출력 뉴런이 아니면 None)
     pub fn output_seq(&self, idx: usize) -> Option<usize> { self.output_idx.iter().position(|&o| o == idx) }
@@ -1251,7 +1233,7 @@ impl Network {
 
         if !self.recent_spikes.is_empty() {
             let spikes: Vec<(NeuronId, u64)> = self.recent_spikes.drain(..).collect();
-            if !self.params.validated { self.handle_sprout(&spikes); }
+            let _ = spikes;
         }
     }
 
@@ -1407,8 +1389,6 @@ impl Network {
         self.active_stimuli = remaining;
 
         for stim in completed_stimuli {
-            // 도파민 방식에서는 흔적을 각 시냅스가 직접 갖고 있으므로, 네트워크가 따로 기록해 두지 않는다
-            let eligibility = if self.params.dopamine { Vec::new() } else { self.compute_eligibility(&stim.all_spikes) };
 
             // output_spikes는 (nid, tick) 시간순으로 기록됨 → 발화 순서대로 토큰 출력
             let mut output_tokens: Vec<(String, f64)> = Vec::new();
@@ -1438,7 +1418,6 @@ impl Network {
                 output_tokens,
                 traces: stim.traces,
                 spiked_neurons: stim.all_spikes,
-                eligibility,
             });
             if self.fire_records.len() > 100 {
                 self.fire_records.remove(0);
@@ -1452,8 +1431,6 @@ impl Network {
         if !self.recent_spikes.is_empty() {
             let spikes: Vec<(NeuronId, u64)> = self.recent_spikes.drain(..).collect();
             if let Some(rate) = self.params.grow { self.run_prune(&spikes); self.grow_step(&spikes, rate); }
-            else if let Some(rate) = self.params.sprout { self.handle_sprout_active(&spikes, rate); }
-            else if !self.params.validated { self.handle_sprout(&spikes); }
         }
 
         completed_ids
@@ -1618,62 +1595,13 @@ impl Network {
         }
         self.fires_since_sleep += 1;
 
-        // prune은 자극 주입 전에 수행: 시냅스 인덱스가 바뀌므로
-        // 이번 fire의 eligibility가 만들어진 뒤에 하면 feedback이 엉뚱한 시냅스에 적용된다.
-        if !self.params.validated && self.next_fire_id % PRUNE_INTERVAL == 0 {
-            let removed = self.prune(self.params.min_weight);
-            if removed > 0 { self.rebuild_slow_index(); }
-            if removed > 0 {
-                eprintln!("  [prune] {removed}개 시냅스 제거");
-            }
-        }
-
         let fire_id = self.inject_stimulus(text);
         loop {
             let completed = self.tick();
             if completed.contains(&fire_id) { break; }
         }
 
-        if self.threshold < 1.0 {
-            let new_threshold = (0.50 + (fire_id / 10_000) as f64 * 0.001).min(1.0);
-            if new_threshold > self.threshold {
-                self.threshold = new_threshold;
-            }
-        }
-        if self.noise_range > 0.1 {
-            self.noise_range = (0.2 - (fire_id / 10_000) as f64 * 0.001).max(0.1);
-        }
-
         fire_id
-    }
-
-    fn compute_eligibility(&self, spikes: &[(NeuronId, u64)]) -> Vec<EligibilityTrace> {
-        plasticity::compute_eligibility(&self.neurons, spikes, &self.plasticity)
-    }
-
-    /// 뉴런이 호출하는 쿼리: 내 근처 후보 뉴런 리스트 반환
-    fn query_nearby_neurons(&self, neuron_id: NeuronId) -> Vec<(NeuronId, f32)> {
-        let idx = neuron_id as usize;
-        if idx >= self.neurons.len() { return Vec::new(); }
-        let x = self.neurons[idx].x;
-        let y = self.neurons[idx].y;
-        let is_input = self.input_idx.contains(&idx);
-        let is_output = self.is_output_neuron(idx);
-        let mut candidates: Vec<(NeuronId, f32)> = self.neurons.iter()
-            .filter_map(|n| {
-                let oidx = n.id as usize;
-                if n.id == neuron_id { return None; }
-                let target_is_input = self.input_idx.contains(&oidx);
-                let target_is_output = self.output_idx.contains(&oidx);
-                if is_input && (target_is_input || target_is_output) { return None; }
-                if is_output && (target_is_output || target_is_input) { return None; }
-                // 입력/출력은 억제성 뉴런으로 뻗지 않음
-                if (is_input || is_output) && n.inhibitory { return None; }
-                let dist = ((x - n.x).powi(2) + (y - n.y).powi(2)).sqrt();
-                if dist <= crate::neuron::SPROUT_RADIUS { Some((n.id, dist)) } else { None }
-            }).collect();
-        candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        candidates
     }
 
     /// 발달 과정의 성장 (params.grow): 발화한 은닉 뉴런이 자기 시냅스 수가 목표보다 적을수록 더 많은 새 시냅스를 만든다.
@@ -1826,36 +1754,6 @@ impl Network {
         for i in n.elig_idx.iter_mut() { if *i as usize == last { *i = k as u32; } }
     }
 
-    /// 발달 과정의 가지치기 (1만 틱마다): 모든 은닉 시냅스가 dev_decay 배로 약해지고, min_weight 아래로 내려간 것은 사라진다.
-    /// 학습으로 강해지는 시냅스만 버티므로 "쓰이지 않으면 사라진다". 갓 생긴 시냅스(2만 틱 이내)는 약해지기만 하고 지우지 않는다
-    fn dev_prune(&mut self) -> usize {
-        let hidden_end = self.hippocampus_range.1;
-        let (decay, min_w, now) = (self.params.dev_decay, self.params.min_weight, self.global_tick);
-        let removed: usize = self.neurons[..hidden_end].par_iter_mut().map(|n| {
-            if n.modulatory { return 0; }
-            // 연결이 약해지면 접점이 줄어든다: 접점 하나가 min_weight 를 유지할 수 있는 만큼만 남는다. 0개가 되면 연결이 사라진다
-            let before: usize = n.synapses.iter().map(|s| s.count as usize).sum();
-            for s in n.synapses.iter_mut() {
-                if s.slow_rate > 0.0 { continue; }
-                s.weight *= decay;
-                if now.saturating_sub(s.born) >= 20_000 { s.count = s.count.min((s.weight / min_w).floor() as u32); }
-            }
-            n.synapses.retain(|s| s.slow_rate > 0.0 || s.count > 0);
-            // 번호가 바뀌었으므로 흔적 목록을 다시 만든다
-            n.elig_idx = n.synapses.iter().enumerate().filter(|(_, s)| s.elig != 0.0).map(|(k, _)| k as u32).collect();
-            let after: usize = n.synapses.iter().map(|s| s.count as usize).sum();
-            before - after
-        }).sum();
-        if removed > 0 {
-            // 연결 자체가 사라졌을 수 있으므로 색인을 다시 만든다
-            self.rebuild_incoming();
-            self.rebuild_slow_index();
-            for r in &mut self.fire_records { r.eligibility.clear(); }
-        }
-        self.pruned += removed as u64;
-        removed
-    }
-
     /// 은닉 뉴런이 내보내는 시냅스 접점 수의 (평균, 최소, 최대), 그리고 연결(상대) 수의 평균
     pub fn out_degree_stats(&self) -> (f64, usize, usize, f64) {
         let h = &self.neurons[..self.hippocampus_range.1];
@@ -1865,107 +1763,6 @@ impl Network {
             sum += k; lo = lo.min(k); hi = hi.max(k); conns += n.synapses.len();
         }
         (sum as f64 / h.len() as f64, lo, hi, conns as f64 / h.len() as f64)
-    }
-
-    /// 활동 기반 발아 (params.sprout). 반환 없이 만든 수를 sprouted 에 누적한다
-    fn handle_sprout_active(&mut self, spikes: &[(NeuronId, u64)], rate: f64) {
-        let hidden_end = self.hippocampus_range.1;
-        let now = self.global_tick;
-        let wanters: Vec<usize> = spikes.iter().map(|s| s.0 as usize)
-            .filter(|&i| i < hidden_end && rand::random::<f64>() < rate * self.neurons[i].sprout_drive())
-            .collect();
-        if wanters.is_empty() { return; }
-        // 방금 발화한 은닉 뉴런 (같이 활동한 상대 후보)
-        let recent: Vec<usize> = (0..hidden_end)
-            .filter(|&i| self.neurons[i].last_spike_tick.is_some_and(|t| now.saturating_sub(t) <= 20))
-            .collect();
-        for pre in wanters {
-            let (x, y) = (self.neurons[pre].x, self.neurons[pre].y);
-            let existing: std::collections::HashSet<NeuronId> = self.neurons[pre].synapses.iter().map(|s| s.target).collect();
-            let mut best: Option<(usize, f32)> = None;
-            for &c in &recent {
-                if c == pre || existing.contains(&(c as NeuronId)) { continue; }
-                let d = ((x - self.neurons[c].x).powi(2) + (y - self.neurons[c].y).powi(2)).sqrt();
-                if d <= crate::neuron::SPROUT_RADIUS && best.is_none_or(|b| d < b.1) { best = Some((c, d)); }
-            }
-            let Some((post, _)) = best else { continue };
-            let w = self.neurons[pre].median_out_weight();
-            self.neurons[pre].synapses.push(crate::synapse::Synapse::new(post as NeuronId, w));
-            let k = self.neurons[pre].synapses.len() - 1;
-            self.neurons[post].incoming.push((pre, k));
-            self.sprouted += 1;
-        }
-    }
-
-    /// 뉴런이 발화했을 때 자체적으로 sprout 결정
-    /// 이 함수는 사실상 뉴런이 "내가 sprout 하고 싶다"고 알릴 때 실행되는 과정
-    fn handle_sprout(&mut self, spikes: &[(NeuronId, u64)]) {
-        // 1. 뉴런이 스스로 결정: 발화한 뉴런 중 자체 확률 체크
-        let wanters: Vec<NeuronId> = spikes.iter()
-            .filter_map(|&(nid, _)| {
-                let idx = nid as usize;
-                if idx < self.neurons.len() && self.neurons[idx].wants_sprout() {
-                    Some(nid)
-                } else { None }
-            }).collect();
-
-        // 2. 원하는 뉴런들: Network에 쿼리 → 자기가 시냅스 생성
-        for nid in wanters {
-            let candidates = self.query_nearby_neurons(nid);
-            let idx = nid as usize;
-            if self.neurons[idx].sprout_from_candidates(&candidates) {
-                // 뉴런이 생성한 시냅스의 역참조 등록
-                let pre_idx = idx;
-                let syn_idx = self.neurons[pre_idx].synapses.len() - 1;
-                let post_id = self.neurons[pre_idx].synapses[syn_idx].target;
-                let post_idx = post_id as usize;
-                if post_idx < self.neurons.len() {
-                    self.neurons[post_idx].incoming.push((pre_idx, syn_idx));
-                }
-            }
-        }
-    }
-
-    pub fn feedback(&mut self, fire_id: u64, positive: bool, strength: f64) {
-        // 도파민 방식: 숫자를 곱하지 않고 보상(처벌) 입력 뉴런을 발화시킨다. 무엇이 얼마나 변할지는
-        // 그때 시냅스에 남아 있는 흔적과 각 뉴런이 받는 조절 신호가 정한다
-        if self.params.dopamine {
-            self.deliver_reward(positive, strength);
-            return;
-        }
-        let record = match self.fire_records.iter().find(|r| r.id == fire_id) {
-            Some(r) => r, None => return,
-        };
-        let (mem_s, mem_e) = self.memory_range;
-        let reward = if positive { strength } else { -strength };
-        // 기억 영역이 pre 또는 post일 때 R-STDP 영향 감쇠 (×0.3)
-        plasticity::apply_reward(&mut self.neurons, &record.eligibility, reward, |pre, post| {
-            let pre_in_mem = pre >= mem_s && pre < mem_e;
-            let post_in_mem = post >= mem_s && post < mem_e;
-            if pre_in_mem || post_in_mem { 0.3 } else { 1.0 }
-        });
-    }
-
-    /// 정답 문자열을 아는 경우의 피드백 (출력 뉴런별 · 오차 기반 보상).
-    /// 전역 보상(feedback)은 정답 출력과 오답 출력을 구분하지 못해 둘을 같이 키우거나 같이 죽인다
-    /// (초파리 버섯체 테스트에서 확인). 여기서는 출력 뉴런으로 들어가는 시냅스만 갱신한다:
-    ///   - 발화한 오답 출력으로 가는 시냅스: -strength
-    ///   - 정답 출력으로 가는 시냅스: +strength (오답 출력이 하나도 발화하지 않았으면 갱신 없음)
-    pub fn feedback_target(&mut self, fire_id: u64, target: &str, strength: f64) {
-        let target_out: std::collections::HashSet<usize> = tokenizer::decompose_to_jamo(target).iter()
-            .map(|j| { let seq = self.get_seq(j); self.output_neuron(seq) }).collect();
-        let output_set: std::collections::HashSet<usize> = self.output_idx.iter().cloned().collect();
-        let record = match self.fire_records.iter().find(|r| r.id == fire_id) {
-            Some(r) => r, None => return,
-        };
-        let wrong_fired = record.spiked_neurons.iter()
-            .any(|&(nid, _)| output_set.contains(&(nid as usize)) && !target_out.contains(&(nid as usize)));
-        let target_gain = if wrong_fired { 1.0 } else { 0.0 };
-        plasticity::apply_reward(&mut self.neurons, &record.eligibility, strength, |_, post| {
-            if target_out.contains(&post) { target_gain }
-            else if output_set.contains(&post) { -1.0 }
-            else { 0.0 }
-        });
     }
 
     /// 1만 틱마다: 항상성 + (검증된 구성이면) 뉴런별 지역 값 갱신
@@ -2098,6 +1895,23 @@ impl Network {
     }
 
     /// teach: 정답 출력 뉴런 사전 활성화 → fire
+    /// 보상(positive) 또는 처벌을 준다: 보상(처벌) 입력 뉴런을 발화시킨다. 무엇이 얼마나 변할지는
+    /// 그때 시냅스에 남아 있는 흔적과 각 뉴런이 받는 조절 신호가 정한다. 도파민 방식(--dopamine)에서만 동작한다
+    /// (숫자를 곱하던 예전 방식의 보상은 없앴다)
+    pub fn feedback(&mut self, _fire_id: u64, positive: bool, strength: f64) {
+        if !self.params.dopamine {
+            eprintln!("  [feedback] 도파민 방식이 꺼져 있어 보상을 줄 수 없습니다 (--dopamine 으로 실행)");
+            return;
+        }
+        self.deliver_reward(positive, strength);
+    }
+
+    /// 정답 문자열이 주어진 경우: 그 fire 의 출력이 정답과 같으면 보상, 다르면 처벌
+    pub fn feedback_by_target(&mut self, fire_id: u64, target: &str, strength: f64) {
+        let correct = self.fire_records.iter().find(|r| r.id == fire_id).is_some_and(|r| r.output == target);
+        self.feedback(fire_id, correct, strength);
+    }
+
     pub fn teach(&mut self, input: &str, target: &str) -> u64 {
         let target_jamo = tokenizer::decompose_to_jamo(target);
         let target_seqs: Vec<u32> = target_jamo.iter().map(|j| self.get_seq(j)).collect();
@@ -2106,27 +1920,6 @@ impl Network {
             self.neurons[idx].potential += 0.6;
         }
         self.fire(input)
-    }
-
-    fn prune(&mut self, min_weight: f64) -> usize {
-        let input_set: std::collections::HashSet<usize> =
-            self.input_idx.iter().cloned().collect();
-        let mut removed = 0;
-        for (idx, neuron) in self.neurons.iter_mut().enumerate() {
-            if input_set.contains(&idx) { continue; }
-            let before = neuron.synapses.len();
-            neuron.synapses.retain(|s| s.weight >= min_weight);
-            removed += before - neuron.synapses.len();
-        }
-        // syn_idx 재배치 후 역참조 재구축
-        if removed > 0 {
-            self.rebuild_incoming();
-            // 과거 fire 기록의 (neuron_idx, synapse_idx)는 더 이상 유효하지 않음
-            for r in &mut self.fire_records {
-                r.eligibility.clear();
-            }
-        }
-        removed
     }
 
     /// 각 뉴런의 incoming 역참조 재구축
@@ -2308,7 +2101,6 @@ impl Network {
             recent_spikes: Vec::new(),
             threshold: snap.threshold,
             noise_range: snap.noise_range,
-            sprout_cooldown: HashMap::new(),
             global_tick,
             fires_since_sleep: snap.fires_since_sleep,
             last_sleep_tick,
