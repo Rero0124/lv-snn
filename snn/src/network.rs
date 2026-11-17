@@ -833,6 +833,8 @@ impl Network {
     }
 
     pub fn da_count(&self) -> usize { self.da_idx.len() }
+    /// 예측 뉴런 수 (관찰용)
+    pub fn pred_count(&self) -> usize { self.pred_idx.len() }
 
     /// 스스로 발화하는 뉴런과 보상/처벌 입력: 자극에 대한 반응으로 세지 않는다
     #[inline]

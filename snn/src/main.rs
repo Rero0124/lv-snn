@@ -617,12 +617,28 @@ fn spont_test(params: &NetParams, ticks: u64, list: &[f64]) {
         let blocks = (ticks / 1000).max(1) as usize;
         let mut per_block = vec![0usize; blocks];
         let mut peak = 0usize;
+        // 구간(1000틱)마다 한 줄: 은닉 발화, 기대 자발, 불어남, 한 틱 최대, 도파민·예측 뉴런 발화, 조절 수준의 기준선 대비 편차 (관찰용)
+        if row == 0 { println!("  (구간 줄) 도파민·예측 = 그 구간에 뉴런 한 개가 발화한 수 (도파민 {}개, 예측 {}개). 편차 = 조절 수준 ÷ 기준선 − 1 의 평균: 구간 끝 값 (구간 안 최소 ~ 최대)", net.da_count(), net.pred_count()); }
+        let (da_n, pred_n) = (net.da_count().max(1) as f64, net.pred_count().max(1) as f64);
+        let (mut b_exp, mut b_peak, mut b_da, mut b_pred) = (0.0f64, 0usize, net.da_spikes, net.pred_spikes);
+        let (mut dev_lo, mut dev_hi) = (f64::MAX, f64::MIN);
         for t in 0..ticks {
-            exp_acc += net.spont_expected().0;
+            let e = net.spont_expected().0;
+            exp_acc += e; b_exp += e;
             net.step();
             let n = net.tick_ids.iter().filter(|&&id| (id as usize) < hidden_n).count();
-            peak = peak.max(n);
-            per_block[((t / 1000) as usize).min(blocks - 1)] += n;
+            peak = peak.max(n); b_peak = b_peak.max(n);
+            let b = ((t / 1000) as usize).min(blocks - 1);
+            per_block[b] += n;
+            let dev = net.mod_deviation();
+            dev_lo = dev_lo.min(dev); dev_hi = dev_hi.max(dev);
+            if (t + 1) % 1000 == 0 && ((t + 1) / 1000) as usize <= blocks {
+                println!("    구간 {:>3} (배수 {}) | 은닉 발화 {:>7}, 기대 자발 {:>6.0}, 불어남 {:>7.2} | 한 틱 최대 {:>4} ({:.1}%) | 도파민 {:.2}, 예측 {:.2}, 편차 {:+.3} ({:+.3} ~ {:+.3}) | {:.0}초",
+                    (t + 1) / 1000, scale, per_block[b], b_exp, if b_exp > 0.0 { per_block[b] as f64 / b_exp } else { 0.0 }, b_peak, b_peak as f64 / hidden_n as f64 * 100.0,
+                    (net.da_spikes - b_da) as f64 / da_n, (net.pred_spikes - b_pred) as f64 / pred_n, dev, dev_lo, dev_hi, t0.elapsed().as_secs_f64());
+                { use std::io::Write; std::io::stdout().flush().ok(); }
+                b_exp = 0.0; b_peak = 0; b_da = net.da_spikes; b_pred = net.pred_spikes; dev_lo = f64::MAX; dev_hi = f64::MIN;
+            }
         }
         let total: usize = per_block.iter().sum();
         let w_end = net.spont_expected().1;
@@ -722,6 +738,7 @@ fn dev_test(params: &NetParams, ticks: u64) {
     let (mut exp_acc, mut exp_kind_acc, mut hid_kind) = (0.0f64, [0.0f64; 5], [0usize; 5]);
     let (mut last_t, mut last_sprouted, mut last_pruned) = (0u64, net.sprouted, net.pruned);
     let mut peak_hid = 0usize;
+    let (mut last_da, mut last_pred) = (net.da_spikes, net.pred_spikes);
     // 자극 밖: 자극이 시작된 틱부터 50틱(보상이 붙으면 보상이 끝난 뒤 50틱까지)을 뺀 나머지 틱만 따로 센다
     let mut stim_until = 0u64;
     let (mut out_ticks, mut out_hid, mut out_exp, mut out_peak) = (0u64, 0usize, 0.0f64, 0usize);
@@ -772,6 +789,9 @@ fn dev_test(params: &NetParams, ticks: u64) {
                 "", out_ticks, if out_exp > 0.0 { out_hid as f64 / out_exp } else { 0.0 },
                 if out_ticks > 0 { out_hid as f64 * 1000.0 / out_ticks as f64 } else { 0.0 }, if out_ticks > 0 { out_exp * 1000.0 / out_ticks as f64 } else { 0.0 },
                 out_peak, out_peak as f64 / hidden_n as f64 * 100.0);
+            println!("{:>9} 조절 | 구간에 뉴런 한 개가 발화한 수: 도파민 {:.2}, 예측 {:.2} | 조절 수준의 기준선 대비 편차 (구간 끝) {:+.3}",
+                "", (net.da_spikes - last_da) as f64 / da, (net.pred_spikes - last_pred) as f64 / net.pred_count().max(1) as f64, net.mod_deviation());
+            last_da = net.da_spikes; last_pred = net.pred_spikes;
             let obs = net.hidden_observe();
             for k in 0..5 {
                 if kind_n[k] == 0 { continue; }
