@@ -113,6 +113,29 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
     let short_tau: f64 = arg(args, "--short-tau").unwrap_or(2000.0);
     let short_d = (-1.0 / short_tau.max(1.0)).exp();
     let stdp_rest = flag(args, "--stdp-rest");
+    // ── 냄새 + 설탕 + 도파민 구동 (초파리의 냄새–설탕 짝지음. 옵션을 주지 않으면 아무것도 달라지지 않는다) ──
+    // --drive-dan 이름들: 그 유형의 도파민 뉴런을 시행마다 직접 구동한다 (전위를 문턱 위로. 광유전학적 활성화에 해당).
+    //     쉼표로 여러 개. 숫자 없는 이름(PAM, PPL)은 그 글자로 시작하는 유형 전부. 예: PAM01,PAM02,PAM08 / PAM
+    // --drive-at 시작 길이: 자극이 시작된 뒤 몇 틱째부터 몇 틱 동안 구동하는지 (기본 20 40)
+    // --drive-after N: 처음 N회는 구동하지 않는다 (기본 15). 그동안 평소 발화만으로 기준선이 잡힌다 (기준선 = 조절 신호를 받기 시작한 뒤 300~2300틱의 평균)
+    // --dan-tonic 값: 구동하는 도파민 뉴런에 주는 평소 발화 (기본 0.02 = snn 본체의 도파민 뉴런과 같은 값. 뉴런마다 0.85~1.15배). 0 이면 주지 않는다.
+    //     평소 발화가 없으면 기준선이 "구동 구간 + 조용한 구간"의 평균으로 잡혀서, 구동이 끝난 뒤 내내 문이 아래쪽으로 열린다
+    // --dan-tonic-all: 평소 발화를 도파민 뉴런 전부에 준다 (대조용)
+    // --odor 비율: 버섯체 세포(KC)의 그 비율을 무작위로 골라(실행 내내 같은 세포) 자극 구간 동안 5틱마다 발화시킨다 (brain-da 의 --kc 와 같은 방식).
+    //     냄새로 켠 세포는 활성 수·정밀도·재현율을 셀 때 자극 뉴런처럼 뺀다
+    let drive_dan: Option<String> = arg(args, "--drive-dan");
+    let drive_at: (u64, u64) = match args.iter().position(|a| a == "--drive-at") {
+        Some(p) => (args.get(p + 1).and_then(|x| x.parse().ok()).unwrap_or(20), args.get(p + 2).and_then(|x| x.parse().ok()).unwrap_or(40)),
+        None => (20, 40),
+    };
+    let drive_after: usize = arg(args, "--drive-after").unwrap_or(15);
+    let dan_tonic: f64 = arg(args, "--dan-tonic").unwrap_or(0.02);
+    let dan_tonic_all = flag(args, "--dan-tonic-all");
+    let odor_frac: Option<f64> = arg(args, "--odor");
+    // --mod-decay 값: 받는 뉴런의 조절 수준이 틱마다 줄어드는 배수 (기본은 뉴런의 기본값 0.98 = snn 본체와 같다). 1 에 가까울수록 조절 수준이 천천히 변한다.
+    //     주의: 값을 주면 snn 본체 경로의 값과 달라진다
+    let mod_decay: Option<f64> = arg(args, "--mod-decay");
+    let extras = drive_dan.is_some() || odor_frac.is_some();
     let mut opt = plasticity::PlasticityOptions {
         stdp_on_inhibitory: !flag(args, "--no-inh-stdp"),
         ltd_scale: arg(args, "--ltd-scale").unwrap_or(1.0),
@@ -221,6 +244,81 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
     // 자발 발화 배수 (기준 모델은 자발 발화가 없다)
     let spont: f64 = arg(args, "--spont-scale").unwrap_or(1.0);
     for nr in neurons.iter_mut() { nr.spont_scale = spont; }
+    // 냄새 + 도파민 구동의 준비 (옵션을 줄 때만)
+    let mut drive_idx: Vec<usize> = Vec::new();   // 시행마다 구동하는 도파민 뉴런
+    let mut tonic_idx: Vec<usize> = Vec::new();   // 평소 발화를 주는 도파민 뉴런
+    let mut odor_idx: Vec<usize> = Vec::new();    // 냄새로 켜는 버섯체 세포
+    let mut mbon_idx: Vec<usize> = Vec::new();
+    let (mut is_kc, mut is_mbon) = (Vec::new(), Vec::new());
+    if extras {
+        let text = std::fs::read_to_string("data/mb_neurons.tsv").expect("data/mb_neurons.tsv 없음");
+        let names: Vec<String> = drive_dan.as_deref().unwrap_or("").split(',').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect();
+        let wanted = |ty: &str| names.iter().any(|nm| ty == nm || (!nm.chars().any(|ch| ch.is_ascii_digit()) && ty.starts_with(nm.as_str())));
+        let (mut kc_all, mut all_dan) = (Vec::new(), Vec::new());
+        let mut driven_types: std::collections::BTreeMap<String, usize> = Default::default();
+        is_kc = vec![false; n]; is_mbon = vec![false; n];
+        for line in text.lines().skip(1) {
+            let f: Vec<&str> = line.split('\t').collect();
+            let idx: usize = f[0].parse().unwrap();
+            match f[1] {
+                "KC" => { kc_all.push(idx); is_kc[idx] = true; }
+                "MBON" => { mbon_idx.push(idx); is_mbon[idx] = true; }
+                "DAN" => { all_dan.push(idx); if wanted(f[2]) { drive_idx.push(idx); *driven_types.entry(f[2].to_string()).or_default() += 1; } }
+                _ => {}
+            }
+        }
+        if drive_dan.is_some() { assert!(!drive_idx.is_empty(), "--drive-dan 에 맞는 도파민 뉴런 유형이 없음"); }
+        let seed: u64 = arg(args, "--seed").unwrap_or(1);
+        let mut state = seed.wrapping_mul(0x9E3779B97F4A7C15) | 1;
+        let mut next = move || { state ^= state << 13; state ^= state >> 7; state ^= state << 17; state };
+        if let Some(frac) = odor_frac {
+            let want = ((kc_all.len() as f64 * frac) as usize).min(kc_all.len());
+            let mut picked = vec![false; n];
+            while odor_idx.len() < want {
+                let k = kc_all[(next() % kc_all.len() as u64) as usize];
+                if !picked[k] { picked[k] = true; odor_idx.push(k); }
+            }
+        }
+        if drive_dan.is_some() && dan_tonic > 0.0 {
+            tonic_idx = if dan_tonic_all { all_dan.clone() } else { drive_idx.clone() };
+            // snn 본체의 도파민 뉴런과 같은 설정 (snn/src/network.rs): 느린 감쇠(0.98) + 지속 입력으로 스스로 발화, 불응기 3/3, 자발 발화 없음.
+            // 뉴런마다 주기와 시작 위상이 달라 같은 틱에 몰려 발화하지 않는다
+            for &i in &tonic_idx {
+                let nr = &mut neurons[i];
+                nr.decay_rate = 0.98;
+                nr.tonic = dan_tonic * (0.85 + 0.3 * (next() % 10_000) as f64 / 10_000.0);
+                nr.potential = 0.5 * (next() % 10_000) as f64 / 10_000.0;
+                nr.abs_refractory = 3;
+                nr.rel_refractory = 3;
+                nr.slow_adapt = false;
+                nr.spont_scale = 0.0;
+            }
+        }
+        if let Some(d) = mod_decay { for nr in neurons.iter_mut() { nr.mod_decay = d; } }
+        {
+            // 뉴런 하나가 듣는 도파민 뉴런 수 (배선에서 센다. 관찰용): 평소 발화를 주는 것만 / 도파민 뉴런 전부
+            let dist = |src: &[usize]| -> String {
+                let mut cnt = vec![0u32; n];
+                for &d in src { let mut seen: Vec<u32> = neurons[d].synapses.iter().map(|s| s.target).collect(); seen.sort_unstable(); seen.dedup(); for t in seen { cnt[t as usize] += 1; } }
+                let mut v: Vec<u32> = cnt.into_iter().filter(|&x| x > 0).collect();
+                if v.is_empty() { return "없음".into(); }
+                v.sort_unstable();
+                let q = |p: f64| v[((v.len() - 1) as f64 * p) as usize];
+                let bins = [(1u32, 1u32), (2, 2), (3, 5), (6, 10), (11, 20), (21, u32::MAX)];
+                format!("뉴런 {}개, 최소 {} / 10% {} / 중앙 {} / 90% {} / 최대 {} | 1개 {}, 2개 {}, 3~5개 {}, 6~10개 {}, 11~20개 {}, 21개 이상 {}", v.len(), v[0], q(0.1), q(0.5), q(0.9), v[v.len() - 1],
+                    v.iter().filter(|&&x| x >= bins[0].0 && x <= bins[0].1).count(), v.iter().filter(|&&x| x == 2).count(), v.iter().filter(|&&x| x >= 3 && x <= 5).count(),
+                    v.iter().filter(|&&x| x >= 6 && x <= 10).count(), v.iter().filter(|&&x| x >= 11 && x <= 20).count(), v.iter().filter(|&&x| x >= 21).count())
+            };
+            println!("[냄새·도파민 구동] 뉴런 하나가 듣는 도파민 뉴런 수 — 평소 발화를 주는 것만: {}", dist(&tonic_idx));
+            println!("[냄새·도파민 구동] 뉴런 하나가 듣는 도파민 뉴런 수 — 도파민 뉴런 전부: {}", dist(&all_dan));
+            println!("[냄새·도파민 구동] 조절 수준의 감쇠 배수 {}", match mod_decay { Some(d) => format!("{d} (옵션으로 바꿈. snn 본체는 0.98)"), None => "0.98 (기본)".into() });
+        }
+        println!("[냄새·도파민 구동] 구동하는 도파민 뉴런 {}개 ({}), 자극 시작 뒤 {}틱째부터 {}틱 동안, {}회째 시행 뒤부터 | 평소 발화 {} (뉴런 {}개{}) | 냄새: 버섯체 세포 {}개 중 {}개 (5틱마다) | 버섯체 출력 뉴런 {}개{}",
+            drive_idx.len(), driven_types.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "), drive_at.0, drive_at.1, drive_after,
+            if tonic_idx.is_empty() { "없음".to_string() } else { format!("{dan_tonic}") }, tonic_idx.len(), if dan_tonic_all { ", 도파민 뉴런 전부" } else { "" },
+            kc_all.len(), odor_idx.len(), mbon_idx.len(),
+            if drive_dan.is_some() && !(snn_path || flag(args, "--dan-mod")) { " | 주의: --snn-path 가 없어 도파민 뉴런이 조절 뉴런이 아니라 흥분성으로 돈다" } else { "" });
+    }
     plasticity::rebuild_incoming(&mut neurons);
     // 교과서 BCM 은 장기 평균을 목표율에서 시작시킨다 (0 에서 시작하면 초반에 LTD 가 전혀 안 걸림)
     if let Some(rho0) = opt.bcm_classic { for nr in neurons.iter_mut() { nr.rate_avg = rho0; } }
@@ -254,6 +352,26 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
     let initial: Vec<Vec<f32>> = neurons.iter().map(|nr| nr.synapses.iter().map(|s| s.weight as f32).collect()).collect();
     let mut is_stim = vec![false; n];
     for &i in &all_sensors { is_stim[i] = true; }
+    for &i in &odor_idx { is_stim[i] = true; }
+    // 문의 상태를 지켜볼 뉴런: 도파민 뉴런의 출력이 닿는 뉴런 (관찰용)
+    let gate_watch: Vec<usize> = if extras && snn_path { (0..n).filter(|&i| dan_target[i]).collect() } else { Vec::new() };
+    // 관찰용 누적 (지난 보고 뒤): [구동 중, 자극 중 구동 밖, 휴지, 구동 직전 20틱, 휴지의 마지막 100틱] × (틱 수, 위쪽으로 열린 뉴런 수의 합, 아래쪽)
+    //   뒤의 둘은 앞의 둘째·셋째에 이미 든 틱을 따로 한 번 더 센 것이다 (구동이 올린 조절 수준의 꼬리가 다음 구동 전에 닫히는지 보는 용도)
+    let mut gate_acc = [[0.0f64; 3]; 5];
+    // 구동하는 유형을 듣는 뉴런만 따로: 구동 중 (틱 수, 위쪽, 아래쪽)
+    let mut gate_drv = [0.0f64; 3];
+    let mut hears_driven = vec![false; if extras { n } else { 0 }];
+    for &d in &drive_idx { for s in &neurons[d].synapses { hears_driven[s.target as usize] = true; } }
+    let n_hears = gate_watch.iter().filter(|&&i| hears_driven[i]).count();
+    // (시행 수, 발화한 도파민 뉴런, 그중 구동 대상, 구동 중 한 번이라도 문이 열린 뉴런, 그중 그 시행에 발화한 뉴런, 버섯체 출력 뉴런 발화, 발화한 냄새 세포)
+    let mut ex_acc = [0.0f64; 7];
+    // 평소 발화를 주는 도파민 뉴런의 발화 수: (자극 구간 틱 수, 발화 수, 휴지 구간 틱 수, 발화 수) — 구동 중인 틱은 빼고 센다
+    let mut dan_rate = [0.0f64; 4];
+    let mut is_tonic = vec![false; if extras { n } else { 0 }];
+    for &i in &tonic_idx { is_tonic[i] = true; }
+    let mut opened_at = vec![0u32; if extras { n } else { 0 }];
+    let mut prev_w: Vec<Vec<f32>> = if extras { initial.clone() } else { Vec::new() };
+    let all_dan_idx: Vec<usize> = if extras { (0..n).filter(|&i| neurons[i].modulatory).collect() } else { Vec::new() };
     let ref_actives: Vec<Vec<bool>> = refs.iter()
         .map(|r| (0..n).map(|i| !is_stim[i] && r[i] >= 1.0).collect()).collect();
     let n_ref = ref_actives[0].iter().filter(|&&b| b).count();
@@ -295,6 +413,13 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
         for t in 0..stim_ticks + rest_ticks {
             tick += 1;
             let stimulating = t < stim_ticks;
+            let driving = stimulating && !drive_idx.is_empty() && trial > drive_after && t >= drive_at.0 && t < drive_at.0 + drive_at.1;
+            // 평소 발화를 주는 도파민 뉴런은 임계값 적응과 항상성의 대상이 아니다 (평소 발화율이 흘러가면 고정된 기준선에서 벗어나 문이 저절로 열린다)
+            for &i in &tonic_idx { neurons[i].self_threshold = 0.5; neurons[i].excitability = 1.0; }
+            if stimulating && !odor_idx.is_empty() && t % 5 == 0 {
+                for &i in &odor_idx { neurons[i].potential = 1.0; neurons[i].self_threshold = 0.5; }
+            }
+            if driving { for &d in &drive_idx { neurons[d].potential = 1.0; neurons[d].self_threshold = 0.5; } }
             if stimulating {
                 // 입력 뉴런은 감각기: 임계값 적응과 항상성(감응도)의 대상이 아니다.
                 // 감응도를 그대로 두면 자주 발화하는 입력일수록 1만 틱마다 ×0.95 씩 깎여서
@@ -346,6 +471,28 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
                 }
             }
             if stimulating { total += spikes.len() as u64; } else { rest_total += spikes.len() as u64; }
+            if !tonic_idx.is_empty() && !driving {
+                let k = if stimulating { 0 } else { 2 };
+                dan_rate[k] += 1.0; dan_rate[k + 1] += spikes.iter().filter(|&&id| is_tonic[id as usize]).count() as f64;
+            }
+            if !gate_watch.is_empty() {
+                // 문의 상태 (읽기만 한다): 이 틱의 굳히기가 보는 값과 같다
+                let period = if driving { 0 } else if stimulating { 1 } else { 2 };
+                let (mut up, mut down, mut dup, mut ddown) = (0usize, 0usize, 0usize, 0usize);
+                for &i in &gate_watch {
+                    let x = &neurons[i];
+                    if x.mod_base > 1e-6 {
+                        let r = x.mod_level / x.mod_base - 1.0;
+                        if r >= plasticity::MOD_DEADBAND { up += 1; if driving { opened_at[i] = trial as u32; if hears_driven[i] { dup += 1; } } }
+                        else if r <= -plasticity::MOD_DEADBAND { down += 1; if driving { opened_at[i] = trial as u32; if hears_driven[i] { ddown += 1; } } }
+                    }
+                }
+                gate_acc[period][0] += 1.0; gate_acc[period][1] += up as f64; gate_acc[period][2] += down as f64;
+                if driving { gate_drv[0] += 1.0; gate_drv[1] += dup as f64; gate_drv[2] += ddown as f64; }
+                let extra = if stimulating && !drive_idx.is_empty() && trial > drive_after && t < drive_at.0 && t + 20 >= drive_at.0 { Some(3) }
+                    else if !stimulating && t + 100 >= stim_ticks + rest_ticks { Some(4) } else { None };
+                if let Some(e) = extra { gate_acc[e][0] += 1.0; gate_acc[e][1] += up as f64; gate_acc[e][2] += down as f64; }
+            }
             // snn 과 같이 자극 중에만 STDP (idle 틱에는 없음)
             if stdp && (stimulating || stdp_rest) { plasticity::stdp_step(&mut neurons, &spikes, tick, &opt); }
             if homeo && tick % 10_000 == 0 {
@@ -360,6 +507,16 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
             if total > 20_000_000 { break; }
         }
         let cycle = (trial - 1) / stims.len() + 1;
+        if extras {
+            ex_acc[0] += 1.0;
+            ex_acc[1] += all_dan_idx.iter().filter(|&&i| counts[i] > 0).count() as f64;
+            ex_acc[2] += drive_idx.iter().filter(|&&i| counts[i] > 0).count() as f64;
+            let opened: Vec<usize> = gate_watch.iter().copied().filter(|&i| opened_at[i] == trial as u32).collect();
+            ex_acc[3] += opened.len() as f64;
+            ex_acc[4] += opened.iter().filter(|&&i| counts[i] > 0).count() as f64;
+            ex_acc[5] += mbon_idx.iter().map(|&i| counts[i] as f64).sum::<f64>();
+            ex_acc[6] += odor_idx.iter().filter(|&&i| counts[i] > 0).count() as f64;
+        }
         {
             // 창 평균에 이번 시행을 더한다 (출력만을 위한 계산)
             let act: Vec<bool> = (0..n).map(|i| !is_stim[i] && counts[i] >= 1).collect();
@@ -472,6 +629,54 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
                 println!("        창 평균 (최근 {:.0}회) | MN9 {:.2} | 활성 {:.1} | 총발화 {:.0} | 휴지발화 {:.1} | 정밀도 {:.3} | 재현율 {:.3} | 시행 1 의 활성집합과 겹침 {:.3}",
                     w[0], w[1] / k, w[2] / k, w[3] / k, w[4] / k, w[5] / k, w[6] / k, w[7] / k);
                 win[cur] = [0.0; 8];
+            }
+            if extras {
+                // 냄새·도파민 구동의 관찰 줄 (읽기만 한다)
+                let k = ex_acc[0].max(1.0);
+                let g = |p: usize, j: usize| if gate_acc[p][0] > 0.0 { gate_acc[p][j] / gate_acc[p][0] } else { 0.0 };
+                let (mut based, mut bsum, mut bmin, mut bmax) = (0usize, 0.0f64, f64::MAX, 0.0f64);
+                let mut bases: Vec<f64> = Vec::new();
+                for &i in &gate_watch { let b = neurons[i].mod_base; if b > 1e-6 { based += 1; bsum += b; bmin = bmin.min(b); bmax = bmax.max(b); bases.push(b); } }
+                bases.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let bmed = if bases.is_empty() { 0.0 } else { bases[bases.len() / 2] };
+                let rate = |k: usize| if dan_rate[k] > 0.0 && !tonic_idx.is_empty() { dan_rate[k + 1] / dan_rate[k] / tonic_idx.len() as f64 * 1000.0 } else { 0.0 };
+                println!("        구동·냄새 | 평소 발화를 주는 도파민 뉴런 {}개의 발화율 (뉴런당, 1000틱당, 구동 중인 틱 제외): 자극 구간 {:.1}, 휴지 구간 {:.1} | 기준선 값의 중앙 {:.5}",
+                    tonic_idx.len(), rate(0), rate(2), bmed);
+                dan_rate = [0.0; 4];
+                println!("        구동·냄새 | 창 평균 (최근 {:.0}회): 발화한 도파민 뉴런 {:.1} (구동 대상 {}개 중 {:.1}) | 문이 열린 뉴런 수의 틱 평균, 위/아래: 구동 중 {:.1}/{:.1} ({:.0}틱), 자극 중 구동 밖 {:.1}/{:.1} ({:.0}틱), 휴지 {:.1}/{:.1} ({:.0}틱) | 구동 중 한 번이라도 열린 뉴런 {:.1}, 그중 그 시행에 발화한 뉴런 {:.1}",
+                    ex_acc[0], ex_acc[1] / k, drive_idx.len(), ex_acc[2] / k, g(0, 1), g(0, 2), gate_acc[0][0], g(1, 1), g(1, 2), gate_acc[1][0], g(2, 1), g(2, 2), gate_acc[2][0], ex_acc[3] / k, ex_acc[4] / k);
+                println!("        구동·냄새 | 도파민이 닿는 뉴런 {}개 중 기준선이 잡힌 뉴런 {based}개, 기준선 값 평균 {:.5} (최소 {:.5} ~ 최대 {:.5}) | 버섯체 출력 뉴런의 발화 수: 이번 시행 {}, 창 평균 {:.1} | 냄새 세포 {}개 중 발화: 이번 시행 {}, 창 평균 {:.1}",
+                    gate_watch.len(), if based > 0 { bsum / based as f64 } else { 0.0 }, if based > 0 { bmin } else { 0.0 }, bmax,
+                    mbon_idx.iter().map(|&i| counts[i] as u64).sum::<u64>(), ex_acc[5] / k, odor_idx.len(), odor_idx.iter().filter(|&&i| counts[i] > 0).count(), ex_acc[6] / k);
+                println!("        구동·냄새 | 꼬리: 문이 열린 뉴런 수의 틱 평균, 위/아래 — 구동 직전 20틱 {:.1}/{:.1} ({:.0}틱), 휴지의 마지막 100틱 {:.1}/{:.1} ({:.0}틱) | 구동하는 유형을 듣는 뉴런 {}개 중 구동 중에 열린 수의 틱 평균, 위/아래: {:.1}/{:.1}",
+                    g(3, 1), g(3, 2), gate_acc[3][0], g(4, 1), g(4, 2), gate_acc[4][0], n_hears,
+                    if gate_drv[0] > 0.0 { gate_drv[1] / gate_drv[0] } else { 0.0 }, if gate_drv[0] > 0.0 { gate_drv[2] / gate_drv[0] } else { 0.0 });
+                gate_drv = [0.0; 3];
+                // 굳은 양: 지난 보고 뒤 가중치(굳은 부분)가 바뀐 양. 세 무리로 — 버섯체 세포 → 버섯체 출력 뉴런, 단맛에 활성인 뉴런 사이(기준 모델 기준, 감각뉴런 포함), 그 밖
+                let sugar = |i: usize| refs[0][i] >= 1.0;
+                let mut grp = [[0.0f64; 3]; 3]; // (절댓값 합, 부호 있는 합, 바뀐 시냅스 수)
+                // "그 밖"을 다시 나눈다: [버섯체 세포 → 구동 유형을 듣는 다른 뉴런, 버섯체 세포가 아닌 것 → 버섯체 출력 뉴런, 버섯체 세포가 아닌 것 → 구동 유형을 듣는 다른 뉴런, 구동 유형을 듣지 않는 뉴런으로]
+                let mut oth = [[0.0f64; 3]; 4];
+                for (pre, (nr, pw)) in neurons.iter().zip(prev_w.iter_mut()).enumerate() {
+                    for (s, w0) in nr.synapses.iter().zip(pw.iter_mut()) {
+                        let d = s.weight - *w0 as f64;
+                        if d != 0.0 {
+                            let t = s.target as usize;
+                            let gi = if is_kc[pre] && is_mbon[t] { 0 } else if sugar(pre) && sugar(t) { 1 } else { 2 };
+                            grp[gi][0] += d.abs(); grp[gi][1] += d; if d.abs() > 1e-6 { grp[gi][2] += 1.0; }
+                            if gi == 2 {
+                                let oi = if !hears_driven[t] { 3 } else if is_kc[pre] { 0 } else if is_mbon[t] { 1 } else { 2 };
+                                oth[oi][0] += d.abs(); oth[oi][1] += d; if d.abs() > 1e-6 { oth[oi][2] += 1.0; }
+                            }
+                            *w0 = s.weight as f32;
+                        }
+                    }
+                }
+                println!("        구동·냄새 | 굳은 양 (지난 보고 뒤 가중치 변화의 절댓값 합 / 부호 있는 합 / 바뀐 시냅스 수): 버섯체 세포→출력 뉴런 {:.5} / {:+.5} / {:.0}, 단맛 활성 뉴런 사이 {:.5} / {:+.5} / {:.0}, 그 밖 {:.5} / {:+.5} / {:.0}",
+                    grp[0][0], grp[0][1], grp[0][2], grp[1][0], grp[1][1], grp[1][2], grp[2][0], grp[2][1], grp[2][2]);
+                println!("        구동·냄새 | '그 밖'의 굳은 양을 다시 나눔 (절댓값 합 / 부호 있는 합 / 바뀐 시냅스 수): 버섯체 세포→구동 유형을 듣는 다른 뉴런 {:.5} / {:+.5} / {:.0}, 버섯체 세포 아닌 것→버섯체 출력 뉴런 {:.5} / {:+.5} / {:.0}, 버섯체 세포 아닌 것→구동 유형을 듣는 다른 뉴런 {:.5} / {:+.5} / {:.0}, 구동 유형을 듣지 않는 뉴런으로 {:.5} / {:+.5} / {:.0}",
+                    oth[0][0], oth[0][1], oth[0][2], oth[1][0], oth[1][1], oth[1][2], oth[2][0], oth[2][1], oth[2][2], oth[3][0], oth[3][1], oth[3][2]);
+                gate_acc = [[0.0; 3]; 5]; ex_acc = [0.0; 7];
             }
         }
     }
