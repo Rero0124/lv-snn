@@ -98,6 +98,13 @@ pub struct NetParams {
     pub new_weight: f64,
     /// 새 접점 세기의 퍼짐: 위 값의 (1 − new_spread) ~ (1 + new_spread) 배 사이에서 고르게 뽑는다
     pub new_spread: f64,
+    /// 성장을 도파민에 맡기는 정도 (None = 항상 같은 속도로 성장). Some(b) 이면 성장 속도 = 기본 확률 × (b + 그 뉴런의 조절 수준이 기준선보다 높은 정도).
+    ///   뜻밖의 보상이 많은 초기에는 많이 자라고, 보상이 예측되어 도파민이 줄면 성장도 줄어든다 → 가지치기가 따라잡아 접점이 내려온다
+    pub grow_da: Option<f64>,
+    /// 접점끼리의 경쟁 (0 = 없음). 받는 뉴런이 과하게 활동해서 스스로 감응도를 낮춘 상태면, 그 뉴런으로 들어오는 굳지 않은 접점의
+    /// 수명이 짧아진다 (수명을 계산할 때 가중치에 감응도^compete 를 곱한다). 접점이 적은 초기에는 전부 버티고,
+    /// 입력이 넘치면 받는 뉴런이 줄 수 있는 몫이 줄어 굳지 못한 것부터 사라진다. 기준은 개수가 아니라 그 뉴런 자신의 활동이다
+    pub compete: f64,
     /// 일시적인 변화 방식 (dopamine 필요): STDP 의 변화가 이만큼의 틱에 걸쳐 사라진다 (시간 상수). 도파민이 와야 오래가는 변화가 된다.
     /// None 이면 기존 방식(평소에도 gate_base 비율이 영구적으로 넘어감)
     pub short_tau: Option<f64>,
@@ -105,6 +112,13 @@ pub struct NetParams {
     ///   보상이 반복되면 그 직전에 활동한 뉴런들의 가치 뉴런 입력이 강해져서, 다음부터는 그 자극이 들어오는 순간 도파민이 나온다.
     ///   예고 자극이 스스로 도파민을 일으키므로, 그 자극을 예고하는 더 앞의 자극도 학습된다 (2차, 3차)
     pub value: bool,
+    /// 가치 뉴런 입력 시냅스의 학습 크기 (0 이면 pred_eta 와 같게)
+    pub val_eta: f64,
+    /// 가치 뉴런 → 도파민 뉴런, 예측 뉴런 → 도파민 뉴런 시냅스의 세기.
+    /// 예측 쪽이 가치 쪽보다 훨씬 세면, 가치가 조금만 생겨도 보상이 다 상쇄되어 가치가 더 자라지 못한다
+    pub v2da: f64,
+    /// None 이면 구조에 맞는 기본값: 예측 뉴런이 은닉에서 직접 입력을 받으면 0.5, 가치 뉴런에서 받으면 0.1
+    pub p2da: Option<f64>,
     /// 1차 보상과 몸의 상태 (dopamine 필요): 단맛(먹이)·물 감각 입력과 배고픔·목마름 뉴런을 만든다.
     ///   감각 입력은 중계 뉴런을 거쳐 도파민 뉴런을 흥분시키는데, 중계 뉴런은 해당 결핍 뉴런의 입력이 함께 있어야 발화한다
     ///   → 배고플 때만 먹이가 보상이 된다. 중계 뉴런이 발화하면 포만 뉴런을 거쳐 결핍이 내려간다
@@ -116,7 +130,7 @@ pub struct NetParams {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, short_tau: None, value: false, needs: false, release: None }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None }
     }
 }
 
@@ -124,7 +138,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, short_tau: None, value: false, needs: false, release: None }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None }
     }
 }
 
@@ -247,6 +261,8 @@ const LOCAL_SIGMA: f64 = 4.0;
 /// 연결 하나(한 상대)의 세기가 접점이 쌓여서 올라갈 수 있는 한계. 문턱(0.5)의 절반이라, 접점이 아무리 쌓여도
 /// 연결 하나만으로는 상대를 발화시키지 못한다. 한계에 가까울수록 새 접점이 보태는 양이 줄어든다
 const CONN_CAP: f64 = 0.25;
+/// 한 쌍(한 상대) 사이에 생길 수 있는 접점 수의 한계
+const MAX_CONTACTS_PER_PAIR: u32 = 10;
 const PRED_COUNT: usize = 40;
 const PRED_FANIN: usize = 1500;
 const PRED_INIT_WEIGHT: f64 = 0.001;
@@ -261,7 +277,9 @@ const RELAY_TO_DA: f64 = 0.4;
 const RELAY_TO_SATIETY: f64 = 0.3;
 const SATIETY_TO_NEED: f64 = 0.01;  // 포만 뉴런 발화 한 번이 결핍을 낮추는 양
 const VALUE_COUNT: usize = 40;
-const VALUE_TO_DA_WEIGHT: f64 = 0.1;
+const VALUE_TO_DA_WEIGHT: f64 = 0.2;
+/// 예측 뉴런이 가치 뉴런에서 입력을 받는 구조일 때의 예측 뉴런 → 도파민 세기 (가치가 충분히 자란 뒤에야 보상이 상쇄되도록 약하게)
+const PRED_TO_DA_LINKED: f64 = 0.1;
 const VALUE_TRACE_DELAY: f64 = 20.0;
 /// 예측 뉴런 묶음의 지연 (틱). 묶음마다 입력 시냅스의 지연이 달라서, 자극 뒤 서로 다른 시점에 활성화된다
 const PRED_DELAYS: [f64; 8] = [8.0, 12.0, 17.0, 26.0, 38.0, 55.0, 82.0, 120.0];
@@ -498,7 +516,7 @@ impl Network {
                 n.spont_scale = 0.0;
                 n.mod_decay = 0.9;
                 for &d in &self.da_idx {
-                    n.add_seed_synapse(d as NeuronId, VALUE_TO_DA_WEIGHT);
+                    n.add_seed_synapse(d as NeuronId, self.params.v2da);
                     n.synapses.last_mut().unwrap().on_dendrite = true;
                 }
                 self.val_idx.push(id as usize);
@@ -529,7 +547,7 @@ impl Network {
                 n.set_type(CellType::Predictor);
                 n.spont_scale = 0.0;
                 for &d in &self.da_idx {
-                    n.add_seed_synapse(d as NeuronId, PRED_TO_DA_WEIGHT);
+                    n.add_seed_synapse(d as NeuronId, self.params.p2da.unwrap_or(if self.val_idx.is_empty() { PRED_TO_DA_WEIGHT } else { PRED_TO_DA_LINKED }));
                     n.synapses.last_mut().unwrap().on_dendrite = true;
                 }
                 self.pred_idx.push(id as usize);
@@ -652,6 +670,7 @@ impl Network {
         self.plasticity.gate_base = self.params.gate_base;
         self.plasticity.mod_baseline = true;
         self.plasticity.pred_eta = if self.params.predict || self.params.value { self.params.pred_eta } else { 0.0 };
+        self.plasticity.val_eta = self.params.val_eta;
         if let Some(tau) = self.params.short_tau {
             // 일시적인 변화 방식: 평소 비율은 쓰지 않고, 모든 은닉·출력으로 가는 시냅스에 일시적 부분의 감쇠 배수를 넣는다
             let d = (-1.0 / tau.max(1.0)).exp();
@@ -1622,7 +1641,12 @@ impl Network {
             let n = self.neurons[pre].synapses.iter().map(|s| s.count as f64).sum::<f64>();
             // 목표가 0 이면 개수를 보지 않는다: 성장은 일정하고, 개수는 소멸과의 균형으로 정해진다
             let drive = if target > 0.0 { (target / (n + 1.0)).powi(2).min(100.0) } else { 1.0 };
-            let expect = rate * drive;
+            let da = match self.params.grow_da {
+                // 평소의 흔들림(±25%)은 세지 않는다: 그것만으로도 계속 자라게 된다
+                Some(b) => { let n = &self.neurons[pre]; b + if n.mod_base > 1e-6 { (n.mod_level / n.mod_base - 1.0 - plasticity::MOD_DEADBAND).max(0.0) } else { 0.0 } }
+                None => 1.0,
+            };
+            let expect = rate * drive * da;
             let mut count = expect.floor() as usize;
             if rng.random::<f64>() < expect - expect.floor() { count += 1; }
             if count == 0 { continue; }
@@ -1644,6 +1668,10 @@ impl Network {
                 let (post_med, new_w) = (self.unit_med.get(post).copied().unwrap_or(0.0), self.params.new_weight * jitter);
                 // 이미 연결된 상대면 접점이 하나 늘어난다: 접점 하나의 세기(가중치 ÷ 개수)만큼 가중치가 커진다
                 if let Some(s) = self.neurons[pre].synapses.iter_mut().find(|s| s.target as usize == post && s.slow_rate == 0.0) {
+                    // 한 쌍 사이의 접점 수에는 한계가 있다 (축삭과 수상돌기가 만나는 자리가 한정됨). 많을수록 더 생기기 어렵고, 한계에 닿으면 생기지 않는다.
+                    // 세기가 한계(CONN_CAP)에 닿은 연결에도 더 생기지 않는다 — 세기는 그대로인데 개수만 늘어나는 일을 막는다
+                    if s.count >= MAX_CONTACTS_PER_PAIR || s.weight >= CONN_CAP * 0.98 { continue; }
+                    if rng.random::<f64>() < s.count as f64 / MAX_CONTACTS_PER_PAIR as f64 { continue; }
                     // 늘어나는 접점도 새 접점과 같은 세기로 시작한다
                     let unit = if post_med > 0.0 { post_med * new_w } else { s.weight / s.count.max(1) as f64 };
                     // 이미 강한 연결일수록 덜 보탠다 (한계에 닿으면 0)
@@ -1715,7 +1743,9 @@ impl Network {
             for pre in sources {
                 let Some(k) = self.neurons[pre].synapses.iter().position(|s| s.target as usize == post && s.slow_rate == 0.0) else { continue };
                 let (last, w, count) = { let s = &self.neurons[pre].synapses[k]; (s.last_co.max(s.born), s.weight, s.count) };
-                if count == 0 || last + self.prune_life(w) > now { continue; }
+                // 경쟁: 받는 뉴런(지금 발화한 이 뉴런)의 감응도가 낮을수록 수명이 짧다
+                let share = if self.params.compete > 0.0 { self.neurons[post].excitability.min(1.0).powf(self.params.compete) } else { 1.0 };
+                if count == 0 || last + self.prune_life(w * share) > now { continue; }
                 self.pruned += 1;
                 if count > 1 {
                     let s = &mut self.neurons[pre].synapses[k];
@@ -1752,6 +1782,14 @@ impl Network {
         let n = &mut self.neurons[pre];
         n.elig_idx.retain(|&i| i as usize != k);
         for i in n.elig_idx.iter_mut() { if *i as usize == last { *i = k as u32; } }
+    }
+
+    /// 은닉 뉴런의 감응도 (평균, 최소, 최대) — 항상성이 얼마나 움직였는지 (관찰용)
+    pub fn excitability_stats(&self) -> (f64, f64, f64) {
+        let h = &self.neurons[..self.hippocampus_range.1];
+        let (mut sum, mut lo, mut hi) = (0.0, f64::MAX, 0.0f64);
+        for n in h { sum += n.excitability; lo = lo.min(n.excitability); hi = hi.max(n.excitability); }
+        (sum / h.len() as f64, lo, hi)
     }
 
     /// 은닉 뉴런이 내보내는 시냅스 접점 수의 (평균, 최소, 최대), 그리고 연결(상대) 수의 평균

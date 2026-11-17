@@ -81,6 +81,10 @@ fn main() {
     // --predict: 보상 예측 경로 (예측된 보상에는 도파민이 덜 나온다)
     if args.iter().any(|a| a == "--predict" || a == "--rpe-test") { params.predict = true; params.dopamine = true; }
     if let Some(v) = num("--pred-eta") { params.pred_eta = v; }
+    if let Some(v) = num("--val-eta") { params.val_eta = v; }
+    // --v2da W / --p2da W: 가치 뉴런 → 도파민, 예측 뉴런 → 도파민 시냅스의 세기
+    if let Some(v) = num("--v2da") { params.v2da = v; }
+    if let Some(v) = num("--p2da") { params.p2da = Some(v); }
     // --value: 가치 경로 (예고 자극이 스스로 도파민을 일으킴 → 2차, 3차 조건화)
     if args.iter().any(|a| a == "--value" || a == "--order2-test") { params.value = true; params.dopamine = true; }
     // --release P: 확률적 전달 (은닉 뉴런의 시냅스가 확률 P 로만 전달, 평균 전달량은 유지)
@@ -164,6 +168,11 @@ fn main() {
         return;
     }
     // --order2-test N: 2차 조건화 점검. (1) A → 보상 N번, (2) B → A (보상 없음) N번. 비교: (1) 없이 (2)만 한 네트워크
+    if let Some(n) = num("--op2-test") {
+        params.dopamine = true;
+        op2_test(&params, n as usize);
+        return;
+    }
     if let Some(n) = num("--order2-test") {
         order2_test(&params, n as usize);
         return;
@@ -205,6 +214,10 @@ fn main() {
     if let Some(v) = num("--prune-tau") { params.prune_tau = v; }
     if let Some(v) = num("--grow-sigma") { params.grow_sigma = v; }
     if let Some(v) = num("--new-weight") { params.new_weight = v; }
+    // --grow-da B: 성장 속도를 도파민에 맡긴다 (기본 성장 B + 조절 수준이 기준선보다 높은 정도)
+    if let Some(v) = num("--grow-da") { params.grow_da = Some(v); }
+    // --compete K: 접점끼리의 경쟁 (받는 뉴런의 감응도가 낮을수록 굳지 않은 접점의 수명이 짧아짐)
+    if let Some(v) = num("--compete") { params.compete = v; }
     if let Some(v) = num("--new-spread") { params.new_spread = v; }
     if let Some(v) = num("--min-weight") { params.min_weight = v; }
     // --dev-test TICKS: 발달 과정 점검. 자발 발화와 가끔 들어오는 자극만으로 돌리며 시냅스 수의 변화를 본다
@@ -691,6 +704,8 @@ fn dev_test(params: &NetParams, ticks: u64) {
             let (avg, lo, hi, conns) = net.out_degree_stats();
             println!("{:>9} {:>8.0} {:>6} {:>7} {:>7.0} {:>6.1} {:>11} {:>11} {:>9.0} {:>7} {:>7} {:>8.1} {:>7.0}", t, avg, lo, hi, conns, avg / conns.max(1.0), net.sprouted, net.pruned,
                 spikes as f64 * 1000.0 / report as f64, food_n, water_n, if da_n > 0 { da_acc as f64 / da / da_n as f64 } else { 0.0 }, t0.elapsed().as_secs_f64());
+            let (em, el, eh) = net.excitability_stats();
+            println!("{:>9} 감응도 평균 {:.3} (최소 {:.3}, 최대 {:.3})", "", em, el, eh);
             std::io::stdout().flush().ok();
             spikes = 0; food_n = 0; water_n = 0; da_acc = 0; da_n = 0;
         }
@@ -737,9 +752,21 @@ fn order2_test(params: &NetParams, n: usize) {
         let (a1, va1, _) = run_window(&mut net, "안녕", 300, None, None);
         let (b1, vb1, _) = run_window(&mut net, "고마워", 300, None, None);
         println!("  1단계 뒤     A 만: 도파민 {}  가치뉴런 {}   |  B 만: 도파민 {}  가치뉴런 {}", fmt(&a1), va1, fmt(&b1), vb1);
-        // 2단계: B → A, 보상 없음
+        // 2단계: B → A, 보상 없음. 진행하면서 가치 뉴런으로 가는 입력 가중치(A 쪽 / B 쪽 / 그 밖)와 구간별 반응을 찍는다
         let w0 = net.weights_snapshot();
-        for _ in 0..n { run_window(&mut net, "고마워", 330, Some((30, "안녕")), None); }
+        let step = (n / 6).max(1);
+        let (mut vsum, mut d0sum, mut d2sum, mut k) = (0u64, 0.0, 0.0, 0usize);
+        for t in 1..=n {
+            let (bins, vs, _) = run_window(&mut net, "고마워", 330, Some((30, "안녕")), None);
+            vsum += vs; d0sum += bins[0]; d2sum += bins[2]; k += 1;
+            if t % step == 0 {
+                let (wa, _) = net.value_input_weights(&a_only);
+                let (wb, wo) = net.value_input_weights(&b_only);
+                println!("    2단계 {:>5}번: 가치 뉴런 발화 {:>5.1} (B 와 A 합쳐서), 도파민 B 직후 {:.2} / A 직후(40~60틱) {:.2} | 가치 입력 가중치: A 쪽 {:.5}, B 쪽 {:.5}, 그 밖 {:.5}",
+                    t, vsum as f64 / k as f64, d0sum / k as f64, d2sum / k as f64, wa, wb, wo);
+                vsum = 0; d0sum = 0.0; d2sum = 0.0; k = 0;
+            }
+        }
         let (a2, va2, _) = run_window(&mut net, "안녕", 300, None, None);
         let (b2, vb2, _) = run_window(&mut net, "고마워", 300, None, None);
         let (wa, _) = net.weight_change_within(&a_only, &w0);

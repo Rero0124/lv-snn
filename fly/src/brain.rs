@@ -128,7 +128,7 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
             mod_backward_sign: arg(args, "--mod-backward").unwrap_or(1.0),
             mod_stdp_gain: arg(args, "--mod-stdp").unwrap_or(0.0),
             mod_gate: arg(args, "--mod-gate"),
-            gate_base: arg(args, "--gate-base").unwrap_or(0.0), mod_baseline: false, pred_eta: 0.0, short_decay: None,
+            gate_base: arg(args, "--gate-base").unwrap_or(0.0), mod_baseline: false, pred_eta: 0.0, short_decay: None, val_eta: 0.0,
     };
     let n = c.n();
     // 자극 목록: A = 단맛(기본). --stim2 GROUP 을 주면 그 감각뉴런 그룹을 B 로 추가해 A, B 를 번갈아 준다

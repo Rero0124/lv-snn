@@ -83,6 +83,8 @@ pub struct PlasticityOptions {
     /// 틱마다 이 배수로 줄어 0 으로 돌아간다. 오래가는 가중치는 조절 신호가 흔적을 넘길 때만 변한다.
     /// 이 방식에서는 gate_base(평소에도 조금씩 영구적으로 넘어가는 비율)를 쓰지 않는다
     pub short_decay: Option<f64>,
+    /// 가치 뉴런 입력 시냅스의 학습 크기 (0 이면 pred_eta 와 같게)
+    pub val_eta: f64,
 }
 
 /// 조절 수준이 기준선에서 이 비율 이상 벗어나야 신호로 본다 (기준선 발화의 흔들림을 신호로 읽지 않기 위한 값)
@@ -171,7 +173,7 @@ fn ltd_factor(w: f64, scale: f64, opt: &PlasticityOptions) -> f64 {
 
 impl Default for PlasticityOptions {
     fn default() -> Self {
-        Self { stdp_on_inhibitory: true, ltd_scale: 1.0, stdp_scale: 1.0, istdp_scale: 1.0, istdp_target: None, bound: Bound::Soft, ltd_once_per_post: false, bcm: true, bcm_rate_target: None, bcm_rate_relative: None, bcm_local: None, bcm_classic: None, bcm_classic_local: None, istdp_bound: Bound::Soft, istdp_sigma: 0.4, istdp_bound_scale: 1.0, bound_scale: 1.0, local_scale: false, mod_eta: 0.0, mod_forward_sign: -1.0, mod_backward_sign: 1.0, mod_stdp_gain: 0.0, mod_gate: None, gate_base: 0.0, mod_baseline: false, pred_eta: 0.0, short_decay: None }
+        Self { stdp_on_inhibitory: true, ltd_scale: 1.0, stdp_scale: 1.0, istdp_scale: 1.0, istdp_target: None, bound: Bound::Soft, ltd_once_per_post: false, bcm: true, bcm_rate_target: None, bcm_rate_relative: None, bcm_local: None, bcm_classic: None, bcm_classic_local: None, istdp_bound: Bound::Soft, istdp_sigma: 0.4, istdp_bound_scale: 1.0, bound_scale: 1.0, local_scale: false, mod_eta: 0.0, mod_forward_sign: -1.0, mod_backward_sign: 1.0, mod_stdp_gain: 0.0, mod_gate: None, gate_base: 0.0, mod_baseline: false, pred_eta: 0.0, short_decay: None, val_eta: 0.0 }
     }
 }
 
@@ -558,7 +560,8 @@ pub fn predictor_step(neurons: &mut [Neuron], slow: &[(usize, usize)], now: u64,
         // 그래서 위쪽은 +100% 를 넘어야, 아래쪽은 −60% 아래여야 신호로 본다. 급증은 +수백 %, 완전한 정지는 −100% 근처라 둘 다 통과한다
         if fast { if r < VALUE_UP && r > -VALUE_DOWN { continue; } } else if r.abs() < PRED_DEADBAND { continue; }
         let s = &mut neurons[pre].synapses[j];
-        s.weight = (s.weight + opt.pred_eta * r * trace).clamp(0.0, 1.0);
+        let eta = if fast && opt.val_eta > 0.0 { opt.val_eta } else { opt.pred_eta };
+        s.weight = (s.weight + eta * r * trace).clamp(0.0, 1.0);
     }
 }
 
