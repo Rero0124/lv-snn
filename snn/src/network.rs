@@ -178,6 +178,8 @@ pub struct NetParams {
     pub no_homeo_need: bool,
     /// 1만 틱마다의 항상성에서 조절 쪽 뉴런(도파민·가치·예측·보상·처벌 입력)을 뺀다. false(기존): 모든 뉴런에 건다
     pub no_homeo_da: bool,
+    /// 시험용: 도파민 뉴런의 수상돌기 기여를 0 아래로 내리지 않는다 (예측 억제가 평소 발화를 누르지 못한다. 빠진 보상의 내려감도 없어진다 — 뇌와 다르다)
+    pub pred_floor: bool,
     /// 결정적 난수의 씨앗 (None = 지금처럼 전역 난수기). Some(N) 이면 실행 중의 난수(잡음, 자발 발화, 확률 전달, 성장)를
     ///   (N, 쓰임새, 뉴런, 시냅스 번호, 틱)에서 정한다. 배선 씨앗(seed)이 없으면 배선도 N 으로 한다
     pub rng_seed: Option<u64>,
@@ -232,7 +234,7 @@ pub struct DevObs {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, rng_seed: None }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, rng_seed: None }
     }
 }
 
@@ -240,7 +242,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, rng_seed: None }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, rng_seed: None }
     }
 }
 
@@ -428,6 +430,8 @@ impl Network {
             net.params.slow_events = params.slow_events;
             net.params.slow_check = params.slow_check;
             net.params.wake_check = params.wake_check;
+            net.params.pred_floor = params.pred_floor;
+            net.apply_pred_floor();
             if net.params.slow_events { net.slow_pos.clear(); net.slow_resync(); net.slow_chk_drift = 0.0; }
             if net.params.wake_check { net.wake = Some(Box::new(WakeCheck::default())); }
             return net;
@@ -651,6 +655,7 @@ impl Network {
         }
 
         if net.params.wake_check { net.wake = Some(Box::new(WakeCheck::default())); }
+        net.apply_pred_floor();
         let total_synapses: usize = net.neurons.iter().map(|n| n.synapses.len()).sum();
         eprintln!("  [초기화] 어휘 {}개, 뉴런 {}개 (감정 {}, 이성 {}, 기억 {}, 해마 {}, 입출력 {}), 시냅스 {}개",
             net.vocab.len(), net.neurons.len(),
@@ -1314,6 +1319,11 @@ impl Network {
     }
 
     pub fn da_count(&self) -> usize { self.da_idx.len() }
+    /// pred_floor: 도파민 뉴런에 "수상돌기 기여를 0 아래로 내리지 않는다" 표시를 켠다 (옵션이 꺼져 있으면 아무것도 하지 않는다)
+    fn apply_pred_floor(&mut self) {
+        if !self.params.pred_floor { return; }
+        for &i in &self.da_idx.clone() { if let Some(n) = self.neurons.get_mut(i) { n.dend_floor = true; } }
+    }
     /// 예측 뉴런 수 (관찰용)
     pub fn pred_count(&self) -> usize { self.pred_idx.len() }
 

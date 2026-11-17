@@ -102,6 +102,9 @@ fn main() {
     //   (--spont-flat 은 --spont 나 --spont-fixed 가 없으면, --unit-med-fix 는 --grow 가 없으면 효과가 없다)
     if let Some(v) = num("--spont-fixed") { params.spont_fixed = Some(v); }
     if args.iter().any(|a| a == "--spont-flat") { params.spont_flat = true; }
+    // --pred-floor (시험용): 도파민 뉴런의 수상돌기 기여(보상 입력 − 예측 억제)를 0 아래로 내리지 않는다.
+    //   예측 억제가 보상이 올린 몫을 깎기만 하고 평소 발화는 누르지 못한다. 빠진 보상에 도파민이 내려가는 것도 없어진다(뇌와 다르다)
+    if args.iter().any(|a| a == "--pred-floor") { params.pred_floor = true; }
     // --unit-med-fix: 새 접점 세기 기준에서 조절(도파민) 뉴런이 보내는 입력을 뺀다
     if args.iter().any(|a| a == "--unit-med-fix") { params.unit_med_fix = true; }
     // --topo: 입력마다 정해진 자리 주변으로만 연결 / --local F: 영역 내부 연결 중 가까운 뉴런으로 가는 비율
