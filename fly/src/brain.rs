@@ -689,6 +689,19 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
                     grp[0][0], grp[0][1], grp[0][2], grp[1][0], grp[1][1], grp[1][2], grp[2][0], grp[2][1], grp[2][2]);
                 println!("        구동·냄새 | '그 밖'의 굳은 양을 다시 나눔 (절댓값 합 / 부호 있는 합 / 바뀐 시냅스 수): 버섯체 세포→구동 유형을 듣는 다른 뉴런 {:.5} / {:+.5} / {:.0}, 버섯체 세포 아닌 것→버섯체 출력 뉴런 {:.5} / {:+.5} / {:.0}, 버섯체 세포 아닌 것→구동 유형을 듣는 다른 뉴런 {:.5} / {:+.5} / {:.0}, 구동 유형을 듣지 않는 뉴런으로 {:.5} / {:+.5} / {:.0}",
                     oth[0][0], oth[0][1], oth[0][2], oth[1][0], oth[1][1], oth[1][2], oth[2][0], oth[2][1], oth[2][2], oth[3][0], oth[3][1], oth[3][2]);
+                {
+                    // 이번 시행의 쉬는 구간에 발화한 뉴런: 종류별, 그리고 무리별 (관찰용)
+                    let ra: Vec<usize> = (0..n).filter(|&i| rest_active[i]).collect();
+                    let mut by: std::collections::BTreeMap<&str, usize> = Default::default();
+                    if !classes.is_empty() { for &i in &ra { *by.entry(classes[i].as_str()).or_default() += 1; } }
+                    let mut rows: Vec<(&str, usize)> = by.into_iter().collect();
+                    rows.sort_by_key(|r| std::cmp::Reverse(r.1));
+                    println!("        구동·냄새 | 이번 시행의 쉬는 구간에 발화한 뉴런 {}개 (평소 발화하는 도파민 뉴런 {}개 포함) | 종류별: {} | 버섯체 세포 {}, 버섯체 출력 뉴런 {}, 구동 유형을 듣는 뉴런 {}, 단맛에 활성인 뉴런(기준 모델) {}, 도파민 뉴런 {}",
+                        ra.len(), ra.iter().filter(|&&i| is_tonic[i]).count(),
+                        rows.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "),
+                        ra.iter().filter(|&&i| is_kc[i]).count(), ra.iter().filter(|&&i| is_mbon[i]).count(), ra.iter().filter(|&&i| hears_driven[i]).count(),
+                        ra.iter().filter(|&&i| refs[0][i] >= 1.0).count(), ra.iter().filter(|&&i| neurons[i].modulatory).count());
+                }
                 gate_acc = [[0.0; 3]; 5]; ex_acc = [0.0; 7];
             }
         }
