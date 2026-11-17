@@ -267,6 +267,12 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
     let mut is_apl: Vec<bool> = Vec::new();
     // --rest-dump 앞머리: 쉬는 구간 발화가 뛴 보고 시행에서, 쉬는 구간에 발화한 뉴런의 번호를 "앞머리.t<시행>.txt" 로 남긴다 (관찰용)
     let rest_dump: Option<String> = arg(args, "--rest-dump");
+    // --watch 파일: 그 파일에 적힌 번호의 뉴런 무리(예: 다른 실행에서 번진 뉴런)의 감응도·항상성 목표·느린 발화율 평균을 시행마다 찍는다 (관찰용).
+    // 이 실행에서 처음 번진 보고 시행의 무리도 그때부터 함께 찍는다.
+    let watch_given: Vec<usize> = arg::<String>(args, "--watch").map(|f| std::fs::read_to_string(&f).expect("--watch 파일 없음")
+        .split_whitespace().filter_map(|x| x.parse::<usize>().ok()).filter(|&i| i < n).collect()).unwrap_or_default();
+    let mut watch_own: Vec<usize> = Vec::new();
+    if !watch_given.is_empty() { println!("[지켜봄] --watch 무리 {}개", watch_given.len()); }
     if extras {
         let text = std::fs::read_to_string("data/mb_neurons.tsv").expect("data/mb_neurons.tsv 없음");
         let names: Vec<String> = drive_dan.as_deref().unwrap_or("").split(',').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect();
@@ -542,6 +548,16 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
             {
                 let (mut hi, mut mid, mut lo, mut mx, mut sum) = (0usize, 0usize, 0usize, 0.0f64, 0.0f64);
                 for nr in neurons.iter() { let e = nr.excitability; sum += e; if e > mx { mx = e; } if e >= 1.4999 { hi += 1; } else if e > 1.2 { mid += 1; } if e < 0.8 { lo += 1; } }
+                for (nm, g) in [("준 무리", &watch_given), ("이 실행에서 처음 번진 무리", &watch_own)] {
+                    if g.is_empty() { continue; }
+                    let m = g.len() as f64;
+                    let (mut e, mut sp, mut ra, mut rf, mut th, mut hi2, mut fired) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0usize, 0usize);
+                    for &i in g.iter() { let nr = &neurons[i]; e += nr.excitability; sp += nr.set_point; ra += nr.rate_avg; rf += nr.rate_fast; th += nr.self_threshold; if nr.excitability >= 1.4999 { hi2 += 1; } if rest_active[i] { fired += 1; } }
+                    let (ea, spa, raa) = (neurons.iter().map(|x| x.excitability).sum::<f64>(), neurons.iter().map(|x| x.set_point).sum::<f64>(), neurons.iter().map(|x| x.rate_avg).sum::<f64>());
+                    let o = (n as f64 - m).max(1.0);
+                    println!("  [지켜봄] {trial} {nm} {}개: 감응도 {:.4} 항상성 목표 {:.6} 느린 발화율 {:.6} 빠른 발화율 {:.6} 자가 임계 {:.4} 1.5에 닿은 수 {hi2} 쉬는 구간에 발화한 수 {fired} | 나머지: 감응도 {:.4} 항상성 목표 {:.6} 느린 발화율 {:.6}",
+                        g.len(), e / m, sp / m, ra / m, rf / m, th / m, (ea - e) / o, (spa - sp) / o, (raa - ra) / o);
+                }
                 println!("  [시행] {trial} 틱 {tick} 자극발화 {total} 휴지발화 {rest_total} MN9 {} | 감응도: 평균 {:.4} 최대 {:.3} 1.5에 닿은 뉴런 {hi} 1.2~1.5 {mid} 0.8 아래 {lo}", counts[mn9], sum / n as f64, mx);
             }
             ex_acc[0] += 1.0;
@@ -745,6 +761,7 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
                         let act: Vec<usize> = ra.iter().copied().filter(|&i| !is_tonic[i]).collect();
                         let quiet: Vec<usize> = (0..n).filter(|&i| !rest_active[i]).collect();
                         println!("        구동·냄새 | 쉬는 구간에 발화한 뉴런(평소 발화 도파민 제외) {}개의 감응도 평균 {:.4}, 발화하지 않은 뉴런의 감응도 평균 {:.4}", act.len(), exm(&act), exm(&quiet));
+                        if act.len() > 200 && watch_own.is_empty() { watch_own = act.clone(); }
                         if act.len() > 200 { if let Some(pre) = &rest_dump {
                             std::fs::write(format!("{pre}.t{trial}.txt"), act.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("\n")).ok();
                         } }
