@@ -151,6 +151,10 @@ pub struct Neuron {
     /// 자신에게로 들어오는 시냅스 역참조 (pre_neuron_idx, syn_idx)
     #[serde(default)]
     pub incoming: Vec<(usize, usize)>,
+    /// 결정적 난수의 씨앗 (0 = 쓰지 않음: 지금처럼 전역 난수기에서 뽑는다). 0 이 아니면 잡음·자발 발화·확률 전달의 난수를
+    /// (씨앗, 쓰임새, 뉴런 번호, 시냅스 번호, 틱)에서 정한다: 도는 순서와 스레드 수, 다른 난수를 몇 번 뽑았는지와 무관하다
+    #[serde(default)]
+    pub rng_seed: u64,
 }
 
 /// 수상돌기 구획: 고원 전위가 일어나는 문턱, 그때 세포체에 주는 탈분극, 그 아래에서 새어 들어가는 비율, 버스트의 전달 배수
@@ -176,12 +180,27 @@ fn default_set_point() -> f64 { -1.0 }
 
 fn default_excitability() -> f64 { 1.0 }
 
+/// 열쇠에서 정해지는 난수 (64비트): (씨앗, 쓰임새, 뉴런 번호, 시냅스 번호, 틱)을 splitmix64 로 섞는다
+#[inline]
+pub fn keyed_u64(seed: u64, purpose: u64, neuron: u64, syn: u64, tick: u64) -> u64 {
+    #[inline] fn mix(mut z: u64) -> u64 { z = z.wrapping_add(0x9E3779B97F4A7C15); z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9); z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB); z ^ (z >> 31) }
+    let mut h = mix(seed ^ purpose.wrapping_mul(0xD6E8FEB86659FD93));
+    h = mix(h ^ neuron);
+    h = mix(h ^ syn.wrapping_mul(0xA24BAED4963EE407));
+    mix(h ^ tick)
+}
+/// [0, 1) 의 실수 (위 53비트)
+#[inline]
+pub fn keyed_f64(seed: u64, purpose: u64, neuron: u64, syn: u64, tick: u64) -> f64 {
+    (keyed_u64(seed, purpose, neuron, syn, tick) >> 11) as f64 / (1u64 << 53) as f64
+}
+
 impl Neuron {
     pub fn new(id: NeuronId, x: f32, y: f32) -> Self {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: false, skip_refractory: false,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(),
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
         }
     }
 
@@ -189,7 +208,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: true, skip_refractory: false,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(),
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
         }
     }
 
@@ -198,7 +217,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory, skip_refractory: false,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.75, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 2, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(),
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.75, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 2, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
         }
     }
 
@@ -206,7 +225,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: false, skip_refractory: true,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(),
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
         }
     }
 
@@ -305,7 +324,8 @@ impl Neuron {
                     // 잡음은 −폭 이상 +폭 미만이다. 가장 큰 잡음을 더해도 못 넘으면 난수를 뽑지 않는다 (판정은 어떤 잡음 값에서도 같다)
                     if base + noise_range < bar { return None; }
                     let noise = if noise_range > 0.0 {
-                        (rand::random::<f64>() * 2.0 - 1.0) * noise_range
+                        let u = if self.rng_seed != 0 { keyed_f64(self.rng_seed, 1, self.id as u64, 0, tick) } else { rand::random::<f64>() };
+                        (u * 2.0 - 1.0) * noise_range
                     } else { 0.0 };
                     if base + noise < bar {
                         return None;
@@ -320,13 +340,15 @@ impl Neuron {
         // 잡음은 −폭 이상 +폭 미만이다. 가장 큰 잡음을 더해도 문턱에 못 미치면 난수를 뽑지 않는다 (문턱으로는 발화하지 않는다. 자발 발화는 아래에서 그대로 본다)
         let over_threshold = if noise_range <= 0.0 { base >= adj_threshold } else if base + noise_range <= adj_threshold { false } else {
             let noise = if noise_range > 0.0 {
-                (rand::random::<f64>() * 2.0 - 1.0) * noise_range
+                let u = if self.rng_seed != 0 { keyed_f64(self.rng_seed, 2, self.id as u64, 0, tick) } else { rand::random::<f64>() };
+                (u * 2.0 - 1.0) * noise_range
             } else { 0.0 };
             base + noise >= adj_threshold
         };
         let should_fire = over_threshold
             || (!self.skip_refractory && self.spont_scale > 0.0
-                && rand::random_bool((if stimulated { 0.000001 } else { 0.00001 }) * self.spont_scale));
+                && { let p = (if stimulated { 0.000001 } else { 0.00001 }) * self.spont_scale;
+                     if self.rng_seed != 0 { keyed_f64(self.rng_seed, 3, self.id as u64, 0, tick) < p } else { rand::random_bool(p) } });
 
         // 신호 받은 상태인지 (potential > 0: 입력이 있었다는 뜻)
         let received_signal = self.potential > 0.01;
@@ -347,8 +369,9 @@ impl Neuron {
             if self.prune_tau > 0.0 && tick >= self.next_prune { self.prune_own(tick); }
             let sign = if self.inhibitory { -1.0 } else { 1.0 };
             let burst = if self.last_burst { BURST_GAIN } else { 1.0 };
-            let deliveries: Vec<_> = self.synapses.iter_mut()
-                .map(|s| {
+            let (rng_seed, my_id) = (self.rng_seed, self.id as u64);
+            let deliveries: Vec<_> = self.synapses.iter_mut().enumerate()
+                .map(|(k_syn, s)| {
                     s.sync(tick);
                     // 지연 시냅스: 지금은 전달하지 않고 흔적만 올린다 (전류는 매 틱 따로 전달된다)
                     if s.slow_rate > 0.0 {
@@ -357,7 +380,8 @@ impl Neuron {
                         if !s.slow_fast { return (s.target, 0.0); }
                     }
                     // 확률적 전달: 실패하면 이번에는 아무것도 보내지 않는다 (자원도 쓰지 않는다)
-                    if s.p_rel > 0.0 && rand::random::<f64>() >= s.p_rel {
+                    // 확률 전달의 난수: 결정적 난수면 열쇠에 대상이 아니라 시냅스 번호를 쓴다 (같은 대상으로 가는 칸이 여럿일 수 있다)
+                    if s.p_rel > 0.0 && (if rng_seed != 0 { keyed_f64(rng_seed, 4, my_id, k_syn as u64, tick) } else { rand::random::<f64>() }) >= s.p_rel {
                         s.last_used_tick = tick;
                         return (s.target, 0.0);
                     }

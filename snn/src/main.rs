@@ -143,6 +143,9 @@ fn main() {
     if args.iter().any(|a| a == "--no-homeo-need") { params.no_homeo_need = true; }
     if args.iter().any(|a| a == "--no-homeo-da") { params.no_homeo_da = true; }
     if params.predict && !params.no_warmup_quiet { params.warmup_quiet = true; }
+    // --rng-seed N: 결정적 난수. 실행 중의 난수(잡음, 자발 발화, 확률 전달, 성장, 시험이 자극을 고르는 난수)를 씨앗에서 정한다.
+    //   같은 씨앗이면 스레드 수와 무관하게 같은 기록이 나온다. --seed(배선)를 따로 주지 않으면 배선 씨앗도 N 이다
+    if let Some(v) = num("--rng-seed") { params.rng_seed = Some(v as u64); }
     // --load P: 저장된 망을 불러온다 (시험 분기들이 망을 새로 만드는 자리에서 그 파일을 읽는다. 설정은 저장된 것을 쓴다)
     if let Some(i) = args.iter().position(|a| a == "--load") { params.load_from = args.get(i + 1).cloned(); }
     // --resave P2 (--load P 와 함께): 불러온 망을 한 틱도 돌리지 않고 P2 로 다시 저장하고 끝낸다 (저장·불러오기에서 빠지는 값이 없는지 두 파일을 견주는 확인용)
@@ -603,7 +606,7 @@ fn stream_test(params: &NetParams, trials: usize) {
     println!("반응 = 입력 시작 뒤 30틱 동안의 발화 수 (처음 5번 평균 → 마지막 5번 평균). 도파민 = A 의 보상 구간 20틱 동안 도파민 뉴런 한 개의 발화 수");
     println!("{:<12} {:>16} {:>16} {:>11} {:>11} {:>14} {:>14} {:>14}", "조건", "A 반응", "B 반응", "A 가중치", "B 가중치", "A 출력발화", "B 출력발화", "도파민");
     for (name, mode) in [("보상 없음", 0), ("A 에 보상", 1), ("A 에 처벌", 2)] {
-        let mut rng = rand::rng();
+        let mut rng = test_rng(params, 1);
         let mut net = Network::with_params(params.clone());
         let da = net.da_count() as f64;
         let words = ["안녕", "고마워"];
@@ -769,7 +772,7 @@ fn persist_test(params: &NetParams, trials: usize) {
 fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: bool, save: Option<(u64, String)>) {
     use rand::prelude::*;
     use std::io::Write;
-    let mut rng = rand::rng();
+    let mut rng = test_rng(params, 2);
     println!("{:?}", params);
     let t0 = std::time::Instant::now();
     let mut net = Network::with_params(params.clone());
@@ -1218,7 +1221,7 @@ fn op_test(params: &NetParams, trials: usize) {
 /// 입력마다 자기 목표는 오르고, 다른 입력의 목표와 나머지 출력은 오르지 않아야 한다
 fn op2_test(params: &NetParams, trials: usize) {
     use rand::prelude::*;
-    let mut rng = rand::rng();
+    let mut rng = test_rng(params, 3);
     println!("{:?}", params);
     let mut net = Network::with_params(params.clone());
     net.rest(300);
@@ -1260,5 +1263,14 @@ fn op2_test(params: &NetParams, trials: usize) {
                 own.iter_mut().for_each(|x| *x = 0); cross.iter_mut().for_each(|x| *x = 0); oth.iter_mut().for_each(|x| *x = 0); n.iter_mut().for_each(|x| *x = 0); rew.iter_mut().for_each(|x| *x = 0);
             }
         }
+    }
+}
+
+/// 시험이 자극을 고르는 난수. --rng-seed 가 있으면 (씨앗, 시험 번호)에서 정해지고, 없으면 실행마다 다르다
+fn test_rng(params: &NetParams, which: u64) -> rand::rngs::StdRng {
+    use rand::SeedableRng;
+    match params.rng_seed {
+        Some(s) => rand::rngs::StdRng::seed_from_u64(neuron::keyed_u64(s, 100 + which, 0, 0, 0)),
+        None => rand::rngs::StdRng::seed_from_u64(rand::random::<u64>()),
     }
 }
