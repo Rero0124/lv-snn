@@ -172,6 +172,11 @@ pub struct NetParams {
     ///   기준선을 잡는 준비 구간은 돌리지 않는다. 계산 방식 옵션(slow_events, slow_check, wake_check)만 명령줄의 것을 따른다
     #[serde(skip)]
     pub load_from: Option<String>,
+    /// 1만 틱마다의 항상성에서 몸의 상태 뉴런(맛·필요·중계·포만)을 뺀다. false(기존): 모든 뉴런에 건다
+    ///   (이 뉴런들은 처음 1만 틱에 조용하면 평소 발화율이 0 으로 잡혀, 그 뒤 발화할 때마다 감응도가 1만 틱에 2% 씩 깎인다)
+    pub no_homeo_need: bool,
+    /// 1만 틱마다의 항상성에서 조절 쪽 뉴런(도파민·가치·예측·보상·처벌 입력)을 뺀다. false(기존): 모든 뉴런에 건다
+    pub no_homeo_da: bool,
 }
 
 /// wake_check 의 상태와 세는 값 (관찰용)
@@ -223,7 +228,7 @@ pub struct DevObs {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: false, no_homeo_da: false }
     }
 }
 
@@ -231,7 +236,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: false, no_homeo_da: false }
     }
 }
 
@@ -2352,14 +2357,33 @@ impl Network {
         (sum as f64 / h.len() as f64, lo, hi, conns as f64 / h.len() as f64)
     }
 
-    /// 1만 틱마다: 항상성 + (검증된 구성이면) 뉴런별 지역 값 갱신
+    /// 1만 틱마다: 항상성 + (검증된 구성이면) 뉴런별 지역 값 갱신.
+    /// 항상성은 은닉·입출력뿐 아니라 보조 뉴런(도파민·가치·예측·보상 입력, 맛·필요·중계·포만)에도 걸린다. 뉴런별 목표(homeostasis_own)는
+    /// 첫 1만 틱의 발화율을 평소로 삼으므로, 그때 조용했던 뉴런은 평소가 0 으로 잡히고 그 뒤 발화하면 매번 감응도가 최대 비율(2%)로 깎인다
+    /// ("원래 조용한 뉴런은 건드리지 않는다"는 계속 조용할 때만 맞다). no_homeo_need / no_homeo_da 는 그 무리를 항상성에서 뺀다
     fn periodic_homeostasis(&mut self) {
-        if self.params.validated {
-            for n in &mut self.neurons { n.homeostasis_own(10_000.0, 0.02, 0.1); }
-            self.refresh_local();
-        } else {
-            for n in &mut self.neurons { n.homeostasis(); }
+        // 보조 뉴런의 두 무리: [도파민 시작, 몸의 상태 시작) = 도파민·가치·예측·보상·처벌, [몸의 상태 시작, aux_end) = 맛·필요·중계·포만
+        let da_start = self.da_idx.first().copied().unwrap_or(usize::MAX);
+        let need_start = self.taste_idx.iter().flatten().copied().min().unwrap_or(self.aux_end);
+        let (skip_need, skip_da, aux_end) = (self.params.no_homeo_need, self.params.no_homeo_da, self.aux_end);
+        let validated = self.params.validated;
+        for (i, n) in self.neurons.iter_mut().enumerate() {
+            let skip = (skip_need && i >= need_start && i < aux_end) || (skip_da && i >= da_start && i < need_start.min(aux_end));
+            if skip { n.fire_count_window = 0; continue; }
+            if validated { n.homeostasis_own(10_000.0, 0.02, 0.1); } else { n.homeostasis(); }
         }
+        if validated { self.refresh_local(); }
+    }
+
+    /// 보조 뉴런 무리별 평균 감응도 (관찰용): 맛, 필요, 중계, 포만, 도파민, 예측, 가치. 무리가 없으면 NaN
+    pub fn aux_excitability(&self) -> [(&'static str, f64); 7] {
+        let mean = |v: &[usize]| if v.is_empty() { f64::NAN } else { v.iter().map(|&i| self.neurons[i].excitability).sum::<f64>() / v.len() as f64 };
+        let taste: Vec<usize> = self.taste_idx.iter().flatten().copied().collect();
+        let need: Vec<usize> = self.need_idx.iter().flatten().copied().collect();
+        // 종류마다 맛 → 필요 → 중계 → 포만이 NEED_GROUP 개씩 잇달아 만들어진다
+        let (mut relay, mut sat) = (Vec::new(), Vec::new());
+        for t in &self.taste_idx { if let Some(&first) = t.first() { relay.extend(first + 2 * NEED_GROUP..first + 3 * NEED_GROUP); sat.extend(first + 3 * NEED_GROUP..first + 4 * NEED_GROUP); } }
+        [("맛", mean(&taste)), ("필요", mean(&need)), ("중계", mean(&relay)), ("포만", mean(&sat)), ("도파민", mean(&self.da_idx)), ("예측", mean(&self.pred_idx)), ("가치", mean(&self.val_idx))]
     }
 
     /// 뉴런별 지역 값(학습 변화량·soft bound·노이즈) 다시 계산

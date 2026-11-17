@@ -139,6 +139,9 @@ fn main() {
     //   예측 경로(--predict)를 쓰면 기본으로 켜진다. --no-warmup-quiet 로 끈다 (옛 동작: 자발 발화가 켜진 채로 기준선을 잡음)
     if args.iter().any(|a| a == "--warmup-quiet") { params.warmup_quiet = true; }
     if args.iter().any(|a| a == "--no-warmup-quiet") { params.no_warmup_quiet = true; }
+    // --no-homeo-need: 1만 틱마다의 항상성에서 맛·필요·중계·포만 뉴런을 뺀다 / --no-homeo-da: 도파민·가치·예측·보상 입력 뉴런을 뺀다
+    if args.iter().any(|a| a == "--no-homeo-need") { params.no_homeo_need = true; }
+    if args.iter().any(|a| a == "--no-homeo-da") { params.no_homeo_da = true; }
     if params.predict && !params.no_warmup_quiet { params.warmup_quiet = true; }
     // --load P: 저장된 망을 불러온다 (시험 분기들이 망을 새로 만드는 자리에서 그 파일을 읽는다. 설정은 저장된 것을 쓴다)
     if let Some(i) = args.iter().position(|a| a == "--load") { params.load_from = args.get(i + 1).cloned(); }
@@ -819,6 +822,8 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     println!("  (추가 줄의 뜻) 표의 '상대 수' = 서로 다른 상대의 수가 아니라 시냅스 칸의 수 (같은 상대로 가는 칸이 둘 이상일 수 있다: 초기 배선의 중복). '쌍 수'도 칸의 수다. 중복 시냅스 = 같은 (보내는 뉴런, 받는 뉴런)의 두 번째 이상인 칸");
     println!("  (추가 줄의 뜻) 조절 줄의 문 = 은닉 뉴런의 조절 수준을 10틱마다 읽어, 기준선보다 25% 이상 높은 비율(위)과 25% 이상 낮은 비율(아래)을 구간에 걸쳐 평균한 값. 도파민 수상돌기 = 도파민 뉴런 수상돌기 값의 10틱마다 표본 평균");
     let (mut gate_up, mut gate_down, mut gate_n, mut dend_acc, mut dend_n) = (0u64, 0u64, 0u64, 0.0f64, 0u64);
+    println!("  (추가 줄의 뜻) 몸 = 구간에 끝난 보상(먹이·물)마다 보상 입력 직전의 결핍과 그 200틱 뒤까지 내려간 양의 평균, 그리고 보조 뉴런 무리별 평균 감응도(항상성이 1만 틱마다 고친다. 무리가 없으면 NaN)");
+    let (mut need_before, mut need_pre_acc, mut need_drop_acc, mut need_drop_n) = (0.0f64, 0.0f64, 0.0f64, 0u64);
     let (mut last_made, mut last_drop, mut last_short) = (net.grow_made, net.gate_drop, net.pruned_short);
     const AREAS: [&str; 6] = ["감정 주", "감정 지도", "이성 주", "이성 지도", "기억", "해마"];
     for t in (start + 1)..=ticks {
@@ -826,8 +831,8 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
             for kind in 0..2 { if pending.is_none() && net.need_level(kind) > 0.8 { net.drive_text(words[kind], 4); pending = Some((t + 30, kind)); stim_until = stim_until.max(t + 30 + 20 + 50); } }
         }
         if let Some((at, kind)) = pending {
-            if t == at { net.drive_primary(kind, 20); da_mark = Some((t + 20, net.da_spikes)); if kind == 0 { food_n += 1 } else { water_n += 1 } }
-            if t >= at + 200 { pending = None; }
+            if t == at { net.drive_primary(kind, 20); da_mark = Some((t + 20, net.da_spikes)); if kind == 0 { food_n += 1 } else { water_n += 1 } need_before = net.need_level(kind); }
+            if t >= at + 200 { need_pre_acc += need_before; need_drop_acc += need_before - net.need_level(kind); need_drop_n += 1; pending = None; }
         }
         if let Some((end, start)) = da_mark { if t == end { da_acc += net.da_spikes - start; da_n += 1; da_mark = None; } }
         if t == next_stim && !no_stim {
@@ -875,6 +880,10 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
                 if gate_n > 0 { gate_up as f64 / gate_n as f64 * 100.0 } else { 0.0 }, if gate_n > 0 { gate_down as f64 / gate_n as f64 * 100.0 } else { 0.0 },
                 net.slow_input_weights().1.0, if dend_n > 0 { dend_acc / dend_n as f64 } else { 0.0 });
             gate_up = 0; gate_down = 0; gate_n = 0; dend_acc = 0.0; dend_n = 0;
+            println!("{:>9} 몸 | 구간에 끝난 보상 {}번: 보상 직전 결핍 평균 {:.3}, 내려간 양 평균 {:.3} | 지금 결핍: 배고픔 {:.3}, 목마름 {:.3} | 감응도: {}",
+                "", need_drop_n, if need_drop_n > 0 { need_pre_acc / need_drop_n as f64 } else { f64::NAN }, if need_drop_n > 0 { need_drop_acc / need_drop_n as f64 } else { f64::NAN },
+                net.need_level(0), net.need_level(1), net.aux_excitability().iter().map(|(k, v)| format!("{} {:.3}", k, v)).collect::<Vec<_>>().join(", "));
+            need_pre_acc = 0.0; need_drop_acc = 0.0; need_drop_n = 0;
             last_da = net.da_spikes; last_pred = net.pred_spikes;
             let obs = net.hidden_observe();
             for k in 0..5 {
