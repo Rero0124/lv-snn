@@ -139,8 +139,10 @@ fn main() {
     //   예측 경로(--predict)를 쓰면 기본으로 켜진다. --no-warmup-quiet 로 끈다 (옛 동작: 자발 발화가 켜진 채로 기준선을 잡음)
     if args.iter().any(|a| a == "--warmup-quiet") { params.warmup_quiet = true; }
     if args.iter().any(|a| a == "--no-warmup-quiet") { params.no_warmup_quiet = true; }
-    // --no-homeo-need: 1만 틱마다의 항상성에서 맛·필요·중계·포만 뉴런을 뺀다 / --no-homeo-da: 도파민·가치·예측·보상 입력 뉴런을 뺀다
+    // 1만 틱마다의 항상성에서 맛·필요·중계·포만 뉴런은 기본으로 뺀다. --homeo-need: 옛 동작(이 뉴런들에도 항상성을 건다). --no-homeo-need 는 기본과 같다(남겨 둠)
+    // --no-homeo-da: 도파민·가치·예측·보상 입력 뉴런을 뺀다
     if args.iter().any(|a| a == "--no-homeo-need") { params.no_homeo_need = true; }
+    if args.iter().any(|a| a == "--homeo-need") { params.no_homeo_need = false; }
     if args.iter().any(|a| a == "--no-homeo-da") { params.no_homeo_da = true; }
     if params.predict && !params.no_warmup_quiet { params.warmup_quiet = true; }
     // --rng-seed N: 결정적 난수. 실행 중의 난수(잡음, 자발 발화, 확률 전달, 성장, 시험이 자극을 고르는 난수)를 씨앗에서 정한다.
