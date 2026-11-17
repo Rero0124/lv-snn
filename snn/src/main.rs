@@ -782,6 +782,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     println!("  (추가 줄의 뜻) 접점 = 은닉 뉴런이 내보내는 접점을 쌍이 생긴 때로 나눈 것. 처음 쌍(born = 0)에 나중에 더해진 접점은 처음 쪽에 들어간다(그 누계를 따로 찍는다). 자란 쌍은 모두 은닉→은닉");
     println!("  (추가 줄의 뜻) 받기 = 구간에 생긴 접점 수와 받기 문에 걸려 버린 시도 수를 받는 뉴런의 종류별로. 소멸의 나이 = 사라진 틱 − 그 접점이 속한 쌍이 생긴 틱 (처음부터 있던 쌍은 0틱에 생긴 것으로 센다)");
     println!("  (추가 줄의 뜻) 입력 = 은닉 뉴런마다 다른 은닉 뉴런에서 들어오는 접점 수(지연 시냅스 제외). 느린÷목표 = rate_avg ÷ (K × 자기 자발 발화 확률). 문이 닫힌 비율은 보고 시점의 값");
+    println!("  (추가 줄의 뜻) 표의 '상대 수' = 서로 다른 상대의 수가 아니라 시냅스 칸의 수 (같은 상대로 가는 칸이 둘 이상일 수 있다: 초기 배선의 중복). '쌍 수'도 칸의 수다. 중복 시냅스 = 같은 (보내는 뉴런, 받는 뉴런)의 두 번째 이상인 칸");
     let (mut last_made, mut last_drop, mut last_short) = (net.grow_made, net.gate_drop, net.pruned_short);
     const AREAS: [&str; 6] = ["감정 주", "감정 지도", "이성 주", "이성 지도", "기억", "해마"];
     for t in 1..=ticks {
@@ -848,8 +849,9 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
             let dv = net.dev_observe();
             let hn = hidden_n as f64;
             let med = |v: &mut Vec<f64>, p: f64| -> f64 { if v.is_empty() { return f64::NAN; } v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[((v.len() as f64 * p) as usize).min(v.len() - 1)] };
-            println!("{:>9} 접점 | 처음 쌍의 접점 {:.1}/뉴런 (그중 은닉→은닉 {:.1}), 자란 쌍의 접점 {:.1}/뉴런 | 쌍 수/뉴런: 처음 {:.1}, 자란 {:.1} | 처음 쌍에 더해진 접점 누계 {}",
-                "", dv.init_contacts as f64 / hn, dv.init_hh as f64 / hn, dv.grown_contacts as f64 / hn, dv.init_pairs as f64 / hn, dv.grown_pairs as f64 / hn, net.added_on_initial);
+            println!("{:>9} 접점 | 처음 쌍의 접점 {:.1}/뉴런 (그중 은닉→은닉 {:.1}), 자란 쌍의 접점 {:.1}/뉴런 | 쌍 수/뉴런: 처음 {:.1}, 자란 {:.1} | 처음 쌍에 더해진 접점 누계 {} | 같은 쌍의 중복 시냅스 {} (은닉→은닉 시냅스 칸 {}의 {:.1}%)",
+                "", dv.init_contacts as f64 / hn, dv.init_hh as f64 / hn, dv.grown_contacts as f64 / hn, dv.init_pairs as f64 / hn, dv.grown_pairs as f64 / hn, net.added_on_initial,
+                dv.dup_syn, dv.hh_syn, if dv.hh_syn > 0 { dv.dup_syn as f64 / dv.hh_syn as f64 * 100.0 } else { 0.0 });
             let by_kind = |now: &[u64; 5], last: &[u64; 5]| -> String { (0..5).filter(|&k| kind_n[k] > 0).map(|k| format!("{} {}", KINDS[k], now[k] - last[k])).collect::<Vec<_>>().join(", ") };
             let drop_sum: u64 = (0..5).map(|k| net.gate_drop[k] - last_drop[k]).sum();
             println!("{:>9} 받기 | 구간에 생긴 접점 (받는 쪽): {} | 받기 문에 걸려 버린 시도: {} (합 {})",

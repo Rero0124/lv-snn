@@ -167,6 +167,9 @@ pub struct DevObs {
     /// 쌍(연결) 수: 처음부터 있던 것, 자란 것
     pub init_pairs: usize,
     pub grown_pairs: usize,
+    /// 은닉→은닉 시냅스(지연 시냅스 제외) 가운데, 같은 (보내는 뉴런, 받는 뉴런) 쌍의 두 번째 이상인 것의 수와 그 시냅스 칸의 전체 수
+    pub dup_syn: usize,
+    pub hh_syn: usize,
     /// 은닉 뉴런마다: (종류 0 추체·1 Pv·2 Sst·3 Vip·4 그 밖, 영역 0~5, 빠른 발화율, 느린 발화율, 목표(틱당. 목표가 없으면 0),
     ///   은닉 흥분성 뉴런에서 들어오는 접점 수, 은닉 억제성 뉴런에서 들어오는 접점 수)
     pub per: Vec<(usize, usize, f64, f64, f64, usize, usize)>,
@@ -582,9 +585,15 @@ impl Network {
     /// 발달 시험의 관찰값
     pub fn dev_observe(&self) -> DevObs {
         let hidden_end = self.hippocampus_range.1;
-        let mut o = DevObs { init_contacts: 0, init_hh: 0, grown_contacts: 0, init_pairs: 0, grown_pairs: 0, per: Vec::with_capacity(hidden_end) };
+        let mut o = DevObs { init_contacts: 0, init_hh: 0, grown_contacts: 0, init_pairs: 0, grown_pairs: 0, dup_syn: 0, hh_syn: 0, per: Vec::with_capacity(hidden_end) };
         let mut inc = vec![(0usize, 0usize); hidden_end];
+        let mut seen: Vec<NeuronId> = Vec::new();
         for n in &self.neurons[..hidden_end] {
+            seen.clear();
+            seen.extend(n.synapses.iter().filter(|s| s.slow_rate == 0.0 && (s.target as usize) < hidden_end).map(|s| s.target));
+            seen.sort_unstable();
+            o.hh_syn += seen.len();
+            o.dup_syn += seen.windows(2).filter(|w| w[0] == w[1]).count();
             for s in &n.synapses {
                 let c = s.count as usize;
                 let hh = s.slow_rate == 0.0 && (s.target as usize) < hidden_end;
@@ -1925,14 +1934,16 @@ impl Network {
             }
             // (2) 자기에게 들어오는 쪽: 보내는 뉴런이 조용해서 스스로 정리하지 못한 시냅스를, 받는 뉴런이 활동할 때 확인한다.
             //     (시냅스는 양쪽에 걸쳐 있으므로 어느 쪽이든 활동하는 쪽이 본다)
-            let sources: Vec<usize> = self.neurons[post].incoming.iter().map(|e| e.0).filter(|&p| p < hidden_end).collect();
+            //     받는 목록의 (보내는 뉴런, 번호)로 그 시냅스를 바로 읽는다. 같은 쌍에 시냅스가 여럿이면(초기 배선의 중복) 각각 한 번씩 점검받는다.
+            //     목록을 복사해 돈다: 도중에 칸을 지우면 번호가 옮겨지므로, 읽은 시냅스가 자기를 향하는지 확인하고 아니면 건너뛴다(다음 회차에 본다)
+            let sources: Vec<(usize, usize)> = self.neurons[post].incoming.iter().cloned().filter(|e| e.0 < hidden_end).collect();
             // 활동 의존 소멸: 받는 뉴런(지금 발화한 이 뉴런)의 느린 발화율이 자기 목표보다 높으면 들어오는 접점의 수명이 (목표 ÷ 느린 발화율)^E 배가 된다
             let shrink = if self.params.prune_act > 0.0 {
                 let (goal, slow) = (self.act_target_of(post), self.neurons[post].rate_avg);
                 if goal > 0.0 && slow > goal { (goal / slow).powf(self.params.prune_act) } else { 1.0 }
             } else { 1.0 };
-            for pre in sources {
-                let Some(k) = self.neurons[pre].synapses.iter().position(|s| s.target as usize == post && s.slow_rate == 0.0) else { continue };
+            for (pre, k) in sources {
+                match self.neurons[pre].synapses.get(k) { Some(s) if s.target as usize == post && s.slow_rate == 0.0 => {}, _ => continue }
                 let (last, w, count, born) = { let s = &self.neurons[pre].synapses[k]; (s.last_co.max(s.born), s.weight, s.count, s.born) };
                 // 경쟁: 받는 뉴런(지금 발화한 이 뉴런)의 감응도가 낮을수록 수명이 짧다
                 let share = if self.params.compete > 0.0 { self.neurons[post].excitability.min(1.0).powf(self.params.compete) } else { 1.0 };
