@@ -152,6 +152,12 @@ pub struct NetParams {
     /// 활동 의존 소멸의 지수 E (0 = 없음): 받는 뉴런의 느린 발화율이 목표보다 높으면, 받는 쪽 점검에서 그 뉴런으로 들어오는 접점의
     ///   수명에 (목표 ÷ 느린 발화율)^E 를 곱한다 (최소 수명 2만 틱을 적용한 뒤에 곱한다). 목표 이하면 기존 그대로
     pub prune_act: f64,
+    /// 지연 시냅스를 "발화했을 때만 알리기"로 계산한다: 예측 뉴런마다 입력의 합(Σ 가중치 × 흔적)을 들고 매 틱 그 합만 진행시키고,
+    ///   학습은 조절 편차가 문턱을 넘은 받는 뉴런의 "흔적이 살아 있는 입력"만 본다. 규칙은 같고, 더하는 순서와
+    ///   아주 작은 흔적(1e-4 이하)을 버리던 것만 다르다. false(기존): 매 틱 지연 시냅스 전체를 두 번 훑는다
+    pub slow_events: bool,
+    /// slow_events 의 확인: 옛 방식(전체 훑기)의 값도 함께 계산해서 예측 뉴런이 받은 양과 학습된 가중치의 차이를 1000틱마다 찍는다
+    pub slow_check: bool,
 }
 
 /// 받기 문이 보는 발화율
@@ -177,7 +183,7 @@ pub struct DevObs {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0 }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false }
     }
 }
 
@@ -185,7 +191,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0 }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false }
     }
 }
 
@@ -294,6 +300,19 @@ pub struct Network {
     /// 사라진 접점이 속한 쌍의 나이(사라진 틱 − 쌍이 생긴 틱) 목록. 읽는 쪽(dev_test)이 비운다. 나이를 가릴 수 없던 수는 prune_age_unknown (관찰용)
     pub prune_ages: Vec<u64>,
     pub prune_age_unknown: u64,
+    /// slow_events: 지연 시냅스를 받는 뉴런들(가치, 예측 순), 뉴런 번호 → 그 목록에서의 자리(없으면 u32::MAX),
+    /// 받는 뉴런마다 [Σ 가중치 × slow1, Σ 가중치 × slow2, 지연 비율](가치 뉴런은 전달을 바로 하므로 쓰지 않는다: 지연 비율 0),
+    /// 받는 뉴런마다 흔적이 살아 있는 입력 (보내는 뉴런, 시냅스 번호), 목록에 올라 있는 시냅스의 열쇠
+    slow_recv: Vec<usize>,
+    slow_pos: Vec<u32>,
+    slow_sum: Vec<[f64; 3]>,
+    slow_live: Vec<Vec<(u32, u32)>>,
+    slow_listed: std::collections::HashSet<u64>,
+    /// slow_check: 옛 규칙으로 따로 굴린 지연 시냅스 가중치(slow_syn 과 같은 순서), 구간의 최대 차이들 (받은 양, 다시 맞출 때 합의 어긋남)
+    slow_shadow: Vec<f64>,
+    slow_init: Vec<f64>,
+    slow_chk_recv: f64,
+    slow_chk_drift: f64,
 }
 
 // ── 도파민 구성 ──
@@ -470,6 +489,15 @@ impl Network {
             pruned_short: 0,
             prune_ages: Vec::new(),
             prune_age_unknown: 0,
+            slow_recv: Vec::new(),
+            slow_pos: Vec::new(),
+            slow_sum: Vec::new(),
+            slow_live: Vec::new(),
+            slow_listed: std::collections::HashSet::new(),
+            slow_shadow: Vec::new(),
+            slow_init: Vec::new(),
+            slow_chk_recv: 0.0,
+            slow_chk_drift: 0.0,
         };
 
         // 세포 종류 지정: 억제성 뉴런을 순서대로 Pv 9 : Sst 8 : Vip 3 (45% / 40% / 15%) 으로 나눈다
@@ -505,6 +533,7 @@ impl Network {
         net.wiring_sum = net.wiring_checksum();
         net.rebuild_incoming();
         net.rebuild_slow_index();
+        if net.params.slow_events { net.slow_resync(); net.slow_chk_drift = 0.0; }
         let spont = net.params.spont;
         if net.params.validated { net.apply_validated(); }
         if net.params.dopamine {
@@ -830,6 +859,33 @@ impl Network {
 
     /// 지연 시냅스의 전류 전달: 매 틱 (가중치 × 지연 흔적)을 받는 뉴런에 더한다
     fn deliver_slow_inhibition(&mut self) {
+        if self.params.slow_events {
+            // 받는 쪽 합을 한 틱 진행: A2 ← a·A2 + r·A1, A1 ← a·A1 (시냅스별 점화식의 합과 같다), 그리고 A2 를 전달한다
+            for v in self.slow_sum.iter_mut() {
+                let r = v[2];
+                if r == 0.0 { continue; }
+                v[1] = (1.0 - r) * v[1] + r * v[0];
+                v[0] *= 1.0 - r;
+            }
+            if self.params.slow_check {
+                // 옛 방식의 값: 시냅스마다 지금 틱까지 따라잡은 흔적(사본으로 계산해 실제 상태는 건드리지 않는다)으로 가중치 × slow2 를 더한다 (slow2 > 1e-4 인 것만)
+                let now = self.global_tick;
+                let mut old = vec![0.0f64; self.slow_sum.len()];
+                for &(pre, j) in &self.slow_syn {
+                    let Some(s) = self.neurons[pre].synapses.get(j) else { continue };
+                    if s.slow_fast { continue; }
+                    let mut c = s.clone();
+                    c.sync(now);
+                    if c.slow2 > 1e-4 { if let Some(&p) = self.slow_pos.get(c.target as usize) { if p != u32::MAX { old[p as usize] += c.weight * c.slow2; } } }
+                }
+                for (p, v) in self.slow_sum.iter().enumerate() { if v[2] > 0.0 { self.slow_chk_recv = self.slow_chk_recv.max((v[1] - old[p]).abs()); } }
+            }
+            for p in 0..self.slow_sum.len() {
+                let v = self.slow_sum[p];
+                if v[2] > 0.0 && v[1] != 0.0 { let t = self.slow_recv[p]; self.neurons[t].receive(v[1]); }
+            }
+            return;
+        }
         for k in 0..self.slow_syn.len() {
             let (pre, j) = self.slow_syn[k];
             let now = self.global_tick;
@@ -841,6 +897,90 @@ impl Network {
         }
     }
     /// 지연 시냅스의 위치 목록을 다시 만든다 (전달할 때 전체 시냅스를 훑지 않기 위한 색인)
+    /// slow_events: 모든 지연 시냅스를 지금 틱까지 따라잡고 받는 쪽 합을 처음부터 다시 계산한다 (만든 직후, 불러온 직후, 1만 틱마다. 부동소수 오차가 쌓이지 않게).
+    /// 흔적이 남아 있는데 목록에 없는 시냅스는 목록에 올린다
+    fn slow_resync(&mut self) {
+        let now = self.global_tick;
+        if self.slow_pos.len() != self.neurons.len() {
+            self.slow_recv = self.val_idx.iter().chain(self.pred_idx.iter()).cloned().collect();
+            self.slow_pos = vec![u32::MAX; self.neurons.len()];
+            for (p, &t) in self.slow_recv.iter().enumerate() { self.slow_pos[t] = p as u32; }
+            self.slow_sum = vec![[0.0; 3]; self.slow_recv.len()];
+            self.slow_live = vec![Vec::new(); self.slow_recv.len()];
+            self.slow_listed.clear();
+            if self.params.slow_check {
+                self.slow_shadow = self.slow_syn.iter().map(|&(pre, j)| self.neurons[pre].synapses.get(j).map_or(0.0, |s| s.weight)).collect();
+                self.slow_init = self.slow_shadow.clone();
+            }
+        }
+        let mut fresh = vec![[0.0f64; 2]; self.slow_recv.len()];
+        for k in 0..self.slow_syn.len() {
+            let (pre, j) = self.slow_syn[k];
+            let Some(s) = self.neurons[pre].synapses.get_mut(j) else { continue };
+            s.sync(now);
+            let p = match self.slow_pos.get(s.target as usize) { Some(&p) if p != u32::MAX => p as usize, _ => continue };
+            if !s.slow_fast {
+                fresh[p][0] += s.weight * s.slow1;
+                fresh[p][1] += s.weight * s.slow2;
+                self.slow_sum[p][2] = s.slow_rate;
+            }
+            if (s.slow1 >= 0.001 || s.slow2 >= 0.001) && self.slow_listed.insert(((pre as u64) << 32) | j as u64) {
+                self.slow_live[p].push((pre as u32, j as u32));
+            }
+        }
+        for p in 0..fresh.len() {
+            self.slow_chk_drift = self.slow_chk_drift.max((self.slow_sum[p][1] - fresh[p][1]).abs());
+            self.slow_sum[p][0] = fresh[p][0];
+            self.slow_sum[p][1] = fresh[p][1];
+        }
+    }
+
+    /// slow_events: 보내는 뉴런이 발화했을 때 그 뉴런의 지연 시냅스(번호 k)를 받는 쪽에 알린다.
+    /// 예측 뉴런의 입력이면 가중치를 합(Σ 가중치 × slow1)에 더하고(시냅스의 slow1 += 1 은 try_fire 가 이미 했다), 받는 뉴런의 살아 있는 입력 목록에 올린다
+    fn slow_on_spike(&mut self, pre: usize, k: usize) {
+        let (t, w, fast) = match self.neurons[pre].synapses.get(k) { Some(s) if s.slow_rate > 0.0 => (s.target as usize, s.weight, s.slow_fast), _ => return };
+        let p = match self.slow_pos.get(t) { Some(&p) if p != u32::MAX => p as usize, _ => return };
+        if !fast { self.slow_sum[p][0] += w; }
+        if self.slow_listed.insert(((pre as u64) << 32) | k as u64) { self.slow_live[p].push((pre as u32, k as u32)); }
+    }
+
+    /// slow_check: 옛 규칙(predictor_step 과 같은 식, 지연 시냅스 전체)으로 따로 굴리는 가중치를 한 틱 진행한다. 실제 시냅스는 건드리지 않는다
+    fn slow_shadow_step(&mut self) {
+        let opt = &self.plasticity;
+        if !opt.mod_baseline || opt.pred_eta == 0.0 { return; }
+        let now = self.global_tick;
+        for (k, &(pre, j)) in self.slow_syn.iter().enumerate() {
+            let Some(s) = self.neurons[pre].synapses.get(j) else { continue };
+            let mut c = s.clone();
+            c.sync(now);
+            let tr = if c.slow_fast { (c.slow2 - c.slow1).max(0.0) } else { c.slow2 };
+            if tr <= 0.01 { continue; }
+            let r = match self.neurons.get(c.target as usize) { Some(n) if n.mod_base > 1e-6 => n.mod_level / n.mod_base - 1.0, _ => continue };
+            if c.slow_fast { if r < plasticity::VALUE_UP && r > -plasticity::VALUE_DOWN { continue; } } else if r.abs() < plasticity::PRED_DEADBAND { continue; }
+            let eta = if c.slow_fast && opt.val_eta > 0.0 { opt.val_eta } else { opt.pred_eta };
+            self.slow_shadow[k] = (self.slow_shadow[k] + eta * r * tr).clamp(0.0, 1.0);
+        }
+    }
+
+    /// slow_check: 1000틱마다 확인 줄을 찍는다
+    fn slow_check_report(&mut self) {
+        let (mut rel, mut abs) = (0.0f64, 0.0f64);
+        let (mut changed, mut change_max) = (0usize, 0.0f64);
+        for (k, &(pre, j)) in self.slow_syn.iter().enumerate() {
+            let Some(s) = self.neurons[pre].synapses.get(j) else { continue };
+            let c = (s.weight - self.slow_init[k]).abs();
+            if c > 0.0 { changed += 1; change_max = change_max.max(c); }
+            let d = (s.weight - self.slow_shadow[k]).abs();
+            abs = abs.max(d);
+            rel = rel.max(d / self.slow_shadow[k].abs().max(1e-12));
+        }
+        let listed: usize = self.slow_live.iter().map(|l| l.len()).sum();
+        println!("[slow-check] 틱 {} | 지난 1000틱에 예측 뉴런이 받은 양의 최대 차이 {:.3e} | 지연 시냅스 가중치의 최대 차이: 상대 {:.3e}, 절대 {:.3e} | 다시 맞출 때 합의 최대 어긋남 {:.3e} | 살아 있는 입력 {}개 / 지연 시냅스 {}개 | 처음 값에서 바뀐 가중치 {}개 (가장 큰 변화 {:.3e})",
+            self.global_tick, self.slow_chk_recv, rel, abs, self.slow_chk_drift, listed, self.slow_syn.len(), changed, change_max);
+        self.slow_chk_recv = 0.0;
+        self.slow_chk_drift = 0.0;
+    }
+
     fn rebuild_slow_index(&mut self) {
         self.slow_syn.clear();
         for (pre, n) in self.neurons.iter().enumerate() {
@@ -1395,9 +1535,11 @@ impl Network {
             .collect();
 
         let mut tick_spikes: Vec<NeuronId> = Vec::new();
+        let slow_events = self.params.slow_events;
         for (nid, deliveries) in &fired {
             tick_spikes.push(*nid);
             for (k, (target, weight)) in deliveries.iter().enumerate() {
+                if slow_events && *weight == 0.0 { self.slow_on_spike(*nid as usize, k); }
                 let tidx = *target as usize;
                 if tidx < self.neurons.len() {
                     let dend = self.neurons[*nid as usize].synapses.get(k).is_some_and(|s| s.on_dendrite);
@@ -1413,7 +1555,9 @@ impl Network {
 
         if global_tick % 10_000 == 0 {
             self.periodic_homeostasis();
+            if self.params.slow_events { self.slow_resync(); }
         }
+        if self.params.slow_check && global_tick % 1000 == 0 { self.slow_check_report(); }
 
         if !self.recent_spikes.is_empty() {
             let spikes: Vec<(NeuronId, u64)> = self.recent_spikes.drain(..).collect();
@@ -1482,6 +1626,7 @@ impl Network {
         // 자극에 대한 반응으로 세는 발화 수 (스스로 발화하는 도파민 뉴런과 보상/처벌 입력은 제외)
         let mut response_spikes = 0usize;
         let mut output_spikes_now = 0usize;
+        let slow_events = self.params.slow_events;
         for (nid, from_potential, deliveries) in &fired {
             let nid = *nid;
             let from_potential = *from_potential;
@@ -1508,6 +1653,7 @@ impl Network {
             for (k, (target, weight)) in deliveries.iter().enumerate() {
                 let target = *target;
                 let weight = *weight;
+                if slow_events { self.slow_on_spike(nid as usize, k); }
                 let tidx = target as usize;
                 if tidx >= self.neurons.len() { continue; }
 
@@ -1539,7 +1685,14 @@ impl Network {
 
         // STDP + iSTDP (plasticity.rs — 초파리 크레이트와 공유)
         plasticity::stdp_step(&mut self.neurons, &tick_spikes, global_tick, &self.plasticity);
-        plasticity::predictor_step(&mut self.neurons, &self.slow_syn, global_tick, &self.plasticity);
+        if self.params.slow_events {
+            if self.params.slow_check { self.slow_shadow_step(); }
+            let mut deltas: Vec<(usize, f64, f64)> = Vec::new();
+            plasticity::predictor_step_events(&mut self.neurons, &self.slow_recv, &mut self.slow_live, &mut self.slow_listed, global_tick, &self.plasticity, &mut deltas);
+            for (p, d1, d2) in deltas { self.slow_sum[p][0] += d1; self.slow_sum[p][1] += d2; }
+        } else {
+            plasticity::predictor_step(&mut self.neurons, &self.slow_syn, global_tick, &self.plasticity);
+        }
 
         for &nid in &tick_spikes {
             if !self.is_aux(nid as usize) { self.recent_spikes.push((nid, global_tick)); }
@@ -1610,7 +1763,9 @@ impl Network {
 
         if global_tick % 10_000 == 0 {
             self.periodic_homeostasis();
+            if self.params.slow_events { self.slow_resync(); }
         }
+        if self.params.slow_check && global_tick % 1000 == 0 { self.slow_check_report(); }
 
         if !self.recent_spikes.is_empty() {
             let spikes: Vec<(NeuronId, u64)> = self.recent_spikes.drain(..).collect();
@@ -1983,6 +2138,13 @@ impl Network {
             }
             if moved_slow {
                 if let Some(e) = self.slow_syn.iter_mut().find(|e| **e == (pre, last)) { *e = (pre, k); }
+                // slow_events: 받는 뉴런의 살아 있는 입력 목록도 새 번호로 고친다
+                if self.slow_listed.remove(&(((pre as u64) << 32) | last as u64)) {
+                    self.slow_listed.insert(((pre as u64) << 32) | k as u64);
+                    if let Some(&p) = self.slow_pos.get(moved_target) { if p != u32::MAX {
+                        if let Some(e) = self.slow_live[p as usize].iter_mut().find(|e| **e == (pre as u32, last as u32)) { *e = (pre as u32, k as u32); }
+                    } }
+                }
             }
         }
         self.neurons[pre].synapses.swap_remove(k);
@@ -2402,9 +2564,19 @@ impl Network {
             pruned_short: 0,
             prune_ages: Vec::new(),
             prune_age_unknown: 0,
+            slow_recv: Vec::new(),
+            slow_pos: Vec::new(),
+            slow_sum: Vec::new(),
+            slow_live: Vec::new(),
+            slow_listed: std::collections::HashSet::new(),
+            slow_shadow: Vec::new(),
+            slow_init: Vec::new(),
+            slow_chk_recv: 0.0,
+            slow_chk_drift: 0.0,
         };
         net.rebuild_incoming();
         net.rebuild_slow_index();
+        if net.params.slow_events { net.slow_resync(); net.slow_chk_drift = 0.0; }
         // 시냅스의 감쇠 기준 틱을 지금으로 맞춘다 (구버전 스냅샷은 값이 0이라 그대로 두면 한꺼번에 사라진다)
         for n in net.neurons.iter_mut() { for s in n.synapses.iter_mut() { if s.t == 0 { s.t = global_tick; } } }
         if net.params.validated { net.apply_validated(); }

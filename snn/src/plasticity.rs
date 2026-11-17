@@ -543,6 +543,42 @@ pub fn stdp_step(neurons: &mut [Neuron], tick_spikes: &[NeuronId], global_tick: 
 ///   → 보상이 온 시점에 켜져 있던 지연의 시냅스가 강해지고, 예측이 넘쳐 도파민이 내려간 시점의 시냅스는 약해진다.
 /// 여기에는 ±MOD_DEADBAND 를 두지 않는다: 도파민의 급증은 짧고 크고 정지는 길고 얕아서, 작은 변화를 버리면
 /// 정지 쪽만 버려져 예측이 한 방향으로만 자란다. 버리지 않으면 변화의 합은 도파민 발화 수가 평소보다 많았는지 적었는지에 비례한다
+/// predictor_step 과 같은 규칙을 "발화했을 때만 알리기" 방식으로: 지연 시냅스 전체를 훑지 않고, 받는 뉴런(예측·가치)마다
+/// 흔적이 살아 있는 입력의 목록만 본다. 조절 편차가 문턱을 넘지 않은 받는 뉴런은 건너뛴다.
+///   recv: 받는 뉴런들, live[p]: recv[p] 의 살아 있는 입력 (보내는 뉴런, 시냅스 번호), listed: 목록에 올라 있는 시냅스의 열쇠 (보내는 뉴런 << 32 | 번호)
+///   deltas: 예측 뉴런의 입력 가중치가 바뀐 만큼의 (p, Σ Δ가중치 × slow1, Σ Δ가중치 × slow2) — 부르는 쪽이 받는 쪽 합에 더한다
+///   따라잡은 뒤 두 흔적이 모두 0.001 아래인 시냅스는 목록에서 뺀다 (다시 발화하기 전에는 흔적이 0.01 을 넘을 수 없다)
+pub fn predictor_step_events(neurons: &mut [Neuron], recv: &[usize], live: &mut [Vec<(u32, u32)>], listed: &mut std::collections::HashSet<u64>,
+                             now: u64, opt: &PlasticityOptions, deltas: &mut Vec<(usize, f64, f64)>) {
+    if !opt.mod_baseline || opt.pred_eta == 0.0 { return; }
+    for (p, &t) in recv.iter().enumerate() {
+        if live[p].is_empty() { continue; }
+        let r = match neurons.get(t) { Some(n) if n.mod_base > 1e-6 => n.mod_level / n.mod_base - 1.0, _ => continue };
+        // 이 받는 뉴런의 입력은 모두 같은 종류다 (가치 뉴런의 입력은 slow_fast, 예측 뉴런의 입력은 아님): 첫 항목으로 문턱을 정한다
+        let fast = { let (pre, j) = live[p][0]; neurons[pre as usize].synapses.get(j as usize).is_some_and(|s| s.slow_fast) };
+        if fast { if r < VALUE_UP && r > -VALUE_DOWN { continue; } } else if r.abs() < PRED_DEADBAND { continue; }
+        let (mut d1, mut d2) = (0.0, 0.0);
+        let mut i = 0;
+        while i < live[p].len() {
+            let (pre, j) = live[p][i];
+            let Some(s) = neurons[pre as usize].synapses.get_mut(j as usize) else { i += 1; continue };
+            s.sync(now);
+            let tr = if s.slow_fast { (s.slow2 - s.slow1).max(0.0) } else { s.slow2 };
+            if tr > 0.01 {
+                let eta = if s.slow_fast && opt.val_eta > 0.0 { opt.val_eta } else { opt.pred_eta };
+                let before = s.weight;
+                s.weight = (s.weight + eta * r * tr).clamp(0.0, 1.0);
+                if !s.slow_fast { let dw = s.weight - before; d1 += dw * s.slow1; d2 += dw * s.slow2; }
+            }
+            if s.slow1 < 0.001 && s.slow2 < 0.001 {
+                listed.remove(&(((pre as u64) << 32) | j as u64));
+                live[p].swap_remove(i);
+            } else { i += 1; }
+        }
+        if d1 != 0.0 || d2 != 0.0 { deltas.push((p, d1, d2)); }
+    }
+}
+
 pub fn predictor_step(neurons: &mut [Neuron], slow: &[(usize, usize)], now: u64, opt: &PlasticityOptions) {
     if !opt.mod_baseline || opt.pred_eta == 0.0 { return; }
     for &(pre, j) in slow {

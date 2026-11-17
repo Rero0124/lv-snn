@@ -134,6 +134,12 @@ fn main() {
         };
     }
     if let Some(v) = num("--prune-act") { params.prune_act = v; }
+    // --slow-events: 지연 시냅스를 "발화했을 때만 알리기"로 계산 (규칙은 같다) / --slow-check: 옛 방식의 값도 함께 계산해 차이를 1000틱마다 찍는다
+    if args.iter().any(|a| a == "--slow-events") { params.slow_events = true; }
+    if args.iter().any(|a| a == "--slow-check") {
+        params.slow_check = true;
+        if !params.slow_events { println!("[경고] --slow-check 는 --slow-events 와 함께 써야 한다. --slow-events 를 켠다"); params.slow_events = true; }
+    }
     if params.act_target.is_some() && params.spont_fixed.is_none() {
         println!("[경고] --act-target 을 --spont-fixed 없이 주면 목표(K × 자발 발화 확률)가 1만 틱마다의 갱신에서 움직인다");
     }
