@@ -137,6 +137,8 @@ fn main() {
     // --slow-events: 지연 시냅스를 "발화했을 때만 알리기"로 계산 (규칙은 같다) / --slow-check: 옛 방식의 값도 함께 계산해 차이를 1000틱마다 찍는다
     // --warmup-quiet: 기준선을 잡는 준비 구간 동안만 은닉 뉴런의 자발 발화를 끈다
     if args.iter().any(|a| a == "--warmup-quiet") { params.warmup_quiet = true; }
+    // --wake-check: 깨어남 확인 (동작은 그대로. "변동 있는 뉴런만 판정"의 규칙이 놓치는 발화가 있는지 센다)
+    if args.iter().any(|a| a == "--wake-check") { params.wake_check = true; }
     if args.iter().any(|a| a == "--slow-events") { params.slow_events = true; }
     if args.iter().any(|a| a == "--slow-check") {
         params.slow_check = true;

@@ -161,6 +161,31 @@ pub struct NetParams {
     /// 기준선을 잡는 준비 구간(2,300틱) 동안만 은닉 뉴런의 자발 발화를 끈다. 준비 뒤에 다시 건다.
     ///   false(기존): 자발 발화(spont, spont_fixed)가 주어져 있으면 준비 구간도 자발 발화가 켜진 채로 돈다
     pub warmup_quiet: bool,
+    /// 깨어남 확인 (동작은 바꾸지 않는다): "입력을 받았거나, 불응기가 끝났거나, 바깥 자극을 받은 뉴런만 판정하면 된다"는 규칙이 맞는지를
+    ///   틱마다 세어 1000틱마다 찍는다. 깨어나지 않았는데 발화한 뉴런과 그 이유, 깨어나지 않았는데 전위가 달라진 뉴런을 센다
+    pub wake_check: bool,
+}
+
+/// wake_check 의 상태와 세는 값 (관찰용)
+#[derive(Default)]
+struct WakeCheck {
+    /// 뉴런별 표시: 1 = 깨어남(전위 변화를 받음 / 불응기 끝 / 바깥 자극), 2 = 조절 신호를 받음. now 는 이번 틱, next 는 다음 틱의 것
+    now: Vec<u8>,
+    next: Vec<u8>,
+    /// 지난 틱 발화 판정 직후의 전위, 이번 틱 시작 때의 전위, 감쇠 직후의 전위, 판정 직전의 (전위 + 수상돌기 기여), 넘어야 하는 문턱(상대 불응기면 2배, 절대 불응기면 무한대)
+    pot_end: Vec<f64>,
+    pot_begin: Vec<f64>,
+    pot_decay: Vec<f64>,
+    base: Vec<f64>,
+    bar: Vec<f64>,
+    refr: Vec<bool>,
+    started: bool,
+    /// 구간과 누계: [뉴런·틱 수, 깨어난 수(조절 포함), 깨어난 수(조절 제외), 발화 수, 놓친 발화(조절 포함 규칙), 놓친 발화(조절 제외 규칙),
+    ///  이유: 자발 발화, 잡음, 지속 입력(tonic)이 있는 뉴런, 그 밖, 그 밖 가운데 불응기 안, 놓친 전위 변화, 조절 신호만 받고(깨어나지 않고) 발화한 수,
+    ///  그 발화의 이유: 자발 발화, 잡음, 지속 입력, 그 밖, 그 밖 가운데 불응기 안]
+    /// 기준선을 잡는 준비 구간(2,300틱)은 idle_tick 으로 돌므로 여기에 들어오지 않는다
+    acc: [u64; 18],
+    total: [u64; 18],
 }
 
 /// 받기 문이 보는 발화율
@@ -186,7 +211,7 @@ pub struct DevObs {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, wake_check: false }
     }
 }
 
@@ -194,7 +219,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, wake_check: false }
     }
 }
 
@@ -316,6 +341,7 @@ pub struct Network {
     slow_init: Vec<f64>,
     slow_chk_recv: f64,
     slow_chk_drift: f64,
+    wake: Option<Box<WakeCheck>>,
 }
 
 // ── 도파민 구성 ──
@@ -501,6 +527,7 @@ impl Network {
             slow_init: Vec::new(),
             slow_chk_recv: 0.0,
             slow_chk_drift: 0.0,
+            wake: None,
         };
 
         // 세포 종류 지정: 억제성 뉴런을 순서대로 Pv 9 : Sst 8 : Vip 3 (45% / 40% / 15%) 으로 나눈다
@@ -579,6 +606,7 @@ impl Network {
             }
         }
 
+        if net.params.wake_check { net.wake = Some(Box::new(WakeCheck::default())); }
         let total_synapses: usize = net.neurons.iter().map(|n| n.synapses.len()).sum();
         eprintln!("  [초기화] 어휘 {}개, 뉴런 {}개 (감정 {}, 이성 {}, 기억 {}, 해마 {}, 입출력 {}), 시냅스 {}개",
             net.vocab.len(), net.neurons.len(),
@@ -985,6 +1013,83 @@ impl Network {
             let eta = if c.slow_fast && opt.val_eta > 0.0 { opt.val_eta } else { opt.pred_eta };
             self.slow_shadow[k] = (self.slow_shadow[k] + eta * r * tr).clamp(0.0, 1.0);
         }
+    }
+
+    /// wake_check 의 틱 안 단계들. 0: 틱 시작(표시 넘기기, 놓친 전위 변화 세기), 1: 바깥 자극을 넣은 뒤, 2: 감쇠 뒤, 3: 지연 전달 뒤(판정 직전)
+    fn wake_stage(&mut self, stage: u8) {
+        let Some(mut w) = self.wake.take() else { return };
+        let n = self.neurons.len();
+        match stage {
+            0 => {
+                if w.next.len() != n { w.next = vec![0; n]; w.pot_end = vec![0.0; n]; w.started = false; }
+                w.now = std::mem::replace(&mut w.next, vec![0; n]);
+                // 지난 틱의 발화 판정 뒤로 전위가 달라졌는데 전달을 받았다는 표시가 없으면 놓친 전위 변화다
+                if w.started { for i in 0..n { if self.neurons[i].potential != w.pot_end[i] && w.now[i] & 1 == 0 { w.acc[11] += 1; } } }
+                w.pot_begin = self.neurons.iter().map(|x| x.potential).collect();
+            }
+            1 => { for i in 0..n { if self.neurons[i].potential != w.pot_begin[i] { w.now[i] |= 1; } } }   // 이 틱에 바깥 자극을 받음
+            2 => { w.pot_decay = self.neurons.iter().map(|x| x.potential).collect(); }
+            _ => {
+                let now = self.global_tick;
+                w.base.clear(); w.bar.clear(); w.refr.clear();
+                for (i, x) in self.neurons.iter().enumerate() {
+                    if x.potential != w.pot_decay[i] { w.now[i] |= 1; }   // 지연 전달로 전위가 달라짐
+                    let adj = (x.self_threshold + x.adapt) * x.threshold_scale / x.excitability;
+                    let mut bar = adj;
+                    let mut refr = false;
+                    if !x.skip_refractory { if let Some(last) = x.last_spike_tick {
+                        // 불응기 길이: neuron.rs 의 try_fire 와 같은 식 (기본값: 흥분성 4 / 10, 억제성 2 / 4)
+                        let abs_ref = (if x.abs_refractory > 0 { x.abs_refractory } else if x.inhibitory { 2 } else { 4 }) * x.refractory_scale;
+                        let rel_ref = (if x.rel_refractory > 0 { x.rel_refractory } else if x.inhibitory { 4 } else { 10 }) * x.refractory_scale;
+                        let elapsed = now.saturating_sub(last);
+                        if elapsed == rel_ref.max(abs_ref) { w.now[i] |= 1; }   // 불응기(절대 + 상대)가 이 틱에 끝남
+                        if elapsed < abs_ref { bar = f64::INFINITY; refr = true; } else if elapsed < rel_ref { bar = adj * 2.0; refr = true; }
+                    } }
+                    w.base.push(x.potential + x.dendritic_drive());
+                    w.bar.push(bar);
+                    w.refr.push(refr);
+                }
+                w.acc[0] += n as u64;
+                w.acc[1] += w.now.iter().filter(|&&f| f != 0).count() as u64;
+                w.acc[2] += w.now.iter().filter(|&&f| f & 1 != 0).count() as u64;
+            }
+        }
+        self.wake = Some(w);
+    }
+
+    /// wake_check: 발화 판정 뒤. 깨어나지 않았는데 발화한 뉴런을 세고 이유를 가른다
+    ///   지속 입력이 있는 뉴런(tonic > 0: 도파민·필요 뉴런은 감쇠 단계에서 매 틱 전위가 스스로 오른다) / 그 밖(잡음 없이도 문턱을 넘었다: 깨우는 규칙이 놓친 것) / 잡음(잡음을 더하면 넘을 수 있었다. 자발 발화였을 수도 있다) / 자발 발화(잡음으로는 넘을 수 없었다)
+    fn wake_after_fire(&mut self, fired: &[NeuronId]) {
+        let Some(mut w) = self.wake.take() else { return };
+        w.acc[3] += fired.len() as u64;
+        for &id in fired {
+            let i = id as usize;
+            if w.now[i] == 0 { w.acc[4] += 1; }
+            if w.now[i] & 1 != 0 { continue; }
+            w.acc[5] += 1;
+            let x = &self.neurons[i];
+            let amp = self.noise_amp.get(i).copied().unwrap_or(self.noise_range);
+            // 이유: 0 자발 발화, 1 잡음, 2 지속 입력, 3 그 밖
+            let why = if x.tonic > 0.0 { 2 } else if w.base[i] >= w.bar[i] { 3 } else if w.base[i] + amp > w.bar[i] { 1 } else if x.spont_scale > 0.0 { 0 } else { 3 };
+            w.acc[6 + why] += 1;
+            if why == 3 && w.refr[i] { w.acc[10] += 1; }
+            // 조절 신호만 받은 뉴런이 발화함: 발화 판정은 조절 수준을 읽지 않으므로, 이 발화의 이유도 위와 같이 가른다
+            if w.now[i] == 2 { w.acc[12] += 1; w.acc[13 + why] += 1; if why == 3 && w.refr[i] { w.acc[17] += 1; } }
+        }
+        w.pot_end = self.neurons.iter().map(|x| x.potential).collect();
+        w.started = true;
+        self.wake = Some(w);
+    }
+
+    /// wake_check: 1000틱마다 구간 값과 누계를 찍는다
+    fn wake_report(&mut self) {
+        let Some(w) = self.wake.as_mut() else { return };
+        for k in 0..18 { w.total[k] += w.acc[k]; }
+        let line = |a: &[u64; 18]| format!("깨어난 비율: 조절 포함 {:.1}%, 조절 제외 {:.1}% | 발화 {} | 깨어나지 않았는데 발화: 조절 포함 규칙 {}, 조절 제외 규칙 {} (자발 발화 {}, 잡음 {}, 지속 입력(tonic)이 있는 뉴런 {}, 그 밖 {} — 그중 불응기 안 {}) | 조절 신호만 받고 발화 {} (자발 발화 {}, 잡음 {}, 지속 입력 {}, 그 밖 {} — 그중 불응기 안 {}) | 놓친 전위 변화 {}",
+            a[1] as f64 / a[0].max(1) as f64 * 100.0, a[2] as f64 / a[0].max(1) as f64 * 100.0, a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[12], a[13], a[14], a[15], a[16], a[17], a[11]);
+        println!("[wake-check] 틱 {} | 구간 | {}", self.global_tick, line(&w.acc));
+        println!("[wake-check] 틱 {} | 누계 | {}", self.global_tick, line(&w.total));
+        w.acc = [0; 18];
     }
 
     /// slow_check: 1000틱마다 확인 줄을 찍는다
@@ -1593,6 +1698,7 @@ impl Network {
     pub fn tick(&mut self) -> Vec<u64> {
         self.global_tick += 1;
         let global_tick = self.global_tick;
+        if self.wake.is_some() { self.wake_stage(0); }
 
         // 연속 모드의 입력: 남은 틱 동안 켜 둔다
         if !self.drives.is_empty() {
@@ -1625,10 +1731,13 @@ impl Network {
             }
         }
 
+        if self.wake.is_some() { self.wake_stage(1); }
         // 감쇠는 뉴런마다 독립이고 난수를 쓰지 않으므로 병렬로 돌려도 결과가 같다
         self.neurons.par_iter_mut().for_each(|n| n.decay());
+        if self.wake.is_some() { self.wake_stage(2); }
 
         self.deliver_slow_inhibition();
+        if self.wake.is_some() { self.wake_stage(3); }
 
         let threshold = self.threshold;
         let noise_range = self.noise_range;
@@ -1645,6 +1754,7 @@ impl Network {
             })
             .collect();
 
+        if self.wake.is_some() { let ids: Vec<NeuronId> = fired.iter().map(|f| f.0).collect(); self.wake_after_fire(&ids); }
         let mut tick_spikes: Vec<NeuronId> = Vec::new();
         let output_idx_snapshot = self.output_idx.clone();
 
@@ -1681,6 +1791,8 @@ impl Network {
                 if slow_events { self.slow_on_spike(nid as usize, k); }
                 let tidx = target as usize;
                 if tidx >= self.neurons.len() { continue; }
+                // wake_check: 0 이 아닌 전달을 받은 뉴런은 다음 틱에 깨어난다 (조절 신호는 따로 표시)
+                if weight != 0.0 { if let Some(w) = self.wake.as_mut() { w.next[tidx] |= if self.neurons[nid as usize].modulatory { 2 } else { 1 }; } }
 
                 let to_before = self.neurons[tidx].potential;
                 // 시냅스가 붙은 위치에 따라 세포체 또는 수상돌기로 전달
@@ -1791,6 +1903,7 @@ impl Network {
             if self.params.slow_events { self.slow_resync(); }
         }
         if self.params.slow_check && global_tick % 1000 == 0 { self.slow_check_report(); }
+        if self.wake.is_some() && global_tick % 1000 == 0 { self.wake_report(); }
 
         if !self.recent_spikes.is_empty() {
             let spikes: Vec<(NeuronId, u64)> = self.recent_spikes.drain(..).collect();
@@ -2598,6 +2711,7 @@ impl Network {
             slow_init: Vec::new(),
             slow_chk_recv: 0.0,
             slow_chk_drift: 0.0,
+            wake: None,
         };
         net.rebuild_incoming();
         net.rebuild_slow_index();
