@@ -139,6 +139,14 @@ fn main() {
     if args.iter().any(|a| a == "--warmup-quiet") { params.warmup_quiet = true; }
     // --load P: 저장된 망을 불러온다 (시험 분기들이 망을 새로 만드는 자리에서 그 파일을 읽는다. 설정은 저장된 것을 쓴다)
     if let Some(i) = args.iter().position(|a| a == "--load") { params.load_from = args.get(i + 1).cloned(); }
+    // --resave P2 (--load P 와 함께): 불러온 망을 한 틱도 돌리지 않고 P2 로 다시 저장하고 끝낸다 (저장·불러오기에서 빠지는 값이 없는지 두 파일을 견주는 확인용)
+    if let Some(i) = args.iter().position(|a| a == "--resave") {
+        let Some(out) = args.get(i + 1) else { eprintln!("[오류] --resave 뒤에 경로가 필요하다"); std::process::exit(2); };
+        if params.load_from.is_none() { eprintln!("[오류] --resave 는 --load 와 함께 쓴다"); std::process::exit(2); }
+        let net = Network::with_params(params.clone());
+        net.save(std::path::Path::new(out));
+        return;
+    }
     // --wake-check: 깨어남 확인 (동작은 그대로. "변동 있는 뉴런만 판정"의 규칙이 놓치는 발화가 있는지 센다)
     if args.iter().any(|a| a == "--wake-check") { params.wake_check = true; }
     if args.iter().any(|a| a == "--slow-events") { params.slow_events = true; }

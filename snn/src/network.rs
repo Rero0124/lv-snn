@@ -2699,7 +2699,8 @@ impl Network {
         // 구버전 스냅샷(global_tick 없음)은 가장 최근 발화 틱 이후로 맞춘다.
         let max_spike_tick = snap.neurons.iter()
             .filter_map(|n| n.last_spike_tick).max().unwrap_or(0);
-        let global_tick = snap.global_tick.max(max_spike_tick + 1);
+        // 저장 파일에 전역 틱이 있으면 그대로 쓴다 (마지막 틱에 발화한 뉴런이 있어도 틱을 밀지 않는다: 밀면 불러온 망의 시계가 한 틱 어긋난다)
+        let global_tick = if snap.global_tick > 0 { snap.global_tick } else { max_spike_tick + 1 };
         let last_sleep_tick = snap.last_sleep_tick.unwrap_or(global_tick).min(global_tick);
         let mut net = Network {
             neurons: snap.neurons,
