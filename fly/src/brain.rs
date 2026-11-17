@@ -229,6 +229,10 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
         .map(|t| t.lines().map(|l| l.to_string()).collect()).unwrap_or_default();
     let mut rest_active = vec![false; n];
     let mut first_counts: Vec<Option<Vec<u32>>> = vec![None; stims.len()];
+    // 창 평균 (관찰용): 보고 간격 사이의 모든 시행에서 모은 값. 자극별로 따로 모은다.
+    //   [시행 수, MN9, 활성 수, 총발화, 휴지발화, 정밀도, 재현율, 시행 1 의 활성 집합과의 겹침]
+    let mut win: Vec<[f64; 8]> = vec![[0.0; 8]; stims.len()];
+    let mut first_active: Vec<Option<Vec<bool>>> = vec![None; stims.len()];
     let t0 = std::time::Instant::now();
     let mut tick = 0u64;
     for trial in 1..=trials {
@@ -312,6 +316,20 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
             if total > 20_000_000 { break; }
         }
         let cycle = (trial - 1) / stims.len() + 1;
+        {
+            // 창 평균에 이번 시행을 더한다 (출력만을 위한 계산)
+            let act: Vec<bool> = (0..n).map(|i| !is_stim[i] && counts[i] >= 1).collect();
+            let n_act = act.iter().filter(|&&b| b).count();
+            let both = (0..n).filter(|&i| ref_active[i] && act[i]).count();
+            let first = first_active[cur].get_or_insert_with(|| act.clone());
+            let inter = (0..n).filter(|&i| first[i] && act[i]).count();
+            let uni = (0..n).filter(|&i| first[i] || act[i]).count();
+            let w = &mut win[cur];
+            w[0] += 1.0; w[1] += counts[mn9] as f64; w[2] += n_act as f64; w[3] += total as f64; w[4] += rest_total as f64;
+            w[5] += if n_act > 0 { both as f64 / n_act as f64 } else { 0.0 };
+            w[6] += both as f64 / n_ref as f64;
+            w[7] += if uni > 0 { inter as f64 / uni as f64 } else { 0.0 };
+        }
         if cycle == 1 || cycle % report == 0 {
             let our_active: Vec<bool> = (0..n).map(|i| !is_stim[i] && counts[i] >= 1).collect();
             let both = (0..n).filter(|&i| ref_active[i] && our_active[i]).count();
@@ -371,6 +389,14 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
                 let fy: Vec<f64> = uni.iter().map(|&i| counts[i] as f64).collect();
                 println!("        ↑ 자극 {} (주기 {cycle}) | 첫 반응 대비: 활성집합 겹침 {:.2}, 순위상관 {:.2}",
                     stim_names[cur], if uni.is_empty() { 0.0 } else { inter as f64 / uni.len() as f64 }, crate::spearman(&fx, &fy));
+            }
+            {
+                // 지난 보고 뒤의 모든 시행 평균 (윗줄들은 이번 한 시행의 값)
+                let w = win[cur];
+                let k = w[0].max(1.0);
+                println!("        창 평균 (최근 {:.0}회) | MN9 {:.2} | 활성 {:.1} | 총발화 {:.0} | 휴지발화 {:.1} | 정밀도 {:.3} | 재현율 {:.3} | 시행 1 의 활성집합과 겹침 {:.3}",
+                    w[0], w[1] / k, w[2] / k, w[3] / k, w[4] / k, w[5] / k, w[6] / k, w[7] / k);
+                win[cur] = [0.0; 8];
             }
         }
     }
