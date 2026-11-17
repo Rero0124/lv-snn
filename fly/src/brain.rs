@@ -761,6 +761,10 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
                         let act: Vec<usize> = ra.iter().copied().filter(|&i| !is_tonic[i]).collect();
                         let quiet: Vec<usize> = (0..n).filter(|&i| !rest_active[i]).collect();
                         println!("        구동·냄새 | 쉬는 구간에 발화한 뉴런(평소 발화 도파민 제외) {}개의 감응도 평균 {:.4}, 발화하지 않은 뉴런의 감응도 평균 {:.4}", act.len(), exm(&act), exm(&quiet));
+                        // 감응도가 1.2 를 넘는 뉴런: 번호, 분류, 감응도, 느린 발화율, 항상성 목표, 이번 시행의 발화 수 (관찰용)
+                        let high: Vec<usize> = (0..n).filter(|&i| neurons[i].excitability > 1.2).collect();
+                        println!("        구동·냄새 | 감응도 1.2 넘는 뉴런 {}개 (번호:분류:감응도:느린 발화율:항상성 목표:이번 시행 발화 수): {}", high.len(),
+                            high.iter().map(|&i| format!("{i}:{}:{:.3}:{:.6}:{:.6}:{}", if classes.is_empty() { "?" } else { classes[i].as_str() }, neurons[i].excitability, neurons[i].rate_avg, neurons[i].set_point, counts[i])).collect::<Vec<_>>().join(" "));
                         if act.len() > 200 && watch_own.is_empty() { watch_own = act.clone(); }
                         if act.len() > 200 { if let Some(pre) = &rest_dump {
                             std::fs::write(format!("{pre}.t{trial}.txt"), act.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("\n")).ok();
