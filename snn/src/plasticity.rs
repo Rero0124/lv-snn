@@ -185,7 +185,76 @@ pub struct EligibilityTrace {
 
 /// 한 틱의 STDP + iSTDP. tick_spikes = 이번 틱에 발화한 뉴런.
 /// 각 뉴런의 last_spike_tick 은 이번 틱 발화까지 반영된 상태여야 한다.
+/// 조절 신호 방식의 흔적 넘기기: 조절 수준이 기준선에서 벗어난 뉴런의 입력 시냅스에서, 남아 있는 흔적을 가중치 변화로 바꾼다.
+/// 발화와 무관하게 매 틱 돈다 (stdp_step 이 부른다)
+fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOptions) {
+    // 조절 신호 방식: 조절 수준이 남아 있는 뉴런의 입력 시냅스에서, 남아 있는 흔적을 가중치 변화로 바꾼다
+    if let Some(gain) = opt.mod_gate {
+        // level = 흔적을 넘기는 세기와 부호. 기준선 방식이면 (조절 수준 ÷ 자기 기준선 − 1), 아니면 조절 수준 그대로
+        let active: Vec<(usize, f64)> = neurons.iter().enumerate().filter_map(|(i, n)| {
+            if opt.mod_baseline {
+                if n.mod_base <= 1e-6 { return None; }
+                let r = n.mod_level / n.mod_base - 1.0;
+                if r.abs() < MOD_DEADBAND { None } else { Some((i, r)) }
+            } else if n.mod_level > 0.001 { Some((i, n.mod_level)) } else { None }
+        }).collect();
+        if !active.is_empty() && active.len() * 20 < neurons.len() {
+            // 조절 신호가 벗어난 뉴런이 적을 때(평소): 그 뉴런들이 자기에게 들어오는 시냅스 중 흔적이 있는 것만 본다
+            for &(post, l) in &active {
+                let mut list = std::mem::take(&mut neurons[post].elig_in);
+                list.retain(|&(pre, k)| {
+                    let Some(s) = neurons.get_mut(pre as usize).and_then(|n| n.synapses.get_mut(k as usize)) else { return false };
+                    if s.target as usize != post { return false; }
+                    if s.elig == 0.0 { s.lq = false; return false; }
+                    s.sync(global_tick);
+                    let moved = (gain * l.abs()).min(1.0) * s.elig;
+                    s.weight = (s.weight + moved * l.signum()).clamp(0.0, 1.0);
+                    s.elig -= moved;
+                    // 굳은 만큼은 더 이상 일시적인 부분이 아니다 (합쳐진 세기가 두 번 세어지지 않게)
+                    if s.short_decay > 0.0 { s.w_short -= moved; }
+                    // 도파민으로 강화 쪽이 굳었으면 이 시냅스는 쓰인 것이다: 가지치기 기한을 지금부터 다시 센다
+                    if l > 0.0 && moved > 0.01 * s.weight { s.last_co = global_tick; } // 가중치의 1% 이상 굳었을 때만
+                    if s.elig.abs() < 1e-3 * s.weight.max(1e-9) { s.elig = 0.0; s.lq = false; false } else { true }
+                });
+                neurons[post].elig_in = list;
+            }
+        } else if !active.is_empty() {
+            // 많을 때(보상·처벌이 온 동안): 보내는 뉴런 단위로 여러 스레드가 나눠 처리한다
+            use rayon::prelude::*;
+            let mut level = vec![0.0f64; neurons.len()];
+            for &(post, l) in &active { level[post] = l; }
+            neurons.par_iter_mut().for_each(|n| {
+                // 흔적이 남아 있는 시냅스의 목록만 본다 (시냅스 전체를 훑지 않는다)
+                if n.modulatory || n.elig_idx.is_empty() { return; }
+                let mut list = std::mem::take(&mut n.elig_idx);
+                list.retain(|&k| {
+                    let Some(s) = n.synapses.get_mut(k as usize) else { return false };
+                    if s.elig == 0.0 { s.lp = false; return false; }
+                    s.sync(global_tick);
+                    if let Some(&l) = level.get(s.target as usize) {
+                        if l != 0.0 {
+                            // 쌓여 있던 흔적을 가중치로 내보낸다. 내보낸 만큼 흔적은 비워지므로 변화 총량은 쌓인 흔적을 넘지 않는다
+                            let moved = (gain * l.abs()).min(1.0) * s.elig;
+                            s.weight = (s.weight + moved * l.signum()).clamp(0.0, 1.0);
+                            s.elig -= moved;
+                            if s.short_decay > 0.0 { s.w_short -= moved; }
+                            // 도파민으로 강화 쪽이 굳었으면 이 시냅스는 쓰인 것이다: 가지치기 기한을 지금부터 다시 센다
+                            if l > 0.0 && moved > 0.01 * s.weight { s.last_co = global_tick; } // 가중치의 1% 이상 굳었을 때만
+                        }
+                    }
+                    // 흔적이 가중치의 0.1% 아래로 줄면 없는 것으로 본다 (틱당 0.993배로 줄어서, 그냥 두면 수천 틱 동안 목록에 남는다)
+                    if s.elig.abs() < 1e-3 * s.weight.max(1e-9) { s.elig = 0.0; s.lp = false; false } else { true }
+                });
+                n.elig_idx = list;
+            });
+        }
+    }
+}
+
 pub fn stdp_step(neurons: &mut [Neuron], tick_spikes: &[NeuronId], global_tick: u64, opt: &PlasticityOptions) {
+    // 발화가 없는 틱: 아래의 STDP·iSTDP 는 모두 이번 틱에 발화한 뉴런을 도는 루프라 할 일이 없다.
+    // 뉴런 수 길이의 배열(BCM 배수, 마지막 발화 틱, 지역 배수 등)을 만들지 않고 흔적 넘기기만 하고 끝낸다
+    if tick_spikes.is_empty() { mod_transfer(neurons, global_tick, opt); return; }
     // STDP: 발화 타이밍 기반 강화/약화 (LTD = LTP × 1.2)
     const STDP_A_PLUS_BASE: f64 = 0.003;
     const STDP_A_MINUS_BASE: f64 = 0.0036; // LTD:LTP = 1.2:1
@@ -289,67 +358,8 @@ pub fn stdp_step(neurons: &mut [Neuron], tick_spikes: &[NeuronId], global_tick: 
         }
     }
     let gate_base: Option<f64> = opt.mod_gate.map(|_| opt.gate_base);
-    // 조절 신호 방식: 조절 수준이 남아 있는 뉴런의 입력 시냅스에서, 남아 있는 흔적을 가중치 변화로 바꾼다
-    if let Some(gain) = opt.mod_gate {
-        // level = 흔적을 넘기는 세기와 부호. 기준선 방식이면 (조절 수준 ÷ 자기 기준선 − 1), 아니면 조절 수준 그대로
-        let active: Vec<(usize, f64)> = neurons.iter().enumerate().filter_map(|(i, n)| {
-            if opt.mod_baseline {
-                if n.mod_base <= 1e-6 { return None; }
-                let r = n.mod_level / n.mod_base - 1.0;
-                if r.abs() < MOD_DEADBAND { None } else { Some((i, r)) }
-            } else if n.mod_level > 0.001 { Some((i, n.mod_level)) } else { None }
-        }).collect();
-        if !active.is_empty() && active.len() * 20 < neurons.len() {
-            // 조절 신호가 벗어난 뉴런이 적을 때(평소): 그 뉴런들이 자기에게 들어오는 시냅스 중 흔적이 있는 것만 본다
-            for &(post, l) in &active {
-                let mut list = std::mem::take(&mut neurons[post].elig_in);
-                list.retain(|&(pre, k)| {
-                    let Some(s) = neurons.get_mut(pre as usize).and_then(|n| n.synapses.get_mut(k as usize)) else { return false };
-                    if s.target as usize != post { return false; }
-                    if s.elig == 0.0 { s.lq = false; return false; }
-                    s.sync(global_tick);
-                    let moved = (gain * l.abs()).min(1.0) * s.elig;
-                    s.weight = (s.weight + moved * l.signum()).clamp(0.0, 1.0);
-                    s.elig -= moved;
-                    // 굳은 만큼은 더 이상 일시적인 부분이 아니다 (합쳐진 세기가 두 번 세어지지 않게)
-                    if s.short_decay > 0.0 { s.w_short -= moved; }
-                    // 도파민으로 강화 쪽이 굳었으면 이 시냅스는 쓰인 것이다: 가지치기 기한을 지금부터 다시 센다
-                    if l > 0.0 && moved > 0.01 * s.weight { s.last_co = global_tick; } // 가중치의 1% 이상 굳었을 때만
-                    if s.elig.abs() < 1e-3 * s.weight.max(1e-9) { s.elig = 0.0; s.lq = false; false } else { true }
-                });
-                neurons[post].elig_in = list;
-            }
-        } else if !active.is_empty() {
-            // 많을 때(보상·처벌이 온 동안): 보내는 뉴런 단위로 여러 스레드가 나눠 처리한다
-            use rayon::prelude::*;
-            let mut level = vec![0.0f64; neurons.len()];
-            for &(post, l) in &active { level[post] = l; }
-            neurons.par_iter_mut().for_each(|n| {
-                // 흔적이 남아 있는 시냅스의 목록만 본다 (시냅스 전체를 훑지 않는다)
-                if n.modulatory || n.elig_idx.is_empty() { return; }
-                let mut list = std::mem::take(&mut n.elig_idx);
-                list.retain(|&k| {
-                    let Some(s) = n.synapses.get_mut(k as usize) else { return false };
-                    if s.elig == 0.0 { s.lp = false; return false; }
-                    s.sync(global_tick);
-                    if let Some(&l) = level.get(s.target as usize) {
-                        if l != 0.0 {
-                            // 쌓여 있던 흔적을 가중치로 내보낸다. 내보낸 만큼 흔적은 비워지므로 변화 총량은 쌓인 흔적을 넘지 않는다
-                            let moved = (gain * l.abs()).min(1.0) * s.elig;
-                            s.weight = (s.weight + moved * l.signum()).clamp(0.0, 1.0);
-                            s.elig -= moved;
-                            if s.short_decay > 0.0 { s.w_short -= moved; }
-                            // 도파민으로 강화 쪽이 굳었으면 이 시냅스는 쓰인 것이다: 가지치기 기한을 지금부터 다시 센다
-                            if l > 0.0 && moved > 0.01 * s.weight { s.last_co = global_tick; } // 가중치의 1% 이상 굳었을 때만
-                        }
-                    }
-                    // 흔적이 가중치의 0.1% 아래로 줄면 없는 것으로 본다 (틱당 0.993배로 줄어서, 그냥 두면 수천 틱 동안 목록에 남는다)
-                    if s.elig.abs() < 1e-3 * s.weight.max(1e-9) { s.elig = 0.0; s.lp = false; false } else { true }
-                });
-                n.elig_idx = list;
-            });
-        }
-    }
+    // 조절 신호 방식의 흔적 넘기기 (발화와 무관하게 매 틱)
+    mod_transfer(neurons, global_tick, opt);
     let spike_ticks: Vec<Option<u64>> = neurons.iter()
         .map(|n| n.last_spike_tick).collect();
     // 지역 배수: 시냅스가 붙어 있는 post 뉴런이 자기 입력 시냅스에서 알 수 있는 값만 쓴다.
@@ -365,8 +375,6 @@ pub fn stdp_step(neurons: &mut [Neuron], tick_spikes: &[NeuronId], global_tick: 
     // LTP 가 (1 + gain × 조절 수준)배로 커지고 LTD 는 그만큼 줄어든다 (포유류 실험: 도파민이 LTD 를 LTP 쪽으로 바꿈)
     let mod_levels: Vec<f64> = if opt.mod_stdp_gain > 0.0 { neurons.iter().map(|n| n.mod_level).collect() } else { Vec::new() };
     let mod_ltp = |i: usize| -> f64 { match mod_levels.get(i) { Some(&m) => 1.0 + opt.mod_stdp_gain * m, None => 1.0 } };
-    let fire_counts: Vec<u32> = neurons.iter()
-        .map(|n| n.fire_count_window).collect();
     // 기준선 방식: 조절 뉴런이 내보내는 시냅스와 조절 뉴런으로 들어오는 시냅스는 학습하지 않는다.
     // 예측 뉴런의 입력 시냅스는 STDP 가 아니라 위의 지연 흔적 규칙으로만 학습한다
     let fixed: Vec<bool> = if opt.mod_baseline { neurons.iter().map(|n| n.modulatory || n.cell_type == crate::neuron::CellType::Predictor || n.cell_type == crate::neuron::CellType::Value).collect() } else { Vec::new() };
