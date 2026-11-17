@@ -58,6 +58,8 @@ pub(crate) fn arg<T: std::str::FromStr>(args: &[String], name: &str) -> Option<T
 pub(crate) fn flag(args: &[String], name: &str) -> bool { args.iter().any(|a| a == name) }
 
 fn main() {
+    // 실행 기록 첫 줄: 어느 코드로 빌드한 것인지 (snn/build.rs 가 빌드 시점에 넣음)
+    println!("[빌드] lv-snn-fly {}", env!("BUILD_ID"));
     let mut args: Vec<String> = std::env::args().collect();
     // --validated: 초파리 배선에서 반복 자극에도 반응이 유지되는 것으로 확인된 구성 (live 명령용).
     // 뒤에 붙는 값이라 같은 옵션을 앞에서 직접 주면 그 값이 우선한다.

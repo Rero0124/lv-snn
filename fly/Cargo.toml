@@ -2,6 +2,8 @@
 name = "lv-snn-fly"
 version = "0.1.0"
 edition = "2024"
+# 빌드 식별자는 snn 과 같은 스크립트로 넣는다
+build = "../snn/build.rs"
 
 [dependencies]
 rand = "0.10.0"

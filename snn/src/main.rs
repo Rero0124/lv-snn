@@ -15,6 +15,8 @@ use std::path::PathBuf;
 const DEFAULT_SAVE_PATH: &str = "data/snn.json";
 
 fn main() {
+    // 실행 기록 첫 줄: 어느 코드로 빌드한 것인지 (build.rs 가 빌드 시점에 넣음)
+    println!("[빌드] lv-snn {}", env!("BUILD_ID"));
     let args: Vec<String> = std::env::args().collect();
     let serve_mode = args.iter().any(|a| a == "--serve");
     let debug_mode = args.iter().any(|a| a == "--debug");
@@ -91,6 +93,27 @@ fn main() {
     if let Some(v) = num("--release") { params.release = Some(v); }
     // --needs: 1차 보상(먹이, 물)과 몸의 상태(배고픔, 목마름)
     if args.iter().any(|a| a == "--needs" || a == "--needs-test") { params.needs = true; params.dopamine = true; }
+    // 아래 옵션들은 시험 분기(--needs-test, --op-test 등)보다 먼저 읽는다. 시험 분기는 실행하고 바로 끝나므로, 그 뒤에서 읽으면 시험에 적용되지 않는다
+    // --end-on-output: 1대1 방식에서 출력 뉴런이 조용해지면 반응이 끝난 것으로 본다 (내부 활동은 계속돼도 됨)
+    if args.iter().any(|a| a == "--end-on-output") { params.end_on_output = true; }
+    // --spont X: 자발 발화 배수 (검증 구성에서는 기본 0)
+    if let Some(v) = num("--spont") { params.spont = Some(v); }
+    // --topo: 입력마다 정해진 자리 주변으로만 연결 / --local F: 영역 내부 연결 중 가까운 뉴런으로 가는 비율
+    if args.iter().any(|a| a == "--topo") { params.topo = true; }
+    if let Some(v) = num("--local") { params.local_frac = v; }
+    // --scale X: 은닉 영역 크기 배수 / --grow R --target N --prune-tau T: 발달 과정 (성장 + 가지치기) / --min-weight W: 가지치기 기준
+    if let Some(v) = num("--scale") { params.scale = v; }
+    if let Some(v) = num("--grow") { params.grow = Some(v); }
+    if let Some(v) = num("--target") { params.target_syn = v as usize; }
+    if let Some(v) = num("--prune-tau") { params.prune_tau = v; }
+    if let Some(v) = num("--grow-sigma") { params.grow_sigma = v; }
+    if let Some(v) = num("--new-weight") { params.new_weight = v; }
+    // --grow-da B: 성장 속도를 도파민에 맡긴다 (기본 성장 B + 조절 수준이 기준선보다 높은 정도)
+    if let Some(v) = num("--grow-da") { params.grow_da = Some(v); }
+    // --compete K: 접점끼리의 경쟁 (받는 뉴런의 감응도가 낮을수록 굳지 않은 접점의 수명이 짧아짐)
+    if let Some(v) = num("--compete") { params.compete = v; }
+    if let Some(v) = num("--new-spread") { params.new_spread = v; }
+    if let Some(v) = num("--min-weight") { params.min_weight = v; }
     // --needs-test: 결핍 정도에 따라 같은 감각 입력이 도파민을 일으키는 정도가 달라지는지
     if args.iter().any(|a| a == "--needs-test") {
         let mut net = Network::with_params(params.clone());
@@ -177,18 +200,11 @@ fn main() {
         order2_test(&params, n as usize);
         return;
     }
-    // --end-on-output: 1대1 방식에서 출력 뉴런이 조용해지면 반응이 끝난 것으로 본다 (내부 활동은 계속돼도 됨)
-    if args.iter().any(|a| a == "--end-on-output") { params.end_on_output = true; }
-    // --spont X: 자발 발화 배수 (검증 구성에서는 기본 0)
-    if let Some(v) = num("--spont") { params.spont = Some(v); }
     // --spont-test TICKS: 입력 없이 자발 발화만으로 돌렸을 때 활동이 번지는지 (배수별)
     if let Some(n) = num("--spont-test") {
         spont_test(&params, n as u64);
         return;
     }
-    // --topo: 입력마다 정해진 자리 주변으로만 연결 / --local F: 영역 내부 연결 중 가까운 뉴런으로 가는 비율
-    if args.iter().any(|a| a == "--topo") { params.topo = true; }
-    if let Some(v) = num("--local") { params.local_frac = v; }
     // --spread-test: 자극 한 번 뒤 틱별·영역별 발화 수 (활동이 어디서부터 번지는지)
     if args.iter().any(|a| a == "--spread-test") {
         params.dopamine = true;
@@ -207,19 +223,6 @@ fn main() {
         }
         return;
     }
-    // --scale X: 은닉 영역 크기 배수 / --grow R --target N --prune-tau T: 발달 과정 (성장 + 가지치기) / --min-weight W: 가지치기 기준
-    if let Some(v) = num("--scale") { params.scale = v; }
-    if let Some(v) = num("--grow") { params.grow = Some(v); }
-    if let Some(v) = num("--target") { params.target_syn = v as usize; }
-    if let Some(v) = num("--prune-tau") { params.prune_tau = v; }
-    if let Some(v) = num("--grow-sigma") { params.grow_sigma = v; }
-    if let Some(v) = num("--new-weight") { params.new_weight = v; }
-    // --grow-da B: 성장 속도를 도파민에 맡긴다 (기본 성장 B + 조절 수준이 기준선보다 높은 정도)
-    if let Some(v) = num("--grow-da") { params.grow_da = Some(v); }
-    // --compete K: 접점끼리의 경쟁 (받는 뉴런의 감응도가 낮을수록 굳지 않은 접점의 수명이 짧아짐)
-    if let Some(v) = num("--compete") { params.compete = v; }
-    if let Some(v) = num("--new-spread") { params.new_spread = v; }
-    if let Some(v) = num("--min-weight") { params.min_weight = v; }
     // --dev-test TICKS: 발달 과정 점검. 자발 발화와 가끔 들어오는 자극만으로 돌리며 시냅스 수의 변화를 본다
     if let Some(n) = num("--dev-test") {
         params.dopamine = true;
