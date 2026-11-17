@@ -135,6 +135,11 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
     // --mod-decay 값: 받는 뉴런의 조절 수준이 틱마다 줄어드는 배수 (기본은 뉴런의 기본값 0.98 = snn 본체와 같다). 1 에 가까울수록 조절 수준이 천천히 변한다.
     //     주의: 값을 주면 snn 본체 경로의 값과 달라진다
     let mod_decay: Option<f64> = arg(args, "--mod-decay");
+    // --dan-no-input: 도파민 뉴런으로 들어오는 배선의 연결을 모두 끊는다 (brain-da 의 같은 옵션을 옮긴 것). 도파민 뉴런은 평소 발화와 직접 구동으로만 발화한다.
+    //     배선 그대로면 도파민 뉴런이 자극 때 들어오는 입력으로 더 발화해서, 조절 수준이 자극 때 오르고 쉴 때 내려간다 (기준선은 둘을 섞은 평균으로 잡힌다).
+    //     실험자가 도파민 뉴런을 켜는 조건에 해당하고, snn 본체(도파민 뉴런이 보상 입력과 예측 뉴런에서만 받는다)와 같은 조건이 된다.
+    //     단순화: 버섯체 출력 뉴런 → 도파민의 되먹임과 감각 → 도파민의 길이 빠진다
+    let dan_no_input = flag(args, "--dan-no-input");
     let extras = drive_dan.is_some() || odor_frac.is_some();
     let mut opt = plasticity::PlasticityOptions {
         stdp_on_inhibitory: !flag(args, "--no-inh-stdp"),
@@ -244,6 +249,14 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
     // 자발 발화 배수 (기준 모델은 자발 발화가 없다)
     let spont: f64 = arg(args, "--spont-scale").unwrap_or(1.0);
     for nr in neurons.iter_mut() { nr.spont_scale = spont; }
+    if dan_no_input {
+        let text = std::fs::read_to_string("data/mb_neurons.tsv").expect("data/mb_neurons.tsv 없음");
+        let mut is_dan = vec![false; n];
+        for line in text.lines().skip(1) { let f: Vec<&str> = line.split('\t').collect(); if f[1] == "DAN" { is_dan[f[0].parse::<usize>().unwrap()] = true; } }
+        let mut cut = 0usize;
+        for nr in neurons.iter_mut() { let before = nr.synapses.len(); nr.synapses.retain(|s| !is_dan[s.target as usize]); cut += before - nr.synapses.len(); }
+        println!("[도파민 입력 끊음] 도파민 뉴런 {}개로 들어오는 연결 {cut}개를 끊었다 (--dan-no-input)", is_dan.iter().filter(|&&b| b).count());
+    }
     // 냄새 + 도파민 구동의 준비 (옵션을 줄 때만)
     let mut drive_idx: Vec<usize> = Vec::new();   // 시행마다 구동하는 도파민 뉴런
     let mut tonic_idx: Vec<usize> = Vec::new();   // 평소 발화를 주는 도파민 뉴런
