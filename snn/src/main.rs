@@ -303,7 +303,11 @@ fn main() {
             (None, None) => None,
             _ => { eprintln!("[오류] --save-every N 과 --save-path P 는 함께 줘야 한다"); std::process::exit(2); }
         };
-        dev_test(&params, n as u64, num("--report").map(|v| (v as u64).max(1)), args.iter().any(|a| a == "--dev-no-stim"), save);
+        // --state-hash-every N: N틱마다 망 상태의 합계 값을 찍는다 / --state-dump T P: 시험 틱 T 에 시냅스 상태를 P 에 글로 적는다
+        //   (같은 --rng-seed 의 두 실행이 어느 틱에서 처음 달라지는지, 그때 어느 시냅스의 무엇이 다른지 찾는 도구. 망의 동작은 바꾸지 않는다)
+        let state = (num("--state-hash-every").map(|v| (v as u64).max(1)),
+            args.iter().position(|a| a == "--state-dump").and_then(|i| Some((args.get(i + 1)?.parse::<u64>().ok()?, args.get(i + 2)?.clone()))));
+        dev_test(&params, n as u64, num("--report").map(|v| (v as u64).max(1)), args.iter().any(|a| a == "--dev-no-stim"), save, state);
         return;
     }
     // --persist-test N: 학습 전후로 자극이 끝난 뒤 활동이 얼마나 오래 남는지 (A 를 N번 반복 / A 에 N번 보상)
@@ -769,7 +773,7 @@ fn persist_test(params: &NetParams, trials: usize) {
 
 /// 발달 과정 점검: 뉴런당 시냅스 수가 적음 → 넘침 → 안정의 곡선을 그리는지.
 /// 몸의 상태(--needs)가 켜져 있으면 단순한 환경이 붙는다: 배고픔이 차면 "안녕" 뒤에 먹이, 목마름이 차면 "고마워" 뒤에 물
-fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: bool, save: Option<(u64, String)>) {
+fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: bool, save: Option<(u64, String)>, state: (Option<u64>, Option<(u64, String)>)) {
     use rand::prelude::*;
     use std::io::Write;
     let mut rng = test_rng(params, 2);
@@ -951,6 +955,8 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
             out_ticks = 0; out_hid = 0; out_exp = 0.0; out_peak = 0;
             last_t = t; last_sprouted = net.sprouted; last_pruned = net.pruned;
         }
+        if let Some(n) = state.0 { if t % n == 0 { let (h, w, e, c) = net.state_hash(); println!("[상태] 틱 {} | 합계 값 {:016x} | 가중치 합 {:.9e} | 흔적 절댓값 합 {:.9e} | 시냅스 {}", t, h, w, e, c); } }
+        if let Some((at, path)) = &state.1 { if t == *at { net.state_dump(std::path::Path::new(path)); println!("[상태] 틱 {} 의 시냅스 상태를 {} 에 적었다", t, path); } }
         if let Some((every, path)) = &save {
             if t % every == 0 {
                 net.dev_tick = t;

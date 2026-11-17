@@ -2402,6 +2402,42 @@ impl Network {
         if validated { self.refresh_local(); }
     }
 
+    /// 시냅스 하나를 지금 틱까지 따라잡은 사본 (실제 상태는 건드리지 않는다). 상태 비교용
+    fn synapse_view(&self, pre: usize, k: usize) -> crate::synapse::Synapse {
+        let mut c = self.neurons[pre].synapses[k].clone();
+        c.sync(self.global_tick);
+        c
+    }
+
+    /// 망 상태의 합계 값 (관찰용, 상태는 건드리지 않는다): 모든 시냅스를 지금 틱까지 따라잡은 사본의
+    /// (대상, 가중치, 흔적, 일시 성분, 접점 수, 가지치기 시계)를 차례로 섞은 값과, 가중치 합·흔적 절댓값 합·시냅스 수.
+    /// 같은 씨앗의 두 실행이 어느 틱에서 처음 달라지는지 찾는 데 쓴다
+    pub fn state_hash(&self) -> (u64, f64, f64, usize) {
+        let mut h: u64 = 0xcbf29ce484222325;
+        let (mut w, mut e, mut n) = (0.0f64, 0.0f64, 0usize);
+        for pre in 0..self.neurons.len() {
+            for k in 0..self.neurons[pre].synapses.len() {
+                let s = self.synapse_view(pre, k);
+                for v in [s.target as u64, s.weight.to_bits(), s.elig.to_bits(), s.w_short.to_bits(), s.count as u64, s.last_co] { h ^= v; h = h.wrapping_mul(0x100000001b3); }
+                w += s.weight; e += s.elig.abs(); n += 1;
+            }
+        }
+        (h, w, e, n)
+    }
+
+    /// 망 상태를 글로 적는다 (상태 비교용): 시냅스마다 "보내는 뉴런, 번호, 대상, 가중치, 흔적, 일시 성분, 접점 수, 가지치기 시계, 생긴 틱" 한 줄. 지금 틱까지 따라잡은 사본으로
+    pub fn state_dump(&self, path: &Path) {
+        use std::io::Write;
+        let mut f = std::io::BufWriter::new(std::fs::File::create(path).expect("상태 파일을 만들지 못했다"));
+        writeln!(f, "# 전역 틱 {}", self.global_tick).ok();
+        for pre in 0..self.neurons.len() {
+            for k in 0..self.neurons[pre].synapses.len() {
+                let s = self.synapse_view(pre, k);
+                writeln!(f, "{} {} {} {:e} {:e} {:e} {} {} {}", pre, k, s.target, s.weight, s.elig, s.w_short, s.count, s.last_co, s.born).ok();
+            }
+        }
+    }
+
     /// 보조 뉴런 무리별 평균 감응도 (관찰용): 맛, 필요, 중계, 포만, 도파민, 예측, 가치. 무리가 없으면 NaN
     pub fn aux_excitability(&self) -> [(&'static str, f64); 7] {
         let mean = |v: &[usize]| if v.is_empty() { f64::NAN } else { v.iter().map(|&i| self.neurons[i].excitability).sum::<f64>() / v.len() as f64 };
