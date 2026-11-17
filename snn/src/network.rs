@@ -160,8 +160,11 @@ pub struct NetParams {
     /// slow_events 의 확인: 옛 방식(전체 훑기)의 값도 함께 계산해서 예측 뉴런이 받은 양과 학습된 가중치의 차이를 1000틱마다 찍는다
     pub slow_check: bool,
     /// 기준선을 잡는 준비 구간(2,300틱) 동안만 은닉 뉴런의 자발 발화를 끈다. 준비 뒤에 다시 건다.
-    ///   false(기존): 자발 발화(spont, spont_fixed)가 주어져 있으면 준비 구간도 자발 발화가 켜진 채로 돈다
+    ///   예측 경로(predict)를 쓰는 망에서는 기본으로 켜진다 (no_warmup_quiet 로 끈다). 예측을 쓰지 않으면 주어졌을 때만.
+    ///   꺼져 있으면: 자발 발화(spont, spont_fixed)가 주어져 있을 때 준비 구간도 자발 발화가 켜진 채로 돈다
     pub warmup_quiet: bool,
+    /// 예측 경로를 쓰는 망에서도 준비 구간의 자발 발화를 끄지 않는다 (옛 동작)
+    pub no_warmup_quiet: bool,
     /// 깨어남 확인 (동작은 바꾸지 않는다): "입력을 받았거나, 불응기가 끝났거나, 바깥 자극을 받은 뉴런만 판정하면 된다"는 규칙이 맞는지를
     ///   틱마다 세어 1000틱마다 찍는다. 깨어나지 않았는데 발화한 뉴런과 그 이유, 깨어나지 않았는데 전위가 달라진 뉴런을 센다
     pub wake_check: bool,
@@ -220,7 +223,7 @@ pub struct DevObs {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, wake_check: false, load_from: None }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None }
     }
 }
 
@@ -228,7 +231,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, wake_check: false, load_from: None }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None }
     }
 }
 
@@ -592,6 +595,8 @@ impl Network {
             net.apply_dopamine_options();
             // 기준선을 잡는 준비 구간. warmup_quiet 일 때만 자발 발화 없이 돈다: 검증 구성에서 자발 발화(spont, spont_fixed)가 주어져 있으면
             // 위의 apply_validated 가 이미 자발 확률을 걸어 두었으므로, 옵션이 없으면 준비 구간도 자발 발화가 켜진 채로 돈다 (아래에서 준비 뒤에 한 번 더 건다)
+            // 예측 경로를 쓰는 망은 기본으로 자발 발화 없이 기준선을 잡는다 (자발 발화가 켜진 채로 잡으면 예측 뉴런이 배경 활동으로 도파민을 누른 상태가 "평소"가 된다)
+            if net.params.predict && !net.params.no_warmup_quiet { net.params.warmup_quiet = true; }
             if net.params.warmup_quiet {
                 let hidden_end = net.hippocampus_range.1;
                 for n in net.neurons[..hidden_end].iter_mut() { n.spont_scale = 0.0; }

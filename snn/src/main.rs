@@ -136,7 +136,10 @@ fn main() {
     if let Some(v) = num("--prune-act") { params.prune_act = v; }
     // --slow-events: 지연 시냅스를 "발화했을 때만 알리기"로 계산 (규칙은 같다) / --slow-check: 옛 방식의 값도 함께 계산해 차이를 1000틱마다 찍는다
     // --warmup-quiet: 기준선을 잡는 준비 구간 동안만 은닉 뉴런의 자발 발화를 끈다
+    //   예측 경로(--predict)를 쓰면 기본으로 켜진다. --no-warmup-quiet 로 끈다 (옛 동작: 자발 발화가 켜진 채로 기준선을 잡음)
     if args.iter().any(|a| a == "--warmup-quiet") { params.warmup_quiet = true; }
+    if args.iter().any(|a| a == "--no-warmup-quiet") { params.no_warmup_quiet = true; }
+    if params.predict && !params.no_warmup_quiet { params.warmup_quiet = true; }
     // --load P: 저장된 망을 불러온다 (시험 분기들이 망을 새로 만드는 자리에서 그 파일을 읽는다. 설정은 저장된 것을 쓴다)
     if let Some(i) = args.iter().position(|a| a == "--load") { params.load_from = args.get(i + 1).cloned(); }
     // --resave P2 (--load P 와 함께): 불러온 망을 한 틱도 돌리지 않고 P2 로 다시 저장하고 끝낸다 (저장·불러오기에서 빠지는 값이 없는지 두 파일을 견주는 확인용)
