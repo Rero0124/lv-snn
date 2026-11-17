@@ -267,6 +267,8 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
     let mut is_apl: Vec<bool> = Vec::new();
     // --rest-dump 앞머리: 쉬는 구간 발화가 뛴 보고 시행에서, 쉬는 구간에 발화한 뉴런의 번호를 "앞머리.t<시행>.txt" 로 남긴다 (관찰용)
     let rest_dump: Option<String> = arg(args, "--rest-dump");
+    // --stim-dump PREFIX: 시행 1 과 500회마다, 그 시행의 자극 구간에 발화한 뉴런(자극 뉴런 제외)의 번호를 PREFIX.s<시행>.txt 로 남긴다 (관찰용)
+    let stim_dump: Option<String> = arg(args, "--stim-dump");
     // --watch 파일: 그 파일에 적힌 번호의 뉴런 무리(예: 다른 실행에서 번진 뉴런)의 감응도·항상성 목표·느린 발화율 평균을 시행마다 찍는다 (관찰용).
     // 이 실행에서 처음 번진 보고 시행의 무리도 그때부터 함께 찍는다.
     let watch_given: Vec<usize> = arg::<String>(args, "--watch").map(|f| std::fs::read_to_string(&f).expect("--watch 파일 없음")
@@ -572,6 +574,9 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
         {
             // 창 평균에 이번 시행을 더한다 (출력만을 위한 계산)
             let act: Vec<bool> = (0..n).map(|i| !is_stim[i] && counts[i] >= 1).collect();
+            if let Some(pre) = &stim_dump { if trial == 1 || trial % 500 == 0 {
+                std::fs::write(format!("{pre}.s{trial}.txt"), (0..n).filter(|&i| act[i]).map(|i| format!("{i} {}", counts[i])).collect::<Vec<_>>().join("\n")).ok();
+            } }
             let n_act = act.iter().filter(|&&b| b).count();
             let both = (0..n).filter(|&i| ref_active[i] && act[i]).count();
             let first = first_active[cur].get_or_insert_with(|| act.clone());
