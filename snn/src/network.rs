@@ -365,6 +365,8 @@ pub struct Network {
     wake: Option<Box<WakeCheck>>,
     /// 발달 시험(dev_test)이 진행한 틱 수. 저장할 때 함께 적어, 불러온 뒤 그 틱부터 이어 간다
     pub dev_tick: u64,
+    /// 발달 시험이 들고 있는 자극 상태 (저장 직전에 시험이 넣고, 불러온 뒤 시험이 꺼내 쓴다). 옛 저장 파일에는 없다
+    pub dev_state: Option<DevState>,
 }
 
 // ── 도파민 구성 ──
@@ -562,6 +564,7 @@ impl Network {
             slow_chk_drift: 0.0,
             wake: None,
             dev_tick: 0,
+            dev_state: None,
         };
 
         // 세포 종류 지정: 억제성 뉴런을 순서대로 Pv 9 : Sst 8 : Vip 3 (45% / 40% / 15%) 으로 나눈다
@@ -2768,6 +2771,7 @@ impl Network {
                 sprouted: self.sprouted, pruned: self.pruned, da_spikes: self.da_spikes, pred_spikes: self.pred_spikes, val_spikes: self.val_spikes,
                 grow_made: self.grow_made, gate_drop: self.gate_drop, added_on_initial: self.added_on_initial, pruned_short: self.pruned_short,
                 wiring_sum: self.wiring_sum, dev_tick: self.dev_tick,
+                drives: self.drives.clone(), dev_state: self.dev_state.clone(),
             }),
         };
         let data = serde_json::to_vec(&snap).expect("직렬화 실패");
@@ -2858,6 +2862,7 @@ impl Network {
             slow_chk_drift: 0.0,
             wake: None,
             dev_tick: 0,
+            dev_state: None,
         };
         net.rebuild_incoming();
         net.rebuild_slow_index();
@@ -2872,6 +2877,7 @@ impl Network {
                 net.sprouted = x.sprouted; net.pruned = x.pruned; net.da_spikes = x.da_spikes; net.pred_spikes = x.pred_spikes; net.val_spikes = x.val_spikes;
                 net.grow_made = x.grow_made; net.gate_drop = x.gate_drop; net.added_on_initial = x.added_on_initial; net.pruned_short = x.pruned_short;
                 net.wiring_sum = x.wiring_sum; net.dev_tick = x.dev_tick;
+                net.drives = x.drives; net.dev_state = x.dev_state;
                 if net.params.validated { net.plasticity = Self::validated_plasticity(); }
                 if net.params.dopamine { net.apply_dopamine_options(); }
                 // 흔적이 남아 있는 시냅스의 목록(저장하지 않는다)을 다시 만든다
@@ -2962,7 +2968,7 @@ struct Snapshot {
 }
 
 /// 저장 파일의 덧붙임: 설정 전체, 보조 뉴런 목록과 경계, 새 접점 세기 기준, 뉴런별 잡음 크기, 누적 수.
-/// 저장하지 않는 것: 난수 상태, 진행 중인 자극(연속 입력, 1대1 자극), 이번 틱의 발화 목록
+/// 저장하지 않는 것: 난수 상태(망 안의 난수는 --rng-seed 면 틱으로 정해지고, 발달 시험의 자극 난수는 dev_state 로 되살린다), 1대1 자극, 이번 틱의 발화 목록
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 struct SnapExt {
@@ -2984,6 +2990,29 @@ struct SnapExt {
     pruned_short: u64,
     wiring_sum: u64,
     dev_tick: u64,
+    /// 진행 중인 연속 입력 (입력 뉴런들, 남은 틱). 자극이 켜진 틱에 저장해도 이어 돌릴 때 같은 입력이 남은 틱만큼 들어간다
+    drives: Vec<(Vec<usize>, u64)>,
+    dev_state: Option<DevState>,
+}
+
+/// 발달 시험(dev_test)이 틱 사이에 들고 다니는 자극 상태. 저장 파일에 넣어 두면 불러온 실행이 끊지 않은 실행과 같은 자극 차례를 받는다.
+/// 구간마다 0 으로 되돌리는 관찰용 누적값(자극 밖 틱 수 따위)은 넣지 않는다: 저장 틱이 보고 간격의 배수이면 그 값들은 0 이다
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+#[serde(default)]
+pub struct DevState {
+    /// 자극 난수를 지금까지 뽑은 차례: 자극 때마다 한 글자, '1' = 단어와 간격을 뽑음, '0' = 간격만 뽑음(보상 대기 중이라 단어를 넣지 않음).
+    /// 불러올 때 같은 씨앗의 난수에서 이 차례대로 뽑아 버리면 같은 위치가 된다
+    pub draws: String,
+    pub next_stim: u64,
+    /// 예정된 1차 보상 (틱, 종류)
+    pub pending: Option<(u64, usize)>,
+    pub stim_until: u64,
+    /// 보상 구간의 도파민 발화를 재는 중 (끝 틱, 시작 때의 발화 수)
+    pub da_mark: Option<(u64, u64)>,
+    pub need_before: f64,
+    /// 다음 보고 줄까지의 누적값 (저장 틱이 보고 간격의 배수가 아닐 때를 위해)
+    pub spikes: u64, pub food_n: u64, pub water_n: u64, pub da_acc: u64, pub da_n: u64,
+    pub need_pre_acc: f64, pub need_drop_acc: f64, pub need_drop_n: u64,
 }
 fn default_pred_eta() -> f64 { 5e-5 }
 fn default_gate_base() -> f64 { 0.02 }

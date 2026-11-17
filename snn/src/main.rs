@@ -796,7 +796,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     println!("{:>9} {:>8} {:>6} {:>7} {:>7} {:>6} {:>11} {:>11} {:>9} {:>7} {:>7} {:>8} {:>7}",
         "틱", "시냅스", "최소", "최대", "상대 수", "쌍당", "생긴 수", "사라진 수", "발화/1k", "먹이", "물", "보상도파민", "경과(초)");
     let report = report_every.unwrap_or((ticks / 60).max(1000));
-    // 불러온 망이면 저장된 시험 틱 다음부터 이어 간다 (진행 중이던 자극과 난수 상태는 저장되지 않는다)
+    // 불러온 망이면 저장된 시험 틱 다음부터 이어 간다. 자극 상태(dev_state)가 저장 파일에 있으면 되살려, 끊지 않은 실행과 같은 자극 차례를 받는다
     let start = net.dev_tick;
     if params.load_from.is_some() { println!("[불러오기] {} — 시험 틱 {} 다음부터 이어서 돈다. 설정은 저장된 것: {:?}", params.load_from.as_deref().unwrap_or(""), start, net.params_ref()); }
     if let Some((n, p)) = &save { println!("[저장] {}틱마다 {}.t<틱> 으로 저장한다 (최신 둘과 이정표 200만·1000만·2500만·5000만 틱만 남긴다)", n, p); }
@@ -806,6 +806,27 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     let mut pending: Option<(u64, usize)> = None;
     let (mut food_n, mut water_n) = (0usize, 0usize);
     let (mut da_acc, mut da_n, mut da_mark) = (0u64, 0usize, None::<(u64, u64)>);
+    // 자극 난수를 뽑은 차례 (저장용. 동작에는 쓰지 않는다)
+    let mut draws = String::new();
+    let mut restored: Option<network::DevState> = None;
+    if params.load_from.is_some() {
+        match net.dev_state.take() {
+            Some(d) => {
+                // 같은 씨앗의 난수에서 저장된 차례대로 뽑아 버린다: 난수의 위치가 저장한 때와 같아진다
+                for c in d.draws.chars() {
+                    if c == '1' { let _ = rng.random_range(if needs { 2 } else { 0 }..words.len()); }
+                    let _: u64 = rng.random_range(100..=400);
+                }
+                println!("[불러오기] 발달 시험의 자극 상태를 되살렸다 (자극 난수 {}번째 자극 뒤의 위치, 다음 자극 {}틱, 보상 대기 {:?}). --rng-seed 가 저장한 실행과 같아야 같은 차례가 된다", d.draws.len(), d.next_stim, d.pending);
+                restored = Some(d);
+            }
+            None => println!("[불러오기] 이 저장 파일에는 발달 시험의 자극 상태가 없다 (옛 형식): 자극 난수는 처음부터, 다음 자극은 {}틱에 시작한다", start + 200),
+        }
+    }
+    if let Some(d) = &restored {
+        draws = d.draws.clone(); next_stim = d.next_stim; pending = d.pending; da_mark = d.da_mark;
+        spikes = d.spikes as usize; food_n = d.food_n as usize; water_n = d.water_n as usize; da_acc = d.da_acc; da_n = d.da_n as usize;
+    }
     let da = net.da_count().max(1) as f64;
     // 관찰용 (네트워크 동작은 바꾸지 않는다): 자발 발화의 기대값과 실제 발화를 종류별로 구간마다 모은다
     const KINDS: [&str; 5] = ["추체", "Pv", "Sst", "Vip", "그 밖"];
@@ -820,7 +841,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     let mut peak_hid = 0usize;
     let (mut last_da, mut last_pred) = (net.da_spikes, net.pred_spikes);
     // 자극 밖: 자극이 시작된 틱부터 50틱(보상이 붙으면 보상이 끝난 뒤 50틱까지)을 뺀 나머지 틱만 따로 센다
-    let mut stim_until = 0u64;
+    let mut stim_until = restored.as_ref().map_or(0u64, |d| d.stim_until);
     let (mut out_ticks, mut out_hid, mut out_exp, mut out_peak) = (0u64, 0usize, 0.0f64, 0usize);
     println!("  (추가 줄의 뜻) 자극 밖 = 자극이 시작된 틱부터 50틱(보상이 붙는 자극은 보상이 끝나고 50틱까지)을 뺀 틱만 센 값. 입력 자극이 직접 일으킨 발화를 빼고 본다");
     println!("  (추가 줄의 뜻) 기대 자발 = 그 구간 틱마다 은닉 뉴런의 자발 발화 확률(0.00001 × spont_scale)을 더한 값. 불응기와 문턱 발화가 겹치는 틱을 빼지 않으므로 실제 자발 발화의 상한이다");
@@ -833,6 +854,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     let (mut gate_up, mut gate_down, mut gate_n, mut dend_acc, mut dend_n) = (0u64, 0u64, 0u64, 0.0f64, 0u64);
     println!("  (추가 줄의 뜻) 몸 = 구간에 끝난 보상(먹이·물)마다 보상 입력 직전의 결핍과 그 200틱 뒤까지 내려간 양의 평균, 그리고 보조 뉴런 무리별 평균 감응도(항상성이 1만 틱마다 고친다. 무리가 없으면 NaN)");
     let (mut need_before, mut need_pre_acc, mut need_drop_acc, mut need_drop_n) = (0.0f64, 0.0f64, 0.0f64, 0u64);
+    if let Some(d) = &restored { need_before = d.need_before; need_pre_acc = d.need_pre_acc; need_drop_acc = d.need_drop_acc; need_drop_n = d.need_drop_n; }
     let (mut last_made, mut last_drop, mut last_short) = (net.grow_made, net.gate_drop, net.pruned_short);
     const AREAS: [&str; 6] = ["감정 주", "감정 지도", "이성 주", "이성 지도", "기억", "해마"];
     for t in (start + 1)..=ticks {
@@ -845,7 +867,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
         }
         if let Some((end, start)) = da_mark { if t == end { da_acc += net.da_spikes - start; da_n += 1; da_mark = None; } }
         if t == next_stim && !no_stim {
-            if pending.is_none() { net.drive_text(words[rng.random_range(if needs { 2 } else { 0 }..words.len())], 4); stim_until = stim_until.max(t + 50); }
+            if pending.is_none() { net.drive_text(words[rng.random_range(if needs { 2 } else { 0 }..words.len())], 4); stim_until = stim_until.max(t + 50); draws.push('1'); } else { draws.push('0'); }
             next_stim = t + rng.random_range(100..=400);
         }
         // 이 틱에 쓰일 자발 발화 확률 (1만 틱마다의 갱신은 step 안에서 일어나므로, 갱신된 틱에는 한 틱 어긋난다)
@@ -962,6 +984,8 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
         if let Some((every, path)) = &save {
             if t % every == 0 {
                 net.dev_tick = t;
+                net.dev_state = Some(network::DevState { draws: draws.clone(), next_stim, pending, stim_until, da_mark, need_before,
+                    spikes: spikes as u64, food_n: food_n as u64, water_n: water_n as u64, da_acc, da_n: da_n as u64, need_pre_acc, need_drop_acc, need_drop_n });
                 let file = format!("{}.t{}", path, t);
                 net.save(std::path::Path::new(&file));
                 println!("{:>9} [저장] {} (경과 {:.0}초)", t, file, t0.elapsed().as_secs_f64());
