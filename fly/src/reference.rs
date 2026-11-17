@@ -3,7 +3,7 @@
 //!   dv/dt = (v0 - v + g) / t_mbr     (불응기 동안 정지)
 //!   dg/dt = -g / tau                 (불응기 동안 정지)
 //!   발화: v > v_th → v = v_rst, g = 0, 불응기 2.2ms
-//!   시냅스: 발화 1.8ms 뒤 post 의 g += 시냅스수 × w_syn
+//!   시냅스: 발화 1.8ms 뒤 post 의 g += 시냅스수 × w_syn (받는 뉴런이 불응기 중이면 버려짐)
 //!   자극: 150Hz 포아송, 이벤트마다 v += w_syn × 250 (불응기 없음)
 
 use crate::data::Connectome;
@@ -84,7 +84,9 @@ pub fn run_full(c: &Connectome, stim: &[usize], duration_ms: f64, rest_ms: f64, 
         if ring_dirty[slot] {
             let buf = &mut ring[slot];
             for i in 0..n {
-                if buf[i] != 0.0 { g[i] += buf[i]; buf[i] = 0.0; }
+                // 불응기 중에 도착한 입력은 버려진다. 저자 원본(Brian2)을 뉴런 하나로 돌려 확인한 동작:
+                // 4ms 간격 입력에서 원본은 16ms 마다 발화하는데, 불응기 중 입력을 쌓아 두면 12ms 마다 발화한다
+                if buf[i] != 0.0 { if step >= refr_until[i] { g[i] += buf[i]; } buf[i] = 0.0; }
             }
             ring_dirty[slot] = false;
         }

@@ -72,6 +72,7 @@ fn main() {
     let c = Connectome::load(Path::new(DATA_DIR));
     let index = c.index_of();
     let stim: Vec<usize> = SUGAR_GRN.iter().filter_map(|id| index.get(id).copied()).collect();
+    if stim.len() != SUGAR_GRN.len() { eprintln!("[주의] 단맛 감각뉴런 {}개 중 이 커넥톰에 있는 것은 {}개 (없는 것은 건너뜀)", SUGAR_GRN.len(), stim.len()); }
     let mn9 = index[&MN9];
     eprintln!("[커넥톰] 뉴런 {}, 연결 {}, 억제성 뉴런 {:.1}%, 자극(단맛 GRN) {}개",
         c.n(), c.out_post.len(),
