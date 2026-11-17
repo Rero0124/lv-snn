@@ -1817,6 +1817,8 @@ impl Network {
         let mut response_spikes = 0usize;
         let mut output_spikes_now = 0usize;
         let slow_events = self.params.slow_events;
+        // 전달 기록을 모으는 자극이 있는가 (틱마다 한 번만 본다)
+        let collecting = self.active_stimuli.iter().any(|st| st.collect_traces);
         for (nid, from_potential, deliveries) in &fired {
             let nid = *nid;
             let from_potential = *from_potential;
@@ -1846,6 +1848,14 @@ impl Network {
                 if slow_events { self.slow_on_spike(nid as usize, k); }
                 let tidx = target as usize;
                 if tidx >= self.neurons.len() { continue; }
+                // 값이 0 인 전달(확률 전달의 실패, 지연 시냅스)은 건너뛴다: 대상에 0 을 더할 뿐이라 결과가 같다.
+                // 전달 기록을 모으는 자극이 있으면 건너뛰지 않는다. 조절 수준에 따른 가소성(mod_eta ≠ 0)은 값과 무관하게 시냅스를 고치므로 지금처럼 부른다
+                if weight == 0.0 && !collecting {
+                    if self.plasticity.mod_eta != 0.0 && !self.neurons[nid as usize].modulatory && self.neurons[tidx].mod_level > 0.001 {
+                        plasticity::on_pre_under_modulator(&mut self.neurons, nid as usize, k, &self.plasticity);
+                    }
+                    continue;
+                }
                 // wake_check: 0 이 아닌 전달을 받은 뉴런은 다음 틱에 깨어난다 (조절 신호는 따로 표시)
                 if weight != 0.0 { if let Some(w) = self.wake.as_mut() { w.next[tidx] |= if self.neurons[nid as usize].modulatory { 2 } else { 1 }; } }
 
