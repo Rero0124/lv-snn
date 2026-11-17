@@ -140,7 +140,8 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
     //     실험자가 도파민 뉴런을 켜는 조건에 해당하고, snn 본체(도파민 뉴런이 보상 입력과 예측 뉴런에서만 받는다)와 같은 조건이 된다.
     //     단순화: 버섯체 출력 뉴런 → 도파민의 되먹임과 감각 → 도파민의 길이 빠진다
     let dan_no_input = flag(args, "--dan-no-input");
-    let extras = drive_dan.is_some() || odor_frac.is_some();
+    // --extras: 냄새·구동 옵션 없이도 관찰 줄을 찍는다 (읽기만)
+    let extras = drive_dan.is_some() || odor_frac.is_some() || args.iter().any(|a| a == "--extras");
     let mut opt = plasticity::PlasticityOptions {
         stdp_on_inhibitory: !flag(args, "--no-inh-stdp"),
         ltd_scale: arg(args, "--ltd-scale").unwrap_or(1.0),
@@ -538,7 +539,11 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
         let cycle = (trial - 1) / stims.len() + 1;
         if extras {
             // 시행마다 한 줄: 쉬는 구간 발화가 어느 시행에 켜지고 꺼지는지 (관찰용)
-            println!("  [시행] {trial} 틱 {tick} 자극발화 {total} 휴지발화 {rest_total} MN9 {}", counts[mn9]);
+            {
+                let (mut hi, mut mid, mut lo, mut mx, mut sum) = (0usize, 0usize, 0usize, 0.0f64, 0.0f64);
+                for nr in neurons.iter() { let e = nr.excitability; sum += e; if e > mx { mx = e; } if e >= 1.4999 { hi += 1; } else if e > 1.2 { mid += 1; } if e < 0.8 { lo += 1; } }
+                println!("  [시행] {trial} 틱 {tick} 자극발화 {total} 휴지발화 {rest_total} MN9 {} | 감응도: 평균 {:.4} 최대 {:.3} 1.5에 닿은 뉴런 {hi} 1.2~1.5 {mid} 0.8 아래 {lo}", counts[mn9], sum / n as f64, mx);
+            }
             ex_acc[0] += 1.0;
             ex_acc[1] += all_dan_idx.iter().filter(|&&i| counts[i] > 0).count() as f64;
             ex_acc[2] += drive_idx.iter().filter(|&&i| counts[i] > 0).count() as f64;
