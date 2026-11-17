@@ -75,7 +75,18 @@ pub struct NetParams {
     pub end_on_output: bool,
     /// 자발 발화 배수 (은닉 뉴런). None = 기존 동작(기본 구성 1.0, 검증 구성 0).
     ///   뉴런 하나가 입력 없이 한 틱에 발화할 확률 = 0.00001 × 배수 (자극이 들어오는 동안은 그 1/10)
+    ///   spont_fixed 가 있으면 이 배수는 쓰이지 않는다. spont_flat 은 여기에 곱해지는 종류별 배수를 끈다
     pub spont: Option<f64>,
+    /// 자발 발화 확률을 입력 가중치와 무관하게 고정 (실험용). Some(P) 이면 은닉 뉴런이 한 틱에 스스로 발화할 확률 = P × 종류 배수.
+    ///   주면 spont 의 배수와 검증 구성의 "입력 가중치 중앙값 ÷ 0.2" 는 쓰지 않는다 (접점이 늘거나 세기가 달라져도 씨앗이 그대로다)
+    pub spont_fixed: Option<f64>,
+    /// 종류별 자발 배수(Pv 10, Sst 5, Vip 3)를 끈다: 모든 은닉 뉴런이 추체와 같은 확률로 스스로 발화한다 (실험용).
+    ///   spont 나 spont_fixed 가 없으면(자발 발화가 꺼져 있으면) 효과가 없다
+    pub spont_flat: bool,
+    /// 새 접점 세기 기준(unit_med)을 구할 때 조절(도파민) 뉴런에서 오는 입력을 뺀다 (실험용).
+    ///   false(기존): 거름 조건이 받는 뉴런 자신을 봐서 은닉 뉴런에 대해서는 아무것도 거르지 않는다.
+    ///   발달 과정(grow)이 꺼져 있으면 이 기준을 계산하지 않으므로 효과가 없다
+    pub unit_med_fix: bool,
     /// 입력의 자리 배치: 입력 뉴런마다 각 영역(감정·이성·기억)에 정해진 자리가 있고, 그 주변(표준편차 TOPO_SIGMA)으로만 연결한다.
     ///   false(기존): 영역 전체에 무작위. true: 같은 입력을 받는 뉴런들이 서로 이웃이 된다
     pub topo: bool,
@@ -130,7 +141,7 @@ pub struct NetParams {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None }
     }
 }
 
@@ -138,7 +149,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None }
     }
 }
 
@@ -445,7 +456,7 @@ impl Network {
             // 기준선을 잡는 동안에는 자발 발화 없이 돌린다
             for _ in 0..DA_WARMUP_TICKS { net.idle_tick(); }
         }
-        if spont.is_some() { net.apply_spont(); }
+        if spont.is_some() || net.params.spont_fixed.is_some() { net.apply_spont(); }
         if let Some(p) = net.params.release {
             let hidden_end = net.hippocampus_range.1;
             for n in net.neurons[..hidden_end].iter_mut() {
@@ -1819,17 +1830,19 @@ impl Network {
         self.noise_amp = self.neurons.iter().map(|n| n.w_ref_med * 0.1).collect();
         if self.params.grow.is_some() {
             let neurons = &self.neurons;
+            // unit_med_fix: 조절 뉴런이 "보내는" 입력을 뺀다. 기존 조건은 받는 뉴런(자기 자신)이 조절 뉴런인지를 봐서 은닉 뉴런에 대해서는 아무것도 거르지 않는다
+            let fix = self.params.unit_med_fix;
             self.unit_med = neurons.par_iter().map(|n| {
                 let mut v: Vec<f64> = n.incoming.iter()
-                    .filter_map(|&(pre, k)| neurons.get(pre).and_then(|p| p.synapses.get(k)))
-                    .filter(|s| s.slow_rate == 0.0 && !neurons[s.target as usize].modulatory)
-                    .map(|s| s.weight / s.count.max(1) as f64).collect();
+                    .filter_map(|&(pre, k)| neurons.get(pre).and_then(|p| p.synapses.get(k)).map(|s| (pre, s)))
+                    .filter(|&(pre, s)| s.slow_rate == 0.0 && !(if fix { neurons[pre].modulatory } else { neurons[s.target as usize].modulatory }))
+                    .map(|(_, s)| s.weight / s.count.max(1) as f64).collect();
                 if v.is_empty() { return 0.0; }
                 let mid = v.len() / 2;
                 *v.select_nth_unstable_by(mid, |a, b| a.partial_cmp(b).unwrap()).1
             }).collect();
         }
-        if self.params.spont.is_some() { self.apply_spont(); }
+        if self.params.spont.is_some() || self.params.spont_fixed.is_some() { self.apply_spont(); }
     }
 
     /// 자발 발화 확률 설정 (은닉 뉴런).
@@ -1837,19 +1850,26 @@ impl Network {
     ///   스스로 발화할 확률이 낮다 — 뉴런은 네트워크 크기를 모르지만 자기 입력 가중치는 안다. 노이즈 크기와 같은 기준이다
     ///   기존 구성: 배수 그대로
     ///   세포 종류 구분(typed)이 켜져 있으면 종류별 배수가 더 곱해진다: 추체 1, Pv 10, Sst 5, Vip 3
+    ///   spont_fixed(Some(P)): 위 식 대신 확률 P 를 그대로 쓴다 (입력 가중치를 보지 않는다). 종류별 배수는 곱해진다
+    ///   spont_flat: 종류별 배수를 곱하지 않는다
     fn apply_spont(&mut self) {
-        let Some(x) = self.params.spont else { return };
+        // spont_fixed 가 있으면 그 확률을 그대로 쓴다 (확률 = 0.00001 × spont_scale 이므로 배수로 바꿔 넣는다. 입력 가중치는 보지 않는다)
+        let (x, by_weight) = match (self.params.spont_fixed, self.params.spont) {
+            (Some(p), _) => (p / 1e-5, false),
+            (None, Some(x)) => (x, self.params.validated),
+            (None, None) => return,
+        };
+        let flat = self.params.spont_flat;
         let hidden_end = self.hippocampus_range.1;
-        let by_weight = self.params.validated;
         for n in self.neurons[..hidden_end].iter_mut() {
             // 세포 종류별 배수 (깨어 있는 생쥐 피질의 평소 발화율 비: 추체세포는 드물게, 억제성은 자주. 대략적인 비율이다)
-            let by_type = match n.cell_type {
+            let by_type = if flat { 1.0 } else { match n.cell_type {
                 CellType::Pyramidal => 1.0,
                 CellType::Pv => 10.0,
                 CellType::Sst => 5.0,
                 CellType::Vip => 3.0,
                 _ => 1.0,
-            };
+            } };
             // 발화 확률(0.00001 × spont_scale)이 1을 넘지 않게 자른다 (넘으면 random_bool 이 실행을 죽인다)
             n.spont_scale = (by_type * if by_weight { x * n.w_ref_med / 0.2 } else { x }).min(1e5);
         }
@@ -1868,6 +1888,12 @@ impl Network {
             let k = match n.cell_type { CellType::Pyramidal => 0, CellType::Pv => 1, CellType::Sst => 2, CellType::Vip => 3, _ => 4 };
             (k, n.rate_avg, n.w_ref_med, 1e-5 * n.spont_scale)
         }).collect()
+    }
+
+    /// 새 접점 세기 기준(unit_med)의 은닉 뉴런 평균 (관찰용. 발달 과정이 꺼져 있으면 0)
+    pub fn unit_med_mean(&self) -> f64 {
+        let h = self.hippocampus_range.1.min(self.unit_med.len());
+        if h == 0 { 0.0 } else { self.unit_med[..h].iter().sum::<f64>() / h as f64 }
     }
 
     /// 검증된 학습 구성 적용

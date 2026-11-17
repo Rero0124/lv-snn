@@ -98,6 +98,12 @@ fn main() {
     if args.iter().any(|a| a == "--end-on-output") { params.end_on_output = true; }
     // --spont X: 자발 발화 배수 (검증 구성에서는 기본 0)
     if let Some(v) = num("--spont") { params.spont = Some(v); }
+    // --spont-fixed P: 자발 발화 확률을 입력 가중치와 무관하게 고정 (틱당 확률 P × 종류 배수. --spont 의 배수는 쓰지 않는다) / --spont-flat: 종류별 자발 배수를 끈다
+    //   (--spont-flat 은 --spont 나 --spont-fixed 가 없으면, --unit-med-fix 는 --grow 가 없으면 효과가 없다)
+    if let Some(v) = num("--spont-fixed") { params.spont_fixed = Some(v); }
+    if args.iter().any(|a| a == "--spont-flat") { params.spont_flat = true; }
+    // --unit-med-fix: 새 접점 세기 기준에서 조절(도파민) 뉴런이 보내는 입력을 뺀다
+    if args.iter().any(|a| a == "--unit-med-fix") { params.unit_med_fix = true; }
     // --topo: 입력마다 정해진 자리 주변으로만 연결 / --local F: 영역 내부 연결 중 가까운 뉴런으로 가는 비율
     if args.iter().any(|a| a == "--topo") { params.topo = true; }
     if let Some(v) = num("--local") { params.local_frac = v; }
@@ -206,6 +212,11 @@ fn main() {
         let list: Vec<f64> = args.iter().position(|a| a == "--spont-list").and_then(|i| args.get(i + 1))
             .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
             .unwrap_or_else(|| vec![1.0, 100.0, 1000.0, 10000.0, 30000.0]);
+        // --spont-fixed 를 주면 배수가 쓰이지 않아 모든 행이 같은 설정이 된다: 알리고 한 행만 돈다
+        let list = if params.spont_fixed.is_some() {
+            println!("[경고] --spont-fixed 가 있으면 자발 확률이 고정되어 --spont-list 의 배수는 쓰이지 않는다. 한 행만 돈다 (배수 열은 뜻이 없다)");
+            list[..1.min(list.len())].to_vec()
+        } else { list };
         spont_test(&params, n as u64, &list);
         return;
     }
@@ -711,11 +722,15 @@ fn dev_test(params: &NetParams, ticks: u64) {
     let (mut exp_acc, mut exp_kind_acc, mut hid_kind) = (0.0f64, [0.0f64; 5], [0usize; 5]);
     let (mut last_t, mut last_sprouted, mut last_pruned) = (0u64, net.sprouted, net.pruned);
     let mut peak_hid = 0usize;
+    // 자극 밖: 자극이 시작된 틱부터 50틱(보상이 붙으면 보상이 끝난 뒤 50틱까지)을 뺀 나머지 틱만 따로 센다
+    let mut stim_until = 0u64;
+    let (mut out_ticks, mut out_hid, mut out_exp, mut out_peak) = (0u64, 0usize, 0.0f64, 0usize);
+    println!("  (추가 줄의 뜻) 자극 밖 = 자극이 시작된 틱부터 50틱(보상이 붙는 자극은 보상이 끝나고 50틱까지)을 뺀 틱만 센 값. 입력 자극이 직접 일으킨 발화를 빼고 본다");
     println!("  (추가 줄의 뜻) 기대 자발 = 그 구간 틱마다 은닉 뉴런의 자발 발화 확률(0.00001 × spont_scale)을 더한 값. 불응기와 문턱 발화가 겹치는 틱을 빼지 않으므로 실제 자발 발화의 상한이다");
     println!("  (추가 줄의 뜻) 은닉 발화 = 은닉 뉴런만 센 실제 발화 (윗줄의 발화/1k 는 입출력 뉴런 포함). 발화율 분위 = rate_avg × 1000 (시정수 약 5000틱)");
     for t in 1..=ticks {
         if needs && pending.is_none() {
-            for kind in 0..2 { if pending.is_none() && net.need_level(kind) > 0.8 { net.drive_text(words[kind], 4); pending = Some((t + 30, kind)); } }
+            for kind in 0..2 { if pending.is_none() && net.need_level(kind) > 0.8 { net.drive_text(words[kind], 4); pending = Some((t + 30, kind)); stim_until = stim_until.max(t + 30 + 20 + 50); } }
         }
         if let Some((at, kind)) = pending {
             if t == at { net.drive_primary(kind, 20); da_mark = Some((t + 20, net.da_spikes)); if kind == 0 { food_n += 1 } else { water_n += 1 } }
@@ -723,7 +738,7 @@ fn dev_test(params: &NetParams, ticks: u64) {
         }
         if let Some((end, start)) = da_mark { if t == end { da_acc += net.da_spikes - start; da_n += 1; da_mark = None; } }
         if t == next_stim {
-            if pending.is_none() { net.drive_text(words[rng.random_range(if needs { 2 } else { 0 }..words.len())], 4); }
+            if pending.is_none() { net.drive_text(words[rng.random_range(if needs { 2 } else { 0 }..words.len())], 4); stim_until = stim_until.max(t + 50); }
             next_stim = t + rng.random_range(100..=400);
         }
         // 이 틱에 쓰일 자발 발화 확률 (1만 틱마다의 갱신은 step 안에서 일어나므로, 갱신된 틱에는 한 틱 어긋난다)
@@ -734,6 +749,7 @@ fn dev_test(params: &NetParams, ticks: u64) {
         let mut hid_now = 0usize;
         for &id in &net.tick_ids { if (id as usize) < hidden_n { hid_kind[kind_of[id as usize]] += 1; hid_now += 1; } }
         peak_hid = peak_hid.max(hid_now);
+        if t >= stim_until { out_ticks += 1; out_hid += hid_now; out_exp += exp_now; out_peak = out_peak.max(hid_now); }
         let e = net.spont_expected().0;
         if e != exp_now { exp_now = e; exp_kind_now = spont_by_kind(&net); }
         if t % report == 0 || t == ticks {
@@ -750,8 +766,12 @@ fn dev_test(params: &NetParams, ticks: u64) {
             println!("{:>9} 자발 | 지금 기대 {:.3}/틱, 입력 가중치 중앙값의 평균 {:.6} | 구간({:.0}틱) 은닉 발화 {:.0}/1k, 기대 자발 {:.0}/1k, 비중 {:.1}% | 구간 생긴 수 {}, 사라진 수 {}",
                 "", per_tick, w_med, span, hid as f64 * per_k, exp_acc * per_k, if hid > 0 { exp_acc / hid as f64 * 100.0 } else { 0.0 },
                 net.sprouted - last_sprouted, net.pruned - last_pruned);
-            println!("{:>9} 번짐 | 불어남 {:.2} (구간 은닉 발화 ÷ 기대 자발) | 한 틱 최대 은닉 발화 {} (은닉의 {:.1}%)",
-                "", if exp_acc > 0.0 { hid as f64 / exp_acc } else { 0.0 }, peak_hid, peak_hid as f64 / hidden_n as f64 * 100.0);
+            println!("{:>9} 번짐 | 불어남 {:.2} (구간 은닉 발화 ÷ 기대 자발) | 한 틱 최대 은닉 발화 {} (은닉의 {:.1}%) | 새 접점 세기 기준의 평균 {:.6}",
+                "", if exp_acc > 0.0 { hid as f64 / exp_acc } else { 0.0 }, peak_hid, peak_hid as f64 / hidden_n as f64 * 100.0, net.unit_med_mean());
+            println!("{:>9} 자극 밖 | {}틱 | 불어남 {:.2} | 은닉 발화 {:.0}/1k, 기대 자발 {:.0}/1k | 한 틱 최대 은닉 발화 {} (은닉의 {:.1}%)",
+                "", out_ticks, if out_exp > 0.0 { out_hid as f64 / out_exp } else { 0.0 },
+                if out_ticks > 0 { out_hid as f64 * 1000.0 / out_ticks as f64 } else { 0.0 }, if out_ticks > 0 { out_exp * 1000.0 / out_ticks as f64 } else { 0.0 },
+                out_peak, out_peak as f64 / hidden_n as f64 * 100.0);
             let obs = net.hidden_observe();
             for k in 0..5 {
                 if kind_n[k] == 0 { continue; }
@@ -768,6 +788,7 @@ fn dev_test(params: &NetParams, ticks: u64) {
             std::io::stdout().flush().ok();
             spikes = 0; food_n = 0; water_n = 0; da_acc = 0; da_n = 0;
             exp_acc = 0.0; exp_kind_acc = [0.0; 5]; hid_kind = [0; 5]; peak_hid = 0;
+            out_ticks = 0; out_hid = 0; out_exp = 0.0; out_peak = 0;
             last_t = t; last_sprouted = net.sprouted; last_pruned = net.pruned;
         }
     }
