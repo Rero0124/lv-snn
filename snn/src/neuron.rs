@@ -300,10 +300,14 @@ impl Neuron {
                     return None;
                 }
                 if elapsed < rel_ref {
+                    let base = self.potential + self.dendritic_drive();
+                    let bar = ((self.self_threshold + self.adapt) * self.threshold_scale / self.excitability) * 2.0;
+                    // 잡음은 −폭 이상 +폭 미만이다. 가장 큰 잡음을 더해도 못 넘으면 난수를 뽑지 않는다 (판정은 어떤 잡음 값에서도 같다)
+                    if base + noise_range < bar { return None; }
                     let noise = if noise_range > 0.0 {
                         (rand::random::<f64>() * 2.0 - 1.0) * noise_range
                     } else { 0.0 };
-                    if self.potential + self.dendritic_drive() + noise < ((self.self_threshold + self.adapt) * self.threshold_scale / self.excitability) * 2.0 {
+                    if base + noise < bar {
                         return None;
                     }
                 }
@@ -311,12 +315,16 @@ impl Neuron {
         }
         let _ = threshold; // 전역 threshold 미사용 (뉴런별 self_threshold로 대체)
 
-        let noise = if noise_range > 0.0 {
-            (rand::random::<f64>() * 2.0 - 1.0) * noise_range
-        } else { 0.0 };
-        let effective = self.potential + self.dendritic_drive() + noise;
+        let base = self.potential + self.dendritic_drive();
         let adj_threshold = (self.self_threshold + self.adapt) * self.threshold_scale / self.excitability;
-        let should_fire = effective >= adj_threshold
+        // 잡음은 −폭 이상 +폭 미만이다. 가장 큰 잡음을 더해도 문턱에 못 미치면 난수를 뽑지 않는다 (문턱으로는 발화하지 않는다. 자발 발화는 아래에서 그대로 본다)
+        let over_threshold = if noise_range <= 0.0 { base >= adj_threshold } else if base + noise_range <= adj_threshold { false } else {
+            let noise = if noise_range > 0.0 {
+                (rand::random::<f64>() * 2.0 - 1.0) * noise_range
+            } else { 0.0 };
+            base + noise >= adj_threshold
+        };
+        let should_fire = over_threshold
             || (!self.skip_refractory && self.spont_scale > 0.0
                 && rand::random_bool((if stimulated { 0.000001 } else { 0.00001 }) * self.spont_scale));
 
