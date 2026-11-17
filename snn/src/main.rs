@@ -135,6 +135,8 @@ fn main() {
     }
     if let Some(v) = num("--prune-act") { params.prune_act = v; }
     // --slow-events: 지연 시냅스를 "발화했을 때만 알리기"로 계산 (규칙은 같다) / --slow-check: 옛 방식의 값도 함께 계산해 차이를 1000틱마다 찍는다
+    // --warmup-quiet: 기준선을 잡는 준비 구간 동안만 은닉 뉴런의 자발 발화를 끈다
+    if args.iter().any(|a| a == "--warmup-quiet") { params.warmup_quiet = true; }
     if args.iter().any(|a| a == "--slow-events") { params.slow_events = true; }
     if args.iter().any(|a| a == "--slow-check") {
         params.slow_check = true;
@@ -789,6 +791,8 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     println!("  (추가 줄의 뜻) 받기 = 구간에 생긴 접점 수와 받기 문에 걸려 버린 시도 수를 받는 뉴런의 종류별로. 소멸의 나이 = 사라진 틱 − 그 접점이 속한 쌍이 생긴 틱 (처음부터 있던 쌍은 0틱에 생긴 것으로 센다)");
     println!("  (추가 줄의 뜻) 입력 = 은닉 뉴런마다 다른 은닉 뉴런에서 들어오는 접점 수(지연 시냅스 제외). 느린÷목표 = rate_avg ÷ (K × 자기 자발 발화 확률). 문이 닫힌 비율은 보고 시점의 값");
     println!("  (추가 줄의 뜻) 표의 '상대 수' = 서로 다른 상대의 수가 아니라 시냅스 칸의 수 (같은 상대로 가는 칸이 둘 이상일 수 있다: 초기 배선의 중복). '쌍 수'도 칸의 수다. 중복 시냅스 = 같은 (보내는 뉴런, 받는 뉴런)의 두 번째 이상인 칸");
+    println!("  (추가 줄의 뜻) 조절 줄의 문 = 은닉 뉴런의 조절 수준을 10틱마다 읽어, 기준선보다 25% 이상 높은 비율(위)과 25% 이상 낮은 비율(아래)을 구간에 걸쳐 평균한 값. 도파민 수상돌기 = 도파민 뉴런 수상돌기 값의 10틱마다 표본 평균");
+    let (mut gate_up, mut gate_down, mut gate_n, mut dend_acc, mut dend_n) = (0u64, 0u64, 0u64, 0.0f64, 0u64);
     let (mut last_made, mut last_drop, mut last_short) = (net.grow_made, net.gate_drop, net.pruned_short);
     const AREAS: [&str; 6] = ["감정 주", "감정 지도", "이성 주", "이성 지도", "기억", "해마"];
     for t in 1..=ticks {
@@ -813,6 +817,11 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
         for &id in &net.tick_ids { if (id as usize) < hidden_n { hid_kind[kind_of[id as usize]] += 1; hid_now += 1; } }
         peak_hid = peak_hid.max(hid_now);
         if t >= stim_until { out_ticks += 1; out_hid += hid_now; out_exp += exp_now; out_peak = out_peak.max(hid_now); }
+        if t % 10 == 0 {
+            let (u, d, n) = net.gate_open_counts();
+            gate_up += u as u64; gate_down += d as u64; gate_n += n as u64;
+            dend_acc += net.da_dend_mean(); dend_n += 1;
+        }
         let e = net.spont_expected().0;
         if e != exp_now { exp_now = e; exp_kind_now = spont_by_kind(&net); }
         if t % report == 0 || t == ticks {
@@ -835,8 +844,11 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
                 "", out_ticks, if out_exp > 0.0 { out_hid as f64 / out_exp } else { 0.0 },
                 if out_ticks > 0 { out_hid as f64 * 1000.0 / out_ticks as f64 } else { 0.0 }, if out_ticks > 0 { out_exp * 1000.0 / out_ticks as f64 } else { 0.0 },
                 out_peak, out_peak as f64 / hidden_n as f64 * 100.0);
-            println!("{:>9} 조절 | 구간에 뉴런 한 개가 발화한 수: 도파민 {:.2}, 예측 {:.2} | 조절 수준의 기준선 대비 편차 (구간 끝) {:+.3}",
-                "", (net.da_spikes - last_da) as f64 / da, (net.pred_spikes - last_pred) as f64 / net.pred_count().max(1) as f64, net.mod_deviation());
+            println!("{:>9} 조절 | 구간에 뉴런 한 개가 발화한 수: 도파민 {:.2}, 예측 {:.2} | 조절 수준의 기준선 대비 편차 (구간 끝) {:+.3} | 문이 열린 비율: 위 {:.1}%, 아래 {:.1}% | 예측 뉴런의 입력 가중치 합 {:.4} | 도파민 수상돌기 평균 {:+.4}",
+                "", (net.da_spikes - last_da) as f64 / da, (net.pred_spikes - last_pred) as f64 / net.pred_count().max(1) as f64, net.mod_deviation(),
+                if gate_n > 0 { gate_up as f64 / gate_n as f64 * 100.0 } else { 0.0 }, if gate_n > 0 { gate_down as f64 / gate_n as f64 * 100.0 } else { 0.0 },
+                net.slow_input_weights().1.0, if dend_n > 0 { dend_acc / dend_n as f64 } else { 0.0 });
+            gate_up = 0; gate_down = 0; gate_n = 0; dend_acc = 0.0; dend_n = 0;
             last_da = net.da_spikes; last_pred = net.pred_spikes;
             let obs = net.hidden_observe();
             for k in 0..5 {
