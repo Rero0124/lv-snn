@@ -27,7 +27,8 @@ const SLEEP_WEIGHT_SCALE: f64 = 0.92;
 // ── 네트워크 구성 파라미터 ──
 
 /// 배선/가중치 구성. Default = 기존 구성, connectome() = 실제 커넥톰 비율에 맞춘 구성.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NetParams {
     /// 은닉 뉴런당 나가는 시냅스 수 (기존 10)
     pub synapses_per_neuron: usize,
@@ -164,6 +165,10 @@ pub struct NetParams {
     /// 깨어남 확인 (동작은 바꾸지 않는다): "입력을 받았거나, 불응기가 끝났거나, 바깥 자극을 받은 뉴런만 판정하면 된다"는 규칙이 맞는지를
     ///   틱마다 세어 1000틱마다 찍는다. 깨어나지 않았는데 발화한 뉴런과 그 이유, 깨어나지 않았는데 전위가 달라진 뉴런을 센다
     pub wake_check: bool,
+    /// 저장된 망을 불러온다 (Some(경로)): 망을 새로 만들지 않고 그 파일에서 읽는다. 설정은 저장된 것을 쓰고(명령줄의 망 옵션은 무시),
+    ///   기준선을 잡는 준비 구간은 돌리지 않는다. 계산 방식 옵션(slow_events, slow_check, wake_check)만 명령줄의 것을 따른다
+    #[serde(skip)]
+    pub load_from: Option<String>,
 }
 
 /// wake_check 의 상태와 세는 값 (관찰용)
@@ -189,7 +194,7 @@ struct WakeCheck {
 }
 
 /// 받기 문이 보는 발화율
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum GateMode { Fast, Slow, Both }
 
 /// 발달 시험의 관찰값 (읽기만 한다)
@@ -211,7 +216,7 @@ pub struct DevObs {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, wake_check: false }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, wake_check: false, load_from: None }
     }
 }
 
@@ -219,7 +224,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, wake_check: false }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, wake_check: false, load_from: None }
     }
 }
 
@@ -342,6 +347,8 @@ pub struct Network {
     slow_chk_recv: f64,
     slow_chk_drift: f64,
     wake: Option<Box<WakeCheck>>,
+    /// 발달 시험(dev_test)이 진행한 틱 수. 저장할 때 함께 적어, 불러온 뒤 그 틱부터 이어 간다
+    pub dev_tick: u64,
 }
 
 // ── 도파민 구성 ──
@@ -397,6 +404,16 @@ impl Network {
     }
 
     pub fn with_params(params: NetParams) -> Self {
+        // 저장된 망 불러오기: 새로 만들지 않는다 (준비 구간도 돌리지 않는다. 기준선은 뉴런에 저장돼 있다)
+        if let Some(path) = params.load_from.clone() {
+            let mut net = Network::load(Path::new(&path)).unwrap_or_else(|| { eprintln!("[오류] 저장된 망을 읽지 못했다: {}", path); std::process::exit(2); });
+            net.params.slow_events = params.slow_events;
+            net.params.slow_check = params.slow_check;
+            net.params.wake_check = params.wake_check;
+            if net.params.slow_events { net.slow_pos.clear(); net.slow_resync(); net.slow_chk_drift = 0.0; }
+            if net.params.wake_check { net.wake = Some(Box::new(WakeCheck::default())); }
+            return net;
+        }
         let inh_cut = 20 - (20.0 * params.inhibitory_ratio).round() as usize;
         let mut neurons: Vec<Neuron> = Vec::new();
         let cols = 50usize;
@@ -528,6 +545,7 @@ impl Network {
             slow_chk_recv: 0.0,
             slow_chk_drift: 0.0,
             wake: None,
+            dev_tick: 0,
         };
 
         // 세포 종류 지정: 억제성 뉴런을 순서대로 Pv 9 : Sst 8 : Vip 3 (45% / 40% / 15%) 으로 나눈다
@@ -1172,6 +1190,7 @@ impl Network {
     }
 
     pub fn hidden_count(&self) -> usize { self.hippocampus_range.1 }
+    pub fn params_ref(&self) -> &NetParams { &self.params }
     /// 관찰용 영역 번호: 0 감정_Main, 1 감정_Map, 2 이성_Main, 3 이성_Map, 4 기억, 5 해마, 6 출력, 7 그 밖(입력 등)
     pub fn area_of(&self, idx: usize) -> usize {
         let within = |r: (usize, usize)| idx >= r.0 && idx < r.1;
@@ -2393,14 +2412,17 @@ impl Network {
     }
 
     /// 검증된 학습 구성 적용
-    fn apply_validated(&mut self) {
-        self.plasticity = PlasticityOptions {
+    fn validated_plasticity() -> PlasticityOptions {
+        PlasticityOptions {
             stdp_on_inhibitory: false,
             local_scale: true,
             ltd_once_per_post: true,
             bcm_classic_local: Some(1.0),
             ..PlasticityOptions::default()
-        };
+        }
+    }
+    fn apply_validated(&mut self) {
+        self.plasticity = Self::validated_plasticity();
         for n in &mut self.neurons { n.spont_scale = 0.0; }
         self.refresh_local();
     }
@@ -2628,9 +2650,20 @@ impl Network {
             da_idx: self.da_idx.clone(),
             reward_idx: self.reward_idx.clone(),
             punish_idx: self.punish_idx.clone(),
+            ext: Some(SnapExt {
+                params: self.params.clone(),
+                val_idx: self.val_idx.clone(), taste_idx: self.taste_idx.clone(), need_idx: self.need_idx.clone(), aux_end: self.aux_end,
+                unit_med: self.unit_med.clone(), noise_amp: self.noise_amp.clone(),
+                sprouted: self.sprouted, pruned: self.pruned, da_spikes: self.da_spikes, pred_spikes: self.pred_spikes, val_spikes: self.val_spikes,
+                grow_made: self.grow_made, gate_drop: self.gate_drop, added_on_initial: self.added_on_initial, pruned_short: self.pruned_short,
+                wiring_sum: self.wiring_sum, dev_tick: self.dev_tick,
+            }),
         };
         let data = serde_json::to_vec(&snap).expect("직렬화 실패");
-        std::fs::write(path, &data).expect("저장 실패");
+        // 쓰다가 끊겨도 앞의 파일이 깨지지 않게 임시 파일에 쓰고 이름을 바꾼다
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &data).expect("저장 실패");
+        std::fs::rename(&tmp, path).expect("저장 실패");
         eprintln!("  [저장] {} ({:.1}MB, 뉴런 {}개, 시냅스 {}개)",
             path.display(), data.len() as f64 / 1048576.0,
             self.neurons.len(), self.synapse_count());
@@ -2712,14 +2745,40 @@ impl Network {
             slow_chk_recv: 0.0,
             slow_chk_drift: 0.0,
             wake: None,
+            dev_tick: 0,
         };
         net.rebuild_incoming();
         net.rebuild_slow_index();
-        if net.params.slow_events { net.slow_resync(); net.slow_chk_drift = 0.0; }
         // 시냅스의 감쇠 기준 틱을 지금으로 맞춘다 (구버전 스냅샷은 값이 0이라 그대로 두면 한꺼번에 사라진다)
         for n in net.neurons.iter_mut() { for s in n.synapses.iter_mut() { if s.t == 0 { s.t = global_tick; } } }
-        if net.params.validated { net.apply_validated(); }
-        if net.params.dopamine { net.apply_dopamine_options(); }
+        match snap.ext {
+            Some(x) => {
+                // 설정 전체와, 뉴런에 들어 있지 않은 상태를 되돌린다. 자발 발화 확률·기준선·입력 가중치 중앙값은 뉴런에 저장돼 있어 다시 계산하지 않는다
+                net.params = x.params;
+                net.val_idx = x.val_idx; net.taste_idx = x.taste_idx; net.need_idx = x.need_idx; net.aux_end = x.aux_end;
+                net.unit_med = x.unit_med; net.noise_amp = x.noise_amp;
+                net.sprouted = x.sprouted; net.pruned = x.pruned; net.da_spikes = x.da_spikes; net.pred_spikes = x.pred_spikes; net.val_spikes = x.val_spikes;
+                net.grow_made = x.grow_made; net.gate_drop = x.gate_drop; net.added_on_initial = x.added_on_initial; net.pruned_short = x.pruned_short;
+                net.wiring_sum = x.wiring_sum; net.dev_tick = x.dev_tick;
+                if net.params.validated { net.plasticity = Self::validated_plasticity(); }
+                if net.params.dopamine { net.apply_dopamine_options(); }
+                // 흔적이 남아 있는 시냅스의 목록(저장하지 않는다)을 다시 만든다
+                let mut ins: Vec<(usize, u32, u32)> = Vec::new();
+                for (pre, n) in net.neurons.iter_mut().enumerate() {
+                    n.elig_idx.clear(); n.elig_in.clear();
+                    for (k, s) in n.synapses.iter_mut().enumerate() {
+                        if s.elig != 0.0 { s.lp = true; s.lq = true; n.elig_idx.push(k as u32); ins.push((s.target as usize, pre as u32, k as u32)); }
+                    }
+                }
+                for (t, pre, k) in ins { if let Some(n) = net.neurons.get_mut(t) { n.elig_in.push((pre, k)); } }
+            }
+            None => {
+                // 구버전 저장 파일: 기존 동작 그대로
+                if net.params.validated { net.apply_validated(); }
+                if net.params.dopamine { net.apply_dopamine_options(); }
+            }
+        }
+        if net.params.slow_events { net.slow_resync(); net.slow_chk_drift = 0.0; }
         Some(net)
     }
 }
@@ -2785,6 +2844,34 @@ struct Snapshot {
     pred_eta: f64,
     #[serde(default)]
     pred_idx: Vec<usize>,
+    /// 설정 전체와, 뉴런 구조체에 들어 있지 않은 망의 상태 (없으면 구버전 저장 파일)
+    #[serde(default)]
+    ext: Option<SnapExt>,
+}
+
+/// 저장 파일의 덧붙임: 설정 전체, 보조 뉴런 목록과 경계, 새 접점 세기 기준, 뉴런별 잡음 크기, 누적 수.
+/// 저장하지 않는 것: 난수 상태, 진행 중인 자극(연속 입력, 1대1 자극), 이번 틱의 발화 목록
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct SnapExt {
+    params: NetParams,
+    val_idx: Vec<usize>,
+    taste_idx: Vec<Vec<usize>>,
+    need_idx: Vec<Vec<usize>>,
+    aux_end: usize,
+    unit_med: Vec<f64>,
+    noise_amp: Vec<f64>,
+    sprouted: u64,
+    pruned: u64,
+    da_spikes: u64,
+    pred_spikes: u64,
+    val_spikes: u64,
+    grow_made: [u64; 5],
+    gate_drop: [u64; 5],
+    added_on_initial: u64,
+    pruned_short: u64,
+    wiring_sum: u64,
+    dev_tick: u64,
 }
 fn default_pred_eta() -> f64 { 5e-5 }
 fn default_gate_base() -> f64 { 0.02 }

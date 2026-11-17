@@ -137,6 +137,8 @@ fn main() {
     // --slow-events: 지연 시냅스를 "발화했을 때만 알리기"로 계산 (규칙은 같다) / --slow-check: 옛 방식의 값도 함께 계산해 차이를 1000틱마다 찍는다
     // --warmup-quiet: 기준선을 잡는 준비 구간 동안만 은닉 뉴런의 자발 발화를 끈다
     if args.iter().any(|a| a == "--warmup-quiet") { params.warmup_quiet = true; }
+    // --load P: 저장된 망을 불러온다 (시험 분기들이 망을 새로 만드는 자리에서 그 파일을 읽는다. 설정은 저장된 것을 쓴다)
+    if let Some(i) = args.iter().position(|a| a == "--load") { params.load_from = args.get(i + 1).cloned(); }
     // --wake-check: 깨어남 확인 (동작은 그대로. "변동 있는 뉴런만 판정"의 규칙이 놓치는 발화가 있는지 센다)
     if args.iter().any(|a| a == "--wake-check") { params.wake_check = true; }
     if args.iter().any(|a| a == "--slow-events") { params.slow_events = true; }
@@ -278,7 +280,13 @@ fn main() {
     if let Some(n) = num("--dev-test") {
         params.dopamine = true;
         // --report N: 보고 간격을 N틱으로 고정 (없으면 전체의 1/60, 최소 1000틱) / --dev-no-stim: 단어 자극과 먹이·물을 넣지 않는다
-        dev_test(&params, n as u64, num("--report").map(|v| (v as u64).max(1)), args.iter().any(|a| a == "--dev-no-stim"));
+        // --save-every N --save-path P: N틱마다 P.t<틱> 으로 저장 (최신 둘과 이정표 200만·1000만·2500만·5000만 틱만 남긴다) / --load P: 저장된 망에서 이어서
+        let save = match (num("--save-every"), args.iter().position(|a| a == "--save-path").and_then(|i| args.get(i + 1))) {
+            (Some(n), Some(p)) if n >= 1.0 => Some((n as u64, p.clone())),
+            (None, None) => None,
+            _ => { eprintln!("[오류] --save-every N 과 --save-path P 는 함께 줘야 한다"); std::process::exit(2); }
+        };
+        dev_test(&params, n as u64, num("--report").map(|v| (v as u64).max(1)), args.iter().any(|a| a == "--dev-no-stim"), save);
         return;
     }
     // --persist-test N: 학습 전후로 자극이 끝난 뒤 활동이 얼마나 오래 남는지 (A 를 N번 반복 / A 에 N번 보상)
@@ -744,7 +752,7 @@ fn persist_test(params: &NetParams, trials: usize) {
 
 /// 발달 과정 점검: 뉴런당 시냅스 수가 적음 → 넘침 → 안정의 곡선을 그리는지.
 /// 몸의 상태(--needs)가 켜져 있으면 단순한 환경이 붙는다: 배고픔이 차면 "안녕" 뒤에 먹이, 목마름이 차면 "고마워" 뒤에 물
-fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: bool) {
+fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: bool, save: Option<(u64, String)>) {
     use rand::prelude::*;
     use std::io::Write;
     let mut rng = rand::rng();
@@ -752,7 +760,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     let t0 = std::time::Instant::now();
     let mut net = Network::with_params(params.clone());
     let words = ["안녕", "고마워", "사랑해", "잘자", "배고파"];
-    let needs = params.needs;
+    let needs = net.params_ref().needs;
     println!("[발달 시험] 보고 간격 {}, 자극 {}, 초기 배선의 합계 값 {:016x} (같은 배선 씨앗이면 같다. 씨앗 {:?})",
         match report_every { Some(n) => format!("{}틱 (--report)", n), None => "전체의 1/60 (최소 1000틱)".to_string() },
         if no_stim { "없음 (--dev-no-stim: 단어 자극과 먹이·물을 넣지 않는다)" } else { "있음" }, net.wiring_sum, params.seed);
@@ -765,7 +773,12 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     println!("{:>9} {:>8} {:>6} {:>7} {:>7} {:>6} {:>11} {:>11} {:>9} {:>7} {:>7} {:>8} {:>7}",
         "틱", "시냅스", "최소", "최대", "상대 수", "쌍당", "생긴 수", "사라진 수", "발화/1k", "먹이", "물", "보상도파민", "경과(초)");
     let report = report_every.unwrap_or((ticks / 60).max(1000));
-    let (mut next_stim, mut spikes) = (200u64, 0usize);
+    // 불러온 망이면 저장된 시험 틱 다음부터 이어 간다 (진행 중이던 자극과 난수 상태는 저장되지 않는다)
+    let start = net.dev_tick;
+    if params.load_from.is_some() { println!("[불러오기] {} — 시험 틱 {} 다음부터 이어서 돈다. 설정은 저장된 것: {:?}", params.load_from.as_deref().unwrap_or(""), start, net.params_ref()); }
+    if let Some((n, p)) = &save { println!("[저장] {}틱마다 {}.t<틱> 으로 저장한다 (최신 둘과 이정표 200만·1000만·2500만·5000만 틱만 남긴다)", n, p); }
+    let mut saved: Vec<(u64, String)> = Vec::new();
+    let (mut next_stim, mut spikes) = (start + 200, 0usize);
     // 예정된 1차 보상: (틱, 종류). 보상 구간의 도파민 발화를 재기 위한 값들
     let mut pending: Option<(u64, usize)> = None;
     let (mut food_n, mut water_n) = (0usize, 0usize);
@@ -780,7 +793,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     let spont_by_kind = |net: &Network| { let mut e = [0.0f64; 5]; for o in net.hidden_observe() { e[o.0] += o.3; } e };
     let (mut exp_now, mut exp_kind_now) = (net.spont_expected().0, spont_by_kind(&net));
     let (mut exp_acc, mut exp_kind_acc, mut hid_kind) = (0.0f64, [0.0f64; 5], [0usize; 5]);
-    let (mut last_t, mut last_sprouted, mut last_pruned) = (0u64, net.sprouted, net.pruned);
+    let (mut last_t, mut last_sprouted, mut last_pruned) = (start, net.sprouted, net.pruned);
     let mut peak_hid = 0usize;
     let (mut last_da, mut last_pred) = (net.da_spikes, net.pred_spikes);
     // 자극 밖: 자극이 시작된 틱부터 50틱(보상이 붙으면 보상이 끝난 뒤 50틱까지)을 뺀 나머지 틱만 따로 센다
@@ -797,7 +810,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     let (mut gate_up, mut gate_down, mut gate_n, mut dend_acc, mut dend_n) = (0u64, 0u64, 0u64, 0.0f64, 0u64);
     let (mut last_made, mut last_drop, mut last_short) = (net.grow_made, net.gate_drop, net.pruned_short);
     const AREAS: [&str; 6] = ["감정 주", "감정 지도", "이성 주", "이성 지도", "기억", "해마"];
-    for t in 1..=ticks {
+    for t in (start + 1)..=ticks {
         if needs && !no_stim && pending.is_none() {
             for kind in 0..2 { if pending.is_none() && net.need_level(kind) > 0.8 { net.drive_text(words[kind], 4); pending = Some((t + 30, kind)); stim_until = stim_until.max(t + 30 + 20 + 50); } }
         }
@@ -896,7 +909,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
                 format!("{} {:.2} (n={})", AREAS[a], med(&mut r, 0.5), r.len())
             }).collect();
             println!("{:>9} 영역 | 추체 발화율/1k 중앙값: {}", "", area_line.join(", "));
-            if params.act_target.is_some() {
+            if net.params_ref().act_target.is_some() {
                 for k in 0..5 {
                     if kind_n[k] == 0 { continue; }
                     let v: Vec<&(usize, usize, f64, f64, f64, usize, usize)> = dv.per.iter().filter(|o| o.0 == k).collect();
@@ -914,6 +927,21 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
             exp_acc = 0.0; exp_kind_acc = [0.0; 5]; hid_kind = [0; 5]; peak_hid = 0;
             out_ticks = 0; out_hid = 0; out_exp = 0.0; out_peak = 0;
             last_t = t; last_sprouted = net.sprouted; last_pruned = net.pruned;
+        }
+        if let Some((every, path)) = &save {
+            if t % every == 0 {
+                net.dev_tick = t;
+                let file = format!("{}.t{}", path, t);
+                net.save(std::path::Path::new(&file));
+                println!("{:>9} [저장] {} (경과 {:.0}초)", t, file, t0.elapsed().as_secs_f64());
+                saved.push((t, file));
+                // 최신 둘과 이정표만 남긴다
+                while saved.len() > 2 {
+                    let (old_t, old_file) = saved.remove(0);
+                    if ![2_000_000u64, 10_000_000, 25_000_000, 50_000_000].contains(&old_t) { std::fs::remove_file(&old_file).ok(); }
+                }
+                std::io::stdout().flush().ok();
+            }
         }
     }
 }
