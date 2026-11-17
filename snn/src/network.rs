@@ -787,6 +787,25 @@ impl Network {
     pub fn value_deviations(&self) -> Vec<f64> {
         self.val_idx.iter().map(|&i| &self.neurons[i]).filter(|n| n.mod_base > 1e-6).map(|n| n.mod_level / n.mod_base - 1.0).collect()
     }
+    /// 뉴런 집단의 (조절 수준 ÷ 기준선 − 1) 값 목록 (관찰용). which: 0 은닉, 1 출력, 그 밖 가치. 조절 신호를 받지 않는 뉴런은 빠진다
+    pub fn deviations_of(&self, which: usize) -> Vec<f64> {
+        let dev = |i: usize| { let n = &self.neurons[i]; if n.mod_base > 1e-6 { Some(n.mod_level / n.mod_base - 1.0) } else { None } };
+        match which {
+            0 => (0..self.hippocampus_range.1).filter_map(dev).collect(),
+            1 => self.output_idx.iter().filter_map(|&i| dev(i)).collect(),
+            _ => self.val_idx.iter().filter_map(|&i| dev(i)).collect(),
+        }
+    }
+    pub fn val_count(&self) -> usize { self.val_idx.len() }
+    /// 지연 시냅스의 가중치 합과 개수 (관찰용): (가치 뉴런으로 들어오는 것, 예측 뉴런으로 들어오는 것)
+    pub fn slow_input_weights(&self) -> ((f64, usize), (f64, usize)) {
+        let (mut v, mut p) = ((0.0, 0usize), (0.0, 0usize));
+        for &(pre, k) in &self.slow_syn {
+            let Some(s) = self.neurons[pre].synapses.get(k) else { continue };
+            if s.slow_fast { v.0 += s.weight; v.1 += 1; } else if self.is_pred(s.target as usize) { p.0 += s.weight; p.1 += 1; }
+        }
+        (v, p)
+    }
     /// 가치 뉴런으로 들어오는 시냅스의 가중치 평균: (set 에 속한 뉴런에서 오는 것, 그 밖의 뉴런에서 오는 것)
     pub fn value_input_weights(&self, set: &[NeuronId]) -> (f64, f64) {
         let inset: std::collections::HashSet<usize> = set.iter().map(|&x| x as usize).collect();

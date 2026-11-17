@@ -889,6 +889,118 @@ fn op_trial(net: &mut Network, word: &str) -> Vec<bool> {
     fired
 }
 
+/// 기능 시험의 시행 안 시간대 (자극을 넣은 뒤의 틱, 끝 포함): 1~5 / 6~10 / 11~20 / 21~40 / 41~60(보상 창) / 61~160 / 161~300(쉼)
+const OP_BINS: [usize; 7] = [5, 10, 20, 40, 60, 160, 300];
+/// 자극 뒤 처음 몇 틱을 틱마다 따로 볼지
+const OP_FINE: usize = 10;
+/// 문이 열렸다 / 닫혔다고 세는 편차 (조절 수준 ÷ 기준선 − 1)
+const OP_GATE: f64 = 0.25;
+
+/// 기능 시험의 시행 안 관찰값 누적 (출력용. 네트워크 동작에는 관여하지 않는다)
+#[derive(Default, Clone)]
+struct OpObs {
+    n: usize,
+    /// 시간대별 도파민 / 가치 / 예측 뉴런 발화 수
+    da: [u64; 7], val: [u64; 7], pred: [u64; 7],
+    /// 시간대별 출력 뉴런 편차 표본: +OP_GATE 이상 / −OP_GATE 이하 / 표본 수 (뉴런 × 틱)
+    hi: [u64; 7], lo: [u64; 7], samp: [u64; 7],
+    /// 처음 OP_FINE 틱의 틱별 값: 도파민 / 가치 / 예측 발화 수, 그 틱에 처음 발화한 출력 수, 편차 +OP_GATE 이상 표본, 표본 수
+    f_da: [u64; OP_FINE], f_val: [u64; OP_FINE], f_pred: [u64; OP_FINE], f_out: [u64; OP_FINE], f_hi: [u64; OP_FINE], f_samp: [u64; OP_FINE],
+    /// 목표 출력이 처음 발화한 틱 (합, 발화한 시행 수), 출력이 처음 발화한 틱 (합, 출력 수), 도파민 뉴런이 처음 발화한 틱 (합, 시행 수)
+    t_first: (u64, u64), o_first: (u64, u64), d_first: (u64, u64),
+}
+impl OpObs {
+    fn add(&mut self, o: &OpObs) {
+        self.n += o.n;
+        for i in 0..7 { self.da[i] += o.da[i]; self.val[i] += o.val[i]; self.pred[i] += o.pred[i]; self.hi[i] += o.hi[i]; self.lo[i] += o.lo[i]; self.samp[i] += o.samp[i]; }
+        for i in 0..OP_FINE { self.f_da[i] += o.f_da[i]; self.f_val[i] += o.f_val[i]; self.f_pred[i] += o.f_pred[i]; self.f_out[i] += o.f_out[i]; self.f_hi[i] += o.f_hi[i]; self.f_samp[i] += o.f_samp[i]; }
+        self.t_first.0 += o.t_first.0; self.t_first.1 += o.t_first.1;
+        self.o_first.0 += o.o_first.0; self.o_first.1 += o.o_first.1;
+        self.d_first.0 += o.d_first.0; self.d_first.1 += o.d_first.1;
+    }
+    /// 누적한 값을 찍는다. 발화 값 = 그 집단의 뉴런 하나가 한 틱에 발화한 비율(%), 문 값 = 출력 뉴런 표본 중 편차가 기준을 넘은 비율(%)
+    fn print(&self, label: &str, da_n: usize, val_n: usize, pred_n: usize) {
+        if self.n == 0 { println!("      · {label} 0번"); return; }
+        let n = self.n as f64;
+        let avg = |p: (u64, u64)| if p.1 > 0 { format!("{:.1}틱", p.0 as f64 / p.1 as f64) } else { "없음".to_string() };
+        println!("      · {label} {}번:  시행당 출력 수 {:.1}개,  목표 첫 발화 {} ({}번),  출력 첫 발화 평균 {},  도파민 첫 발화 {}",
+            self.n, self.o_first.1 as f64 / n, avg(self.t_first), self.t_first.1, avg(self.o_first), avg(self.d_first));
+        let width = |i: usize| (OP_BINS[i] - if i == 0 { 0 } else { OP_BINS[i - 1] }) as f64;
+        let rate = |c: &[u64; 7], cells: usize| (0..7).map(|i| if cells == 0 { format!("{:>8}", "-") } else { format!("{:>8.2}", c[i] as f64 * 100.0 / (n * width(i) * cells as f64)) }).collect::<String>();
+        let share = |c: &[u64; 7]| (0..7).map(|i| if self.samp[i] == 0 { format!("{:>8}", "-") } else { format!("{:>8.2}", c[i] as f64 * 100.0 / self.samp[i] as f64) }).collect::<String>();
+        println!("          시간대(틱)    {}", ["1~5", "6~10", "11~20", "21~40", "41~60", "61~160", "161~300"].iter().map(|x| format!("{:>8}", x)).collect::<String>());
+        println!("          도파민 %      {}", rate(&self.da, da_n));
+        println!("          가치 %        {}", rate(&self.val, val_n));
+        println!("          예측 %        {}", rate(&self.pred, pred_n));
+        println!("          문 열림 %     {}", share(&self.hi));
+        println!("          문 닫힘 %     {}", share(&self.lo));
+        let fine = |c: &[u64; OP_FINE], cells: usize| (0..OP_FINE).map(|i| if cells == 0 { format!("{:>7}", "-") } else { format!("{:>7.2}", c[i] as f64 * 100.0 / (n * cells as f64)) }).collect::<String>();
+        println!("          틱별           {}", (1..=OP_FINE).map(|t| format!("{:>7}", t)).collect::<String>());
+        println!("          틱별 도파민 %  {}", fine(&self.f_da, da_n));
+        println!("          틱별 가치 %    {}", fine(&self.f_val, val_n));
+        println!("          틱별 예측 %    {}", fine(&self.f_pred, pred_n));
+        println!("          틱별 첫 출력   {}", (0..OP_FINE).map(|i| format!("{:>7.2}", self.f_out[i] as f64 / n)).collect::<String>());
+        println!("          틱별 문 열림 % {}", (0..OP_FINE).map(|i| if self.f_samp[i] == 0 { format!("{:>7}", "-") } else { format!("{:>7.2}", self.f_hi[i] as f64 * 100.0 / self.f_samp[i] as f64) }).collect::<String>());
+    }
+}
+
+/// 기능 시험의 한 시행 전체(300틱)를 돌리면서 시간대별 값을 센다. 진행 순서는 op_trial + (보상) + rest(260) 과 같다:
+/// 입력 4틱, 40틱 동안 출력 읽기, 목표가 나왔고 reward 이면 보상 입력 20틱, 나머지 260틱.
+/// 반환: 출력별 발화 여부, 보상을 줬는지, 이 시행의 관찰값
+fn op_trial_observed(net: &mut Network, word: &str, target: usize, reward: bool) -> (Vec<bool>, bool, OpObs) {
+    let mut fired = vec![false; net.output_count()];
+    let mut o = OpObs { n: 1, ..Default::default() };
+    let mut rewarded = false;
+    let mut d_seen = false;
+    net.drive_text(word, 4);
+    for t in 1..=300usize {
+        if t == 41 && reward && fired[target] { net.drive_reward(true, 20); rewarded = true; }
+        let (d0, v0, p0) = (net.da_spikes, net.val_spikes, net.pred_spikes);
+        net.tick();
+        let (d, v, p) = (net.da_spikes - d0, net.val_spikes - v0, net.pred_spikes - p0);
+        let b = OP_BINS.iter().position(|&e| t <= e).unwrap();
+        o.da[b] += d; o.val[b] += v; o.pred[b] += p;
+        if t <= OP_FINE { o.f_da[t - 1] += d; o.f_val[t - 1] += v; o.f_pred[t - 1] += p; }
+        if d > 0 && !d_seen { d_seen = true; o.d_first = (t as u64, 1); }
+        if t <= 40 {
+            for &id in &net.tick_ids {
+                if let Some(q) = net.output_seq(id as usize) {
+                    if !fired[q] {
+                        fired[q] = true;
+                        o.o_first.0 += t as u64; o.o_first.1 += 1;
+                        if q == target { o.t_first = (t as u64, 1); }
+                        if t <= OP_FINE { o.f_out[t - 1] += 1; }
+                    }
+                }
+            }
+        }
+        // 출력 뉴런의 편차: 처음 OP_FINE 틱은 매 틱, 그 뒤로는 5틱마다 표본
+        if t <= OP_FINE || t % 5 == 0 {
+            let devs = net.deviations_of(1);
+            let hi = devs.iter().filter(|&&x| x >= OP_GATE).count() as u64;
+            let lo = devs.iter().filter(|&&x| x <= -OP_GATE).count() as u64;
+            o.hi[b] += hi; o.lo[b] += lo; o.samp[b] += devs.len() as u64;
+            if t <= OP_FINE { o.f_hi[t - 1] += hi; o.f_samp[t - 1] += devs.len() as u64; }
+        }
+    }
+    (fired, rewarded, o)
+}
+
+/// 뉴런 집단별 편차(조절 수준 ÷ 기준선 − 1) 분포를 한 줄씩 찍는다: 은닉, 출력, 가치
+fn op_print_deviations(net: &Network, when: &str) {
+    println!("  [편차 분포, {when}] 조절 수준 ÷ 기준선 − 1");
+    for (name, which) in [("은닉", 0usize), ("출력", 1), ("가치", 2)] {
+        let v = net.deviations_of(which);
+        if v.is_empty() { println!("      {name}: 조절 신호를 받는 뉴런 없음"); continue; }
+        let n = v.len() as f64;
+        let mean = v.iter().sum::<f64>() / n;
+        let sd = (v.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n).sqrt();
+        let (lo, hi) = v.iter().fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+        println!("      {name} {:>6}개: 평균 {:+.3}, 표준편차 {:.3}, 최소 {:+.3}, 최대 {:+.3}, +{OP_GATE} 이상 {:.2}%, −{OP_GATE} 이하 {:.2}%",
+            v.len(), mean, sd, lo, hi, v.iter().filter(|&&x| x >= OP_GATE).count() as f64 * 100.0 / n, v.iter().filter(|&&x| x <= -OP_GATE).count() as f64 * 100.0 / n);
+    }
+}
+
 /// 기능 시험: 출력만 보고 보상을 줬을 때, 보상받는 출력이 더 자주 나오게 되는지.
 /// 한 네트워크 안에서 순서대로: (1) 보상 없이 반복 — 반복만으로 비율이 변하는지, (2) 목표 출력이 나온 시행에만 보상
 fn op_test(params: &NetParams, trials: usize) {
@@ -917,25 +1029,37 @@ fn op_test(params: &NetParams, trials: usize) {
     // 비교를 출력 하나에 맡기면 흔들림이 크다: 처음에 25~75% 로 나오던 다른 출력 전부의 평균도 같이 본다
     let others: Vec<usize> = (0..nout).filter(|&q| q != target && count[q] * 4 >= probes && count[q] * 4 <= probes * 3).collect();
     println!("값 = 구간별로 그 출력이 나온 시행의 비율. '다른 출력' = 처음에 25~75% 로 나오던 나머지 {}개의 평균\n", others.len());
+    println!("구간마다 아래에 붙는 줄 = 시행 안 시간대별 값 (보상 시행 / 보상 없는 시행으로 나눔). 발화 % = 그 집단 뉴런 하나가 한 틱에 발화한 비율,");
+    println!("문 열림·닫힘 % = 출력 뉴런 표본 중 편차가 +{OP_GATE} 이상 / −{OP_GATE} 이하인 비율 (처음 {OP_FINE}틱은 매 틱, 그 뒤 5틱마다 표본). 틱 = 자극을 넣은 뒤의 틱\n");
+    let (da_n, val_n, pred_n) = (net.da_count(), net.val_count(), net.pred_count());
+    op_print_deviations(&net, "준비 직후");
+    let weights = |net: &Network| { let ((vw, vn), (pw, pn)) = net.slow_input_weights(); format!("가치 입력 가중치 합 {:.4} ({}개),  예측 입력 가중치 합 {:.4} ({}개)", vw, vn, pw, pn) };
+    println!("  [시작] {}\n", weights(&net));
     let block = (trials / 6).max(1);
     for (name, reward) in [("보상 없이 반복", false), ("목표가 나오면 보상", true)] {
         let (mut t_hit, mut c_hit, mut n, mut rewards) = (0usize, 0usize, 0usize, 0usize);
         let mut o_hit = 0usize;
+        let (mut obs_r, mut obs_n) = (OpObs::default(), OpObs::default());
         for t in 1..=trials {
-            let f = op_trial(&mut net, "안녕");
+            let (f, rewarded, o) = op_trial_observed(&mut net, "안녕", target, reward);
             if f[target] { t_hit += 1; }
             if f[control] { c_hit += 1; }
             o_hit += others.iter().filter(|&&q| f[q]).count();
             n += 1;
-            if reward && f[target] { net.drive_reward(true, 20); rewards += 1; }
-            net.rest(260);
+            if rewarded { rewards += 1; obs_r.add(&o); } else { obs_n.add(&o); }
             if t % block == 0 || t == trials {
                 println!("  [{name}] {:>6}번까지:  목표 {:>5.1}%   비교 {:>5.1}%   다른 출력 {:>5.1}%   (보상 {}번)", t, t_hit as f64 * 100.0 / n as f64, c_hit as f64 * 100.0 / n as f64,
                     o_hit as f64 * 100.0 / (n * others.len().max(1)) as f64, rewards);
+                if reward { obs_r.print("보상 시행", da_n, val_n, pred_n); }
+                obs_n.print("보상 없는 시행", da_n, val_n, pred_n);
+                println!("      · {}", weights(&net));
                 t_hit = 0; c_hit = 0; n = 0; rewards = 0; o_hit = 0;
+                obs_r = OpObs::default(); obs_n = OpObs::default();
             }
         }
     }
+    println!();
+    op_print_deviations(&net, "끝");
 }
 
 /// 기능 시험 (입력 여러 개): 입력마다 다른 목표 출력을 정하고, 무작위 순서로 넣으면서 그 입력의 목표가 나온 시행에만 보상.
