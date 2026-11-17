@@ -1016,6 +1016,8 @@ impl Network {
             }
         }
         let mut fresh = vec![[0.0f64; 2]; self.slow_recv.len()];
+        // 받는 뉴런 하나로 들어오는 지연 시냅스는 지연 값이 모두 같아야 한다 (합의 점화식이 받는 뉴런마다 값 하나를 쓴다). 다르면 틀린 값을 내므로 멈춘다
+        let mut rate_seen = vec![0.0f64; self.slow_recv.len()];
         for k in 0..self.slow_syn.len() {
             let (pre, j) = self.slow_syn[k];
             let Some(s) = self.neurons[pre].synapses.get_mut(j) else { continue };
@@ -1024,6 +1026,11 @@ impl Network {
             if !s.slow_fast {
                 fresh[p][0] += s.weight * s.slow1;
                 fresh[p][1] += s.weight * s.slow2;
+                if rate_seen[p] != 0.0 && rate_seen[p] != s.slow_rate {
+                    eprintln!("--slow-events 는 받는 뉴런 하나로 들어오는 지연 시냅스의 지연 값이 서로 다른 배선에서 쓸 수 없습니다 (받는 뉴런 {}: {} 와 {})", s.target, rate_seen[p], s.slow_rate);
+                    std::process::exit(2);
+                }
+                rate_seen[p] = s.slow_rate;
                 self.slow_sum[p][2] = s.slow_rate;
             }
             if (s.slow1 >= 0.001 || s.slow2 >= 0.001) && self.slow_listed.insert(((pre as u64) << 32) | j as u64) {
