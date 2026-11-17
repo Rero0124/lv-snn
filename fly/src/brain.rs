@@ -263,19 +263,23 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
     let mut odor_idx: Vec<usize> = Vec::new();    // 냄새로 켜는 버섯체 세포
     let mut mbon_idx: Vec<usize> = Vec::new();
     let (mut is_kc, mut is_mbon) = (Vec::new(), Vec::new());
+    let mut is_apl: Vec<bool> = Vec::new();
+    // --rest-dump 앞머리: 쉬는 구간 발화가 뛴 보고 시행에서, 쉬는 구간에 발화한 뉴런의 번호를 "앞머리.t<시행>.txt" 로 남긴다 (관찰용)
+    let rest_dump: Option<String> = arg(args, "--rest-dump");
     if extras {
         let text = std::fs::read_to_string("data/mb_neurons.tsv").expect("data/mb_neurons.tsv 없음");
         let names: Vec<String> = drive_dan.as_deref().unwrap_or("").split(',').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect();
         let wanted = |ty: &str| names.iter().any(|nm| ty == nm || (!nm.chars().any(|ch| ch.is_ascii_digit()) && ty.starts_with(nm.as_str())));
         let (mut kc_all, mut all_dan) = (Vec::new(), Vec::new());
         let mut driven_types: std::collections::BTreeMap<String, usize> = Default::default();
-        is_kc = vec![false; n]; is_mbon = vec![false; n];
+        is_kc = vec![false; n]; is_mbon = vec![false; n]; is_apl = vec![false; n];
         for line in text.lines().skip(1) {
             let f: Vec<&str> = line.split('\t').collect();
             let idx: usize = f[0].parse().unwrap();
             match f[1] {
                 "KC" => { kc_all.push(idx); is_kc[idx] = true; }
                 "MBON" => { mbon_idx.push(idx); is_mbon[idx] = true; }
+                "APL" => { is_apl[idx] = true; }
                 "DAN" => { all_dan.push(idx); if wanted(f[2]) { drive_idx.push(idx); *driven_types.entry(f[2].to_string()).or_default() += 1; } }
                 _ => {}
             }
@@ -376,6 +380,16 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
     let mut hears_driven = vec![false; if extras { n } else { 0 }];
     for &d in &drive_idx { for s in &neurons[d].synapses { hears_driven[s.target as usize] = true; } }
     let n_hears = gate_watch.iter().filter(|&&i| hears_driven[i]).count();
+    // 구동 유형을 듣는 뉴런을 받는 쪽으로 가른다: 버섯체 세포 / 버섯체 출력 뉴런 / APL / 그 밖(허브)
+    let hub_idx: Vec<usize> = if extras { (0..n).filter(|&i| hears_driven[i] && !is_kc[i] && !is_mbon[i] && !is_apl[i] && !neurons[i].modulatory).collect() } else { Vec::new() };
+    if extras && !drive_idx.is_empty() {
+        println!("[냄새·도파민 구동] 구동 유형을 듣는 뉴런 {}개 = 버섯체 세포 {} + 버섯체 출력 뉴런 {} + APL {} + 도파민 뉴런 {} + 그 밖 {}",
+            (0..n).filter(|&i| hears_driven[i]).count(), (0..n).filter(|&i| hears_driven[i] && is_kc[i]).count(), (0..n).filter(|&i| hears_driven[i] && is_mbon[i]).count(),
+            (0..n).filter(|&i| hears_driven[i] && is_apl[i]).count(), (0..n).filter(|&i| hears_driven[i] && neurons[i].modulatory).count(), hub_idx.len());
+    }
+    // 굳은 양의 처음부터의 부호 있는 누계: [버섯체 세포→출력, 단맛 사이, 그 밖] 과 듣는 뉴런을 받는 쪽으로 가른 것 [보내는 쪽 버섯체 세포 / 아님] × [받는 쪽 버섯체 세포 / APL / 그 밖]
+    let mut cum_grp = [0.0f64; 3];
+    let mut cum_h = [[0.0f64; 3]; 2];
     // (시행 수, 발화한 도파민 뉴런, 그중 구동 대상, 구동 중 한 번이라도 문이 열린 뉴런, 그중 그 시행에 발화한 뉴런, 버섯체 출력 뉴런 발화, 발화한 냄새 세포)
     let mut ex_acc = [0.0f64; 7];
     // 평소 발화를 주는 도파민 뉴런의 발화 수: (자극 구간 틱 수, 발화 수, 휴지 구간 틱 수, 발화 수) — 구동 중인 틱은 빼고 센다
@@ -423,6 +437,7 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
         let n_ref = ref_active.iter().filter(|&&b| b).count();
         let mut counts = vec![0u32; n];
         let (mut total, mut rest_total) = (0u64, 0u64);
+        let mut tick_counts: Vec<u32> = if extras { vec![0; (stim_ticks + rest_ticks) as usize] } else { Vec::new() };
         for t in 0..stim_ticks + rest_ticks {
             tick += 1;
             let stimulating = t < stim_ticks;
@@ -484,6 +499,7 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
                 }
             }
             if stimulating { total += spikes.len() as u64; } else { rest_total += spikes.len() as u64; }
+            if extras { tick_counts[t as usize] = spikes.len() as u32; }
             if !tonic_idx.is_empty() && !driving {
                 let k = if stimulating { 0 } else { 2 };
                 dan_rate[k] += 1.0; dan_rate[k + 1] += spikes.iter().filter(|&&id| is_tonic[id as usize]).count() as f64;
@@ -521,6 +537,8 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
         }
         let cycle = (trial - 1) / stims.len() + 1;
         if extras {
+            // 시행마다 한 줄: 쉬는 구간 발화가 어느 시행에 켜지고 꺼지는지 (관찰용)
+            println!("  [시행] {trial} 틱 {tick} 자극발화 {total} 휴지발화 {rest_total} MN9 {}", counts[mn9]);
             ex_acc[0] += 1.0;
             ex_acc[1] += all_dan_idx.iter().filter(|&&i| counts[i] > 0).count() as f64;
             ex_acc[2] += drive_idx.iter().filter(|&&i| counts[i] > 0).count() as f64;
@@ -670,6 +688,7 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
                 let mut grp = [[0.0f64; 3]; 3]; // (절댓값 합, 부호 있는 합, 바뀐 시냅스 수)
                 // "그 밖"을 다시 나눈다: [버섯체 세포 → 구동 유형을 듣는 다른 뉴런, 버섯체 세포가 아닌 것 → 버섯체 출력 뉴런, 버섯체 세포가 아닌 것 → 구동 유형을 듣는 다른 뉴런, 구동 유형을 듣지 않는 뉴런으로]
                 let mut oth = [[0.0f64; 3]; 4];
+                let mut hsp = [[[0.0f64; 2]; 3]; 2]; // [보내는 쪽 버섯체 세포 / 아님][받는 쪽 버섯체 세포 / APL / 그 밖] (절댓값 합, 부호 있는 합)
                 for (pre, (nr, pw)) in neurons.iter().zip(prev_w.iter_mut()).enumerate() {
                     for (s, w0) in nr.synapses.iter().zip(pw.iter_mut()) {
                         let d = s.weight - *w0 as f64;
@@ -677,6 +696,10 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
                             let t = s.target as usize;
                             let gi = if is_kc[pre] && is_mbon[t] { 0 } else if sugar(pre) && sugar(t) { 1 } else { 2 };
                             grp[gi][0] += d.abs(); grp[gi][1] += d; if d.abs() > 1e-6 { grp[gi][2] += 1.0; }
+                            if hears_driven[t] && !is_mbon[t] {
+                                let (a, b) = (if is_kc[pre] { 0 } else { 1 }, if is_kc[t] { 0 } else if is_apl[t] { 1 } else { 2 });
+                                hsp[a][b][0] += d.abs(); hsp[a][b][1] += d;
+                            }
                             if gi == 2 {
                                 let oi = if !hears_driven[t] { 3 } else if is_kc[pre] { 0 } else if is_mbon[t] { 1 } else { 2 };
                                 oth[oi][0] += d.abs(); oth[oi][1] += d; if d.abs() > 1e-6 { oth[oi][2] += 1.0; }
@@ -689,9 +712,38 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
                     grp[0][0], grp[0][1], grp[0][2], grp[1][0], grp[1][1], grp[1][2], grp[2][0], grp[2][1], grp[2][2]);
                 println!("        구동·냄새 | '그 밖'의 굳은 양을 다시 나눔 (절댓값 합 / 부호 있는 합 / 바뀐 시냅스 수): 버섯체 세포→구동 유형을 듣는 다른 뉴런 {:.5} / {:+.5} / {:.0}, 버섯체 세포 아닌 것→버섯체 출력 뉴런 {:.5} / {:+.5} / {:.0}, 버섯체 세포 아닌 것→구동 유형을 듣는 다른 뉴런 {:.5} / {:+.5} / {:.0}, 구동 유형을 듣지 않는 뉴런으로 {:.5} / {:+.5} / {:.0}",
                     oth[0][0], oth[0][1], oth[0][2], oth[1][0], oth[1][1], oth[1][2], oth[2][0], oth[2][1], oth[2][2], oth[3][0], oth[3][1], oth[3][2]);
+                for gi in 0..3 { cum_grp[gi] += grp[gi][1]; }
+                for a in 0..2 { for b in 0..3 { cum_h[a][b] += hsp[a][b][1]; } }
+                println!("        구동·냄새 | 구동 유형을 듣는 뉴런(출력 뉴런 제외)으로 들어가는 굳은 양을 받는 쪽으로 가름 (절댓값 합 / 부호 있는 합): 버섯체 세포→버섯체 세포 {:.5} / {:+.5}, 버섯체 세포→APL {:.5} / {:+.5}, 버섯체 세포→그 밖 {:.5} / {:+.5}, 버섯체 세포 아닌 것→버섯체 세포 {:.5} / {:+.5}, 아닌 것→APL {:.5} / {:+.5}, 아닌 것→그 밖 {:.5} / {:+.5}",
+                    hsp[0][0][0], hsp[0][0][1], hsp[0][1][0], hsp[0][1][1], hsp[0][2][0], hsp[0][2][1], hsp[1][0][0], hsp[1][0][1], hsp[1][1][0], hsp[1][1][1], hsp[1][2][0], hsp[1][2][1]);
+                println!("        구동·냄새 | 처음부터의 부호 있는 누계: 버섯체 세포→출력 뉴런 {:+.5}, 단맛 활성 뉴런 사이 {:+.5}, 그 밖 {:+.5} | 버섯체 세포→버섯체 세포 {:+.5}, 버섯체 세포→APL {:+.5}, 버섯체 세포→그 밖 {:+.5}, 아닌 것→버섯체 세포 {:+.5}, 아닌 것→APL {:+.5}, 아닌 것→그 밖 {:+.5}",
+                    cum_grp[0], cum_grp[1], cum_grp[2], cum_h[0][0], cum_h[0][1], cum_h[0][2], cum_h[1][0], cum_h[1][1], cum_h[1][2]);
+                {
+                    // 그 밖(허브)으로 들어오는 가중치 합: 굳은 것과 일시 성분을 따로 (관찰용)
+                    let (mut w, mut ws, mut cnt) = (0.0f64, 0.0f64, 0usize);
+                    for &h in &hub_idx { for &(pre, k) in &neurons[h].incoming { let sy = &neurons[pre].synapses[k];
+                        w += sy.weight; cnt += 1;
+                        if sy.w_short != 0.0 { ws += sy.w_short * sy.short_decay.powi(tick.saturating_sub(sy.t).min(1_000_000) as i32); } } }
+                    let ex = |v: &[usize]| if v.is_empty() { 0.0 } else { v.iter().map(|&i| neurons[i].excitability).sum::<f64>() / v.len() as f64 };
+                    println!("        구동·냄새 | 그 밖(허브) {}개로 들어오는 시냅스 {cnt}개: 굳은 가중치 합 {:.4}, 일시 성분 합 {:+.4} | 허브의 감응도 평균 {:.4}, 이번 시행에 발화한 허브 {}개",
+                        hub_idx.len(), w, ws, ex(&hub_idx), hub_idx.iter().filter(|&&i| counts[i] > 0).count());
+                    // 자극 구간의 틱별 발화 수와 쉬는 구간의 50틱 묶음 (이번 시행)
+                    let st: Vec<String> = tick_counts[..stim_ticks as usize].iter().map(|x| x.to_string()).collect();
+                    let rs: Vec<String> = tick_counts[stim_ticks as usize..].chunks(50).map(|c| c.iter().map(|&x| x as u64).sum::<u64>().to_string()).collect();
+                    println!("        구동·냄새 | 이번 시행의 자극 구간 틱별 발화 수: {} | 쉬는 구간 50틱 묶음: {}", st.join(" "), rs.join(" "));
+                }
                 {
                     // 이번 시행의 쉬는 구간에 발화한 뉴런: 종류별, 그리고 무리별 (관찰용)
                     let ra: Vec<usize> = (0..n).filter(|&i| rest_active[i]).collect();
+                    {
+                        let exm = |v: &Vec<usize>| if v.is_empty() { 0.0 } else { v.iter().map(|&i| neurons[i].excitability).sum::<f64>() / v.len() as f64 };
+                        let act: Vec<usize> = ra.iter().copied().filter(|&i| !is_tonic[i]).collect();
+                        let quiet: Vec<usize> = (0..n).filter(|&i| !rest_active[i]).collect();
+                        println!("        구동·냄새 | 쉬는 구간에 발화한 뉴런(평소 발화 도파민 제외) {}개의 감응도 평균 {:.4}, 발화하지 않은 뉴런의 감응도 평균 {:.4}", act.len(), exm(&act), exm(&quiet));
+                        if act.len() > 200 { if let Some(pre) = &rest_dump {
+                            std::fs::write(format!("{pre}.t{trial}.txt"), act.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("\n")).ok();
+                        } }
+                    }
                     let mut by: std::collections::BTreeMap<&str, usize> = Default::default();
                     if !classes.is_empty() { for &i in &ra { *by.entry(classes[i].as_str()).or_default() += 1; } }
                     let mut rows: Vec<(&str, usize)> = by.into_iter().collect();
