@@ -100,7 +100,20 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
     // 발화 빈도 적응 시험: 발화마다 임계값 +sfa_inc, 매 틱 기본값(0.5) 쪽으로 sfa_decay 배 복귀
     let sfa_inc: f64 = arg(args, "--sfa-inc").unwrap_or(0.0);
     let sfa_decay: f64 = arg(args, "--sfa-decay").unwrap_or(0.98);
-    let opt = plasticity::PlasticityOptions {
+    // --snn-path: snn 본체가 쓰는 학습 경로를 켠다 (snn/src/network.rs 의 apply_dopamine_options 에서 --short-tau 를 줬을 때와 같은 설정).
+    //   도파민 문: STDP·iSTDP 는 흔적만 남기고, 받는 뉴런의 조절 수준이 자기 기준선에서 ±25% 넘게 벗어난 동안에만 흔적이 가중치로 굳는다
+    //             (mod_gate = --da-gain, 기본 0.05 / mod_baseline = true / gate_base = 0)
+    //   일시적 변화: STDP 의 변화는 시냅스의 일시적인 부분(w_short)에 바로 반영되고 --short-tau(기본 2000)틱에 걸쳐 사라진다
+    //   조절 신호는 --dan-mod 와 같이 세포 분류가 DAN 인 뉴런의 출력이다 (이 옵션이 --dan-mod 를 함께 켠다).
+    //   snn 과 다른 점: 도파민 뉴런이 스스로 발화하지 않고(배선에서 들어오는 입력으로만 발화), 보상 입력이 없고,
+    //   도파민 뉴런이 닿지 않는 뉴런은 문이 열리지 않아 그 입력 시냅스의 변화가 모두 일시적이다.
+    // --stdp-rest: 휴지 구간에도 STDP 와 굳히기를 돌린다 (snn 은 모든 틱에 돌린다. live 의 기본은 자극 중에만)
+    let snn_path = flag(args, "--snn-path");
+    let da_gain: f64 = arg(args, "--da-gain").unwrap_or(0.05);
+    let short_tau: f64 = arg(args, "--short-tau").unwrap_or(2000.0);
+    let short_d = (-1.0 / short_tau.max(1.0)).exp();
+    let stdp_rest = flag(args, "--stdp-rest");
+    let mut opt = plasticity::PlasticityOptions {
         stdp_on_inhibitory: !flag(args, "--no-inh-stdp"),
         ltd_scale: arg(args, "--ltd-scale").unwrap_or(1.0),
         stdp_scale: arg(args, "--stdp-scale").unwrap_or(1.0),
@@ -130,6 +143,12 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
             mod_gate: arg(args, "--mod-gate"),
             gate_base: arg(args, "--gate-base").unwrap_or(0.0), mod_baseline: false, pred_eta: 0.0, short_decay: None, val_eta: 0.0,
     };
+    if snn_path {
+        opt.mod_gate = Some(da_gain);
+        opt.gate_base = 0.0;
+        opt.mod_baseline = true;
+        opt.short_decay = Some(short_d);
+    }
     let n = c.n();
     // 자극 목록: A = 단맛(기본). --stim2 GROUP 을 주면 그 감각뉴런 그룹을 B 로 추가해 A, B 를 번갈아 준다
     let mut stims: Vec<Vec<usize>> = vec![stim.to_vec()];
@@ -164,15 +183,40 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
     for nr in neurons.iter_mut() { if nr.inhibitory { for s in &mut nr.synapses { s.weight = (s.weight * inh_gain).min(1.0); } } }
     // --dan-mod: 도파민 뉴런(세포 분류 DAN, data/mb_neurons.tsv)을 흥분성 대신 조절 뉴런으로 취급한다
     let mut dan_idx: Vec<usize> = Vec::new();
-    if flag(args, "--dan-mod") {
+    let mut dan_types: Vec<String> = Vec::new();
+    if flag(args, "--dan-mod") || snn_path {
         let text = std::fs::read_to_string("data/mb_neurons.tsv").expect("data/mb_neurons.tsv 없음");
         for line in text.lines().skip(1) {
             let f: Vec<&str> = line.split('\t').collect();
-            if f[1] == "DAN" { dan_idx.push(f[0].parse().unwrap()); }
+            if f[1] == "DAN" { dan_idx.push(f[0].parse().unwrap()); dan_types.push(f[2].chars().take(3).collect()); }
         }
         for &i in &dan_idx { neurons[i].inhibitory = false; neurons[i].modulatory = true; }
         let active_ref = dan_idx.iter().filter(|&&i| refs[0][i] >= 1.0).count();
         println!("도파민 뉴런 {}개를 조절 뉴런으로 취급. 기준 모델에서 단맛에 반응하는 도파민 뉴런: {}개", dan_idx.len(), active_ref);
+    }
+    // 조절 신호가 닿는 범위 (관찰용): 도파민 뉴런의 출력이 닿는 뉴런 수
+    let mut dan_target = vec![false; n];
+    if snn_path {
+        let mut by_type: std::collections::BTreeMap<String, (usize, usize, Vec<bool>)> = Default::default();
+        let mut syn_total = 0usize;
+        for (&i, ty) in dan_idx.iter().zip(&dan_types) {
+            let e = by_type.entry(ty.clone()).or_insert((0, 0, vec![false; n]));
+            e.0 += 1;
+            for s in &neurons[i].synapses { dan_target[s.target as usize] = true; e.2[s.target as usize] = true; e.1 += 1; syn_total += 1; }
+        }
+        let cnt = |v: &[bool]| v.iter().filter(|&&b| b).count();
+        let n_t = cnt(&dan_target);
+        let ref_hit = (0..n).filter(|&i| dan_target[i] && refs[0][i] >= 1.0 && !stims[0].contains(&i)).count();
+        let ref_all = (0..n).filter(|&i| refs[0][i] >= 1.0 && !stims[0].contains(&i)).count();
+        println!("[snn 경로] 도파민 문 (세기 {da_gain}, 기준선 방식) + 일시적 변화 (시간 상수 {short_tau}틱), 휴지 구간 STDP·굳히기 {}",
+            if stdp_rest { "켬" } else { "끔 (자극 중에만)" });
+        println!("[snn 경로] 도파민 뉴런의 출력이 닿는 뉴런: {n_t}개 (전체 {n} 의 {:.1}%), 도파민 뉴런의 출력 연결 {syn_total}개. 그중 다른 도파민 뉴런 {}개",
+            100.0 * n_t as f64 / n as f64, dan_idx.iter().filter(|&&i| dan_target[i]).count());
+        println!("[snn 경로] 종류별: {}", by_type.iter().map(|(k, (a, b, v))| format!("{k} {a}개 → 표적 {}개 (연결 {b})", cnt(v))).collect::<Vec<_>>().join(", "));
+        println!("[snn 경로] 기준 모델에서 단맛에 활성인 뉴런 {ref_all}개 중 도파민이 닿는 것: {ref_hit}개. MN9 에 닿는가: {}. 단맛 감각뉴런 {}개 중 닿는 것: {}개",
+            if dan_target[mn9] { "예" } else { "아니오" }, stims[0].len(), stims[0].iter().filter(|&&i| dan_target[i]).count());
+        // 일시적인 부분의 감쇠 배수: 조절 뉴런이 아닌 모든 뉴런의 출력 시냅스에 (snn 은 도파민·보상·예측 뉴런을 뺀 모든 시냅스에 넣는다)
+        for nr in neurons.iter_mut() { if !nr.modulatory { for s in &mut nr.synapses { s.short_decay = short_d; } } }
     }
     // 자발 발화 배수 (기준 모델은 자발 발화가 없다)
     let spont: f64 = arg(args, "--spont-scale").unwrap_or(1.0);
@@ -303,7 +347,7 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
             }
             if stimulating { total += spikes.len() as u64; } else { rest_total += spikes.len() as u64; }
             // snn 과 같이 자극 중에만 STDP (idle 틱에는 없음)
-            if stdp && stimulating { plasticity::stdp_step(&mut neurons, &spikes, tick, &opt); }
+            if stdp && (stimulating || stdp_rest) { plasticity::stdp_step(&mut neurons, &spikes, tick, &opt); }
             if homeo && tick % 10_000 == 0 {
                 match homeo_own {
                     Some(eta) => neurons.par_iter_mut().for_each(|nr| nr.homeostasis_own(10_000.0, eta, 0.1)),
@@ -389,6 +433,37 @@ pub fn run_live(c: &Connectome, args: &[String], stim: &[usize], mn9: usize) {
                 let fy: Vec<f64> = uni.iter().map(|&i| counts[i] as f64).collect();
                 println!("        ↑ 자극 {} (주기 {cycle}) | 첫 반응 대비: 활성집합 겹침 {:.2}, 순위상관 {:.2}",
                     stim_names[cur], if uni.is_empty() { 0.0 } else { inter as f64 / uni.len() as f64 }, crate::spearman(&fx, &fy));
+            }
+            if snn_path {
+                // snn 경로의 상태 (관찰용, 읽기만 한다). 일시적인 부분은 마지막으로 맞춘 틱에서 지금까지의 감쇠를 계산해서 본다
+                let (mut cnt, mut sh_n, mut el_n, mut eff_up, mut eff_down, mut sh_abs) = (0usize, 0usize, 0usize, 0usize, 0usize, 0.0f64);
+                let (mut cnt_t, mut up_t, mut down_t) = (0usize, 0usize, 0usize);
+                for (nr, init) in neurons.iter().zip(&initial) {
+                    for (s, &w0) in nr.synapses.iter().zip(init) {
+                        cnt += 1;
+                        let ws = if s.w_short != 0.0 { s.w_short * s.short_decay.powi(tick.saturating_sub(s.t).min(1_000_000) as i32) } else { 0.0 };
+                        if ws.abs() > 0.01 { sh_n += 1; }
+                        sh_abs += ws.abs();
+                        if s.elig != 0.0 { el_n += 1; }
+                        let d = s.weight + ws - w0 as f64;
+                        if d > 0.01 { eff_up += 1; } else if d < -0.01 { eff_down += 1; }
+                        if dan_target[s.target as usize] {
+                            cnt_t += 1;
+                            let dp = s.weight - w0 as f64;
+                            if dp > 0.01 { up_t += 1; } else if dp < -0.01 { down_t += 1; }
+                        }
+                    }
+                }
+                let based = neurons.iter().filter(|x| x.mod_base > 1e-6).count();
+                let (mut open_up, mut open_down) = (0usize, 0usize);
+                for x in neurons.iter() {
+                    if x.mod_base > 1e-6 { let r = x.mod_level / x.mod_base - 1.0; if r >= plasticity::MOD_DEADBAND { open_up += 1; } else if r <= -plasticity::MOD_DEADBAND { open_down += 1; } }
+                }
+                let pc = |a: usize, b: usize| if b > 0 { 100.0 * a as f64 / b as f64 } else { 0.0 };
+                println!("        snn 경로 | 굳은 변화(위 강화%·약화%)와 별개로, 일시 성분 포함 강화 {:.3}% 약화 {:.3}% | 일시 성분이 0.01 넘는 시냅스 {:.3}%, 평균 크기 {:.6} | 흔적이 남은 시냅스 {:.3}%",
+                    pc(eff_up, cnt), pc(eff_down, cnt), pc(sh_n, cnt), sh_abs / cnt.max(1) as f64, pc(el_n, cnt));
+                println!("        snn 경로 | 도파민이 닿는 뉴런으로 들어가는 시냅스 {cnt_t}개 중 굳은 강화 {:.3}% 약화 {:.3}% | 기준선이 잡힌 뉴런 {based}개, 시행 끝(휴지 뒤)에 조절 수준이 기준선보다 25% 넘게 높은 뉴런 {open_up}, 낮은 뉴런 {open_down}",
+                    pc(up_t, cnt_t), pc(down_t, cnt_t));
             }
             {
                 // 지난 보고 뒤의 모든 시행 평균 (윗줄들은 이번 한 시행의 값)
