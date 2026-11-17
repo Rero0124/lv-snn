@@ -432,6 +432,7 @@ impl Neuron {
                 s.weight = 0.0;
                 s.count = 0;
                 s.elig = 0.0;
+                s.w_short = 0.0; // 일시 성분도 지운다: 남겨 두면 죽은 연결이 이번 틱에 일시 성분만큼 한 번 더 전달한다
             }
         }
         self.pruned_n += removed;
