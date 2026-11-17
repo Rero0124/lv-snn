@@ -174,7 +174,8 @@ pub struct NetParams {
 /// wake_check 의 상태와 세는 값 (관찰용)
 #[derive(Default)]
 struct WakeCheck {
-    /// 뉴런별 표시: 1 = 깨어남(전위 변화를 받음 / 불응기 끝 / 바깥 자극), 2 = 조절 신호를 받음. now 는 이번 틱, next 는 다음 틱의 것
+    /// 뉴런별 표시: 1 = 전위 변화를 받음 / 바깥 자극, 4 = 불응기가 이 틱에 끝남, 2 = 조절 신호를 받음.
+    /// 첫째 규칙 = 셋 중 하나, 둘째 규칙 = 1 또는 4 (조절 신호 제외), 셋째 규칙 = 실행 큐(queue)에 있음. now 는 이번 틱, next 는 다음 틱의 것
     now: Vec<u8>,
     next: Vec<u8>,
     /// 지난 틱 발화 판정 직후의 전위, 이번 틱 시작 때의 전위, 감쇠 직후의 전위, 판정 직전의 (전위 + 수상돌기 기여), 넘어야 하는 문턱(상대 불응기면 2배, 절대 불응기면 무한대)
@@ -187,10 +188,13 @@ struct WakeCheck {
     started: bool,
     /// 구간과 누계: [뉴런·틱 수, 깨어난 수(조절 포함), 깨어난 수(조절 제외), 발화 수, 놓친 발화(조절 포함 규칙), 놓친 발화(조절 제외 규칙),
     ///  이유: 자발 발화, 잡음, 지속 입력(tonic)이 있는 뉴런, 그 밖, 그 밖 가운데 불응기 안, 놓친 전위 변화, 조절 신호만 받고(깨어나지 않고) 발화한 수,
-    ///  그 발화의 이유: 자발 발화, 잡음, 지속 입력, 그 밖, 그 밖 가운데 불응기 안]
+    ///  그 발화의 이유: 자발 발화, 잡음, 지속 입력, 그 밖, 그 밖 가운데 불응기 안,
+    ///  셋째 규칙: 큐에 있던 수, 놓친 발화, 그 이유(자발 발화, 잡음, 지속 입력, 그 밖, 그 밖 가운데 불응기 안)]
     /// 기준선을 잡는 준비 구간(2,300틱)은 idle_tick 으로 돌므로 여기에 들어오지 않는다
-    acc: [u64; 18],
-    total: [u64; 18],
+    acc: [u64; 25],
+    total: [u64; 25],
+    /// 셋째 규칙의 실행 큐: 깨어난 뉴런은 (전위 + 수상돌기 기여 + 잡음 폭 < 적응을 0 으로 놓은 문턱)이 될 때까지 남는다
+    queue: Vec<bool>,
 }
 
 /// 받기 문이 보는 발화율
@@ -1039,7 +1043,7 @@ impl Network {
         let n = self.neurons.len();
         match stage {
             0 => {
-                if w.next.len() != n { w.next = vec![0; n]; w.pot_end = vec![0.0; n]; w.started = false; }
+                if w.next.len() != n { w.next = vec![0; n]; w.pot_end = vec![0.0; n]; w.queue = vec![false; n]; w.started = false; }
                 w.now = std::mem::replace(&mut w.next, vec![0; n]);
                 // 지난 틱의 발화 판정 뒤로 전위가 달라졌는데 전달을 받았다는 표시가 없으면 놓친 전위 변화다
                 if w.started { for i in 0..n { if self.neurons[i].potential != w.pot_end[i] && w.now[i] & 1 == 0 { w.acc[11] += 1; } } }
@@ -1060,16 +1064,21 @@ impl Network {
                         let abs_ref = (if x.abs_refractory > 0 { x.abs_refractory } else if x.inhibitory { 2 } else { 4 }) * x.refractory_scale;
                         let rel_ref = (if x.rel_refractory > 0 { x.rel_refractory } else if x.inhibitory { 4 } else { 10 }) * x.refractory_scale;
                         let elapsed = now.saturating_sub(last);
-                        if elapsed == rel_ref.max(abs_ref) { w.now[i] |= 1; }   // 불응기(절대 + 상대)가 이 틱에 끝남
+                        if elapsed == rel_ref.max(abs_ref) { w.now[i] |= 4; }   // 불응기(절대 + 상대)가 이 틱에 끝남
                         if elapsed < abs_ref { bar = f64::INFINITY; refr = true; } else if elapsed < rel_ref { bar = adj * 2.0; refr = true; }
                     } }
                     w.base.push(x.potential + x.dendritic_drive());
                     w.bar.push(bar);
                     w.refr.push(refr);
                 }
+                // 셋째 규칙: 전위 변화나 바깥 자극을 받은 뉴런이 큐에 들어간다. 지속 입력이 있는 뉴런은 늘 큐에 있다.
+                // 항상성이 감응도를 바꾼 다음 틱(1만 틱 갱신 뒤)에는 모두 한 번 판정한다. 불응기가 끝나는 틱에는 따로 깨우지 않는다
+                let all = now % 10_000 == 1;
+                for (i, x) in self.neurons.iter().enumerate() { if all || w.now[i] & 1 != 0 || x.tonic > 0.0 { w.queue[i] = true; } }
                 w.acc[0] += n as u64;
                 w.acc[1] += w.now.iter().filter(|&&f| f != 0).count() as u64;
-                w.acc[2] += w.now.iter().filter(|&&f| f & 1 != 0).count() as u64;
+                w.acc[2] += w.now.iter().filter(|&&f| f & 5 != 0).count() as u64;
+                w.acc[18] += w.queue.iter().filter(|&&q| q).count() as u64;
             }
         }
         self.wake = Some(w);
@@ -1083,16 +1092,25 @@ impl Network {
         for &id in fired {
             let i = id as usize;
             if w.now[i] == 0 { w.acc[4] += 1; }
-            if w.now[i] & 1 != 0 { continue; }
-            w.acc[5] += 1;
+            if w.now[i] & 5 != 0 && w.queue[i] { continue; }
             let x = &self.neurons[i];
             let amp = self.noise_amp.get(i).copied().unwrap_or(self.noise_range);
             // 이유: 0 자발 발화, 1 잡음, 2 지속 입력, 3 그 밖
             let why = if x.tonic > 0.0 { 2 } else if w.base[i] >= w.bar[i] { 3 } else if w.base[i] + amp > w.bar[i] { 1 } else if x.spont_scale > 0.0 { 0 } else { 3 };
+            // 셋째 규칙: 큐에 없었는데 발화함
+            if !w.queue[i] { w.acc[19] += 1; w.acc[20 + why] += 1; if why == 3 && w.refr[i] { w.acc[24] += 1; } }
+            if w.now[i] & 5 != 0 { continue; }
+            w.acc[5] += 1;
             w.acc[6 + why] += 1;
             if why == 3 && w.refr[i] { w.acc[10] += 1; }
             // 조절 신호만 받은 뉴런이 발화함: 발화 판정은 조절 수준을 읽지 않으므로, 이 발화의 이유도 위와 같이 가른다
             if w.now[i] == 2 { w.acc[12] += 1; w.acc[13 + why] += 1; if why == 3 && w.refr[i] { w.acc[17] += 1; } }
+        }
+        // 셋째 규칙: 판정을 마친 뉴런 가운데, 가장 큰 잡음을 더해도 적응 0 의 문턱에 못 미치는 것은 큐에서 뺀다 (새 입력 없이는 발화할 수 없다). 지속 입력이 있는 뉴런은 빼지 않는다
+        for (i, x) in self.neurons.iter().enumerate() {
+            if !w.queue[i] || x.tonic > 0.0 { continue; }
+            let amp = self.noise_amp.get(i).copied().unwrap_or(self.noise_range);
+            if x.potential + x.dendritic_drive() + amp < x.self_threshold * x.threshold_scale / x.excitability { w.queue[i] = false; }
         }
         w.pot_end = self.neurons.iter().map(|x| x.potential).collect();
         w.started = true;
@@ -1102,12 +1120,12 @@ impl Network {
     /// wake_check: 1000틱마다 구간 값과 누계를 찍는다
     fn wake_report(&mut self) {
         let Some(w) = self.wake.as_mut() else { return };
-        for k in 0..18 { w.total[k] += w.acc[k]; }
-        let line = |a: &[u64; 18]| format!("깨어난 비율: 조절 포함 {:.1}%, 조절 제외 {:.1}% | 발화 {} | 깨어나지 않았는데 발화: 조절 포함 규칙 {}, 조절 제외 규칙 {} (자발 발화 {}, 잡음 {}, 지속 입력(tonic)이 있는 뉴런 {}, 그 밖 {} — 그중 불응기 안 {}) | 조절 신호만 받고 발화 {} (자발 발화 {}, 잡음 {}, 지속 입력 {}, 그 밖 {} — 그중 불응기 안 {}) | 놓친 전위 변화 {}",
-            a[1] as f64 / a[0].max(1) as f64 * 100.0, a[2] as f64 / a[0].max(1) as f64 * 100.0, a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[12], a[13], a[14], a[15], a[16], a[17], a[11]);
+        for k in 0..25 { w.total[k] += w.acc[k]; }
+        let line = |a: &[u64; 25]| format!("깨어난 비율: 조절 포함 {:.1}%, 조절 제외 {:.1}% | 발화 {} | 깨어나지 않았는데 발화: 조절 포함 규칙 {}, 조절 제외 규칙 {} (자발 발화 {}, 잡음 {}, 지속 입력(tonic)이 있는 뉴런 {}, 그 밖 {} — 그중 불응기 안 {}) | 조절 신호만 받고 발화 {} (자발 발화 {}, 잡음 {}, 지속 입력 {}, 그 밖 {} — 그중 불응기 안 {}) | 놓친 전위 변화 {} | 셋째 규칙(큐에 남기): 큐에 있던 비율 {:.1}%, 큐에 없었는데 발화 {} (자발 발화 {}, 잡음 {}, 지속 입력 {}, 그 밖 {} — 그중 불응기 안 {})",
+            a[1] as f64 / a[0].max(1) as f64 * 100.0, a[2] as f64 / a[0].max(1) as f64 * 100.0, a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[12], a[13], a[14], a[15], a[16], a[17], a[11], a[18] as f64 / a[0].max(1) as f64 * 100.0, a[19], a[20], a[21], a[22], a[23], a[24]);
         println!("[wake-check] 틱 {} | 구간 | {}", self.global_tick, line(&w.acc));
         println!("[wake-check] 틱 {} | 누계 | {}", self.global_tick, line(&w.total));
-        w.acc = [0; 18];
+        w.acc = [0; 25];
     }
 
     /// slow_check: 1000틱마다 확인 줄을 찍는다
