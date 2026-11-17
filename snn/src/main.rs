@@ -120,6 +120,32 @@ fn main() {
     if let Some(v) = num("--compete") { params.compete = v; }
     if let Some(v) = num("--new-spread") { params.new_spread = v; }
     if let Some(v) = num("--min-weight") { params.min_weight = v; }
+    // --seed N: 배선 씨앗 (초기 배선까지만 같아진다. 워밍업과 실행 중의 난수에는 씨앗이 없다) / --scatter-co: 처음부터 있던 접점의 기한을 흩는다
+    if let Some(v) = num("--seed") { params.seed = Some(v as u64); }
+    if args.iter().any(|a| a == "--scatter-co") { params.scatter_co = true; }
+    // --act-target K: 활동 목표 = K × 자기 자발 발화 확률 / --grow-gate fast|slow|both: 받기 문 / --prune-act E: 활동 의존 소멸의 지수
+    if let Some(v) = num("--act-target") { params.act_target = Some(v); }
+    if let Some(i) = args.iter().position(|a| a == "--grow-gate") {
+        params.grow_gate = match args.get(i + 1).map(|s| s.as_str()) {
+            Some("fast") => Some(network::GateMode::Fast),
+            Some("slow") => Some(network::GateMode::Slow),
+            Some("both") => Some(network::GateMode::Both),
+            other => { eprintln!("[오류] --grow-gate 는 fast, slow, both 중 하나여야 한다 (받은 값: {:?})", other); std::process::exit(2); }
+        };
+    }
+    if let Some(v) = num("--prune-act") { params.prune_act = v; }
+    if params.act_target.is_some() && params.spont_fixed.is_none() {
+        println!("[경고] --act-target 을 --spont-fixed 없이 주면 목표(K × 자발 발화 확률)가 1만 틱마다의 갱신에서 움직인다");
+    }
+    if (params.grow_gate.is_some() || params.prune_act > 0.0) && params.act_target.is_none() {
+        println!("[경고] --grow-gate 와 --prune-act 는 --act-target 이 없으면 효과가 없다 (목표가 없다)");
+    }
+    if (params.act_target.is_some() || params.scatter_co) && params.grow.is_none() {
+        println!("[경고] --act-target, --grow-gate, --prune-act, --scatter-co 는 --grow 가 없으면 효과가 없다");
+    }
+    if params.prune_act > 0.0 && params.compete > 0.0 {
+        println!("[경고] --prune-act 와 --compete 는 같이 쓰지 않는다 (둘 다 받는 쪽 점검의 수명을 줄인다)");
+    }
     // --needs-test: 결핍 정도에 따라 같은 감각 입력이 도파민을 일으키는 정도가 달라지는지
     if args.iter().any(|a| a == "--needs-test") {
         let mut net = Network::with_params(params.clone());
@@ -241,7 +267,8 @@ fn main() {
     // --dev-test TICKS: 발달 과정 점검. 자발 발화와 가끔 들어오는 자극만으로 돌리며 시냅스 수의 변화를 본다
     if let Some(n) = num("--dev-test") {
         params.dopamine = true;
-        dev_test(&params, n as u64);
+        // --report N: 보고 간격을 N틱으로 고정 (없으면 전체의 1/60, 최소 1000틱) / --dev-no-stim: 단어 자극과 먹이·물을 넣지 않는다
+        dev_test(&params, n as u64, num("--report").map(|v| (v as u64).max(1)), args.iter().any(|a| a == "--dev-no-stim"));
         return;
     }
     // --persist-test N: 학습 전후로 자극이 끝난 뒤 활동이 얼마나 오래 남는지 (A 를 N번 반복 / A 에 N번 보상)
@@ -707,7 +734,7 @@ fn persist_test(params: &NetParams, trials: usize) {
 
 /// 발달 과정 점검: 뉴런당 시냅스 수가 적음 → 넘침 → 안정의 곡선을 그리는지.
 /// 몸의 상태(--needs)가 켜져 있으면 단순한 환경이 붙는다: 배고픔이 차면 "안녕" 뒤에 먹이, 목마름이 차면 "고마워" 뒤에 물
-fn dev_test(params: &NetParams, ticks: u64) {
+fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: bool) {
     use rand::prelude::*;
     use std::io::Write;
     let mut rng = rand::rng();
@@ -716,11 +743,18 @@ fn dev_test(params: &NetParams, ticks: u64) {
     let mut net = Network::with_params(params.clone());
     let words = ["안녕", "고마워", "사랑해", "잘자", "배고파"];
     let needs = params.needs;
+    println!("[발달 시험] 보고 간격 {}, 자극 {}, 초기 배선의 합계 값 {:016x} (같은 배선 씨앗이면 같다. 씨앗 {:?})",
+        match report_every { Some(n) => format!("{}틱 (--report)", n), None => "전체의 1/60 (최소 1000틱)".to_string() },
+        if no_stim { "없음 (--dev-no-stim: 단어 자극과 먹이·물을 넣지 않는다)" } else { "있음" }, net.wiring_sum, params.seed);
+    if no_stim {
+        println!("\n뉴런당 내보내는 시냅스 수 (은닉 {}개). 자극 없음", net.hidden_count());
+    } else {
     println!("\n뉴런당 내보내는 시냅스 수 (은닉 {}개). 자극은 100~400틱 간격으로 무작위 단어{}", net.hidden_count(),
         if needs { ". 배고픔이 0.8 을 넘으면 '안녕' 30틱 뒤 먹이, 목마름이 0.8 을 넘으면 '고마워' 30틱 뒤 물" } else { "" });
+    }
     println!("{:>9} {:>8} {:>6} {:>7} {:>7} {:>6} {:>11} {:>11} {:>9} {:>7} {:>7} {:>8} {:>7}",
         "틱", "시냅스", "최소", "최대", "상대 수", "쌍당", "생긴 수", "사라진 수", "발화/1k", "먹이", "물", "보상도파민", "경과(초)");
-    let report = (ticks / 60).max(1000);
+    let report = report_every.unwrap_or((ticks / 60).max(1000));
     let (mut next_stim, mut spikes) = (200u64, 0usize);
     // 예정된 1차 보상: (틱, 종류). 보상 구간의 도파민 발화를 재기 위한 값들
     let mut pending: Option<(u64, usize)> = None;
@@ -745,8 +779,13 @@ fn dev_test(params: &NetParams, ticks: u64) {
     println!("  (추가 줄의 뜻) 자극 밖 = 자극이 시작된 틱부터 50틱(보상이 붙는 자극은 보상이 끝나고 50틱까지)을 뺀 틱만 센 값. 입력 자극이 직접 일으킨 발화를 빼고 본다");
     println!("  (추가 줄의 뜻) 기대 자발 = 그 구간 틱마다 은닉 뉴런의 자발 발화 확률(0.00001 × spont_scale)을 더한 값. 불응기와 문턱 발화가 겹치는 틱을 빼지 않으므로 실제 자발 발화의 상한이다");
     println!("  (추가 줄의 뜻) 은닉 발화 = 은닉 뉴런만 센 실제 발화 (윗줄의 발화/1k 는 입출력 뉴런 포함). 발화율 분위 = rate_avg × 1000 (시정수 약 5000틱)");
+    println!("  (추가 줄의 뜻) 접점 = 은닉 뉴런이 내보내는 접점을 쌍이 생긴 때로 나눈 것. 처음 쌍(born = 0)에 나중에 더해진 접점은 처음 쪽에 들어간다(그 누계를 따로 찍는다). 자란 쌍은 모두 은닉→은닉");
+    println!("  (추가 줄의 뜻) 받기 = 구간에 생긴 접점 수와 받기 문에 걸려 버린 시도 수를 받는 뉴런의 종류별로. 소멸의 나이 = 사라진 틱 − 그 접점이 속한 쌍이 생긴 틱 (처음부터 있던 쌍은 0틱에 생긴 것으로 센다)");
+    println!("  (추가 줄의 뜻) 입력 = 은닉 뉴런마다 다른 은닉 뉴런에서 들어오는 접점 수(지연 시냅스 제외). 느린÷목표 = rate_avg ÷ (K × 자기 자발 발화 확률). 문이 닫힌 비율은 보고 시점의 값");
+    let (mut last_made, mut last_drop, mut last_short) = (net.grow_made, net.gate_drop, net.pruned_short);
+    const AREAS: [&str; 6] = ["감정 주", "감정 지도", "이성 주", "이성 지도", "기억", "해마"];
     for t in 1..=ticks {
-        if needs && pending.is_none() {
+        if needs && !no_stim && pending.is_none() {
             for kind in 0..2 { if pending.is_none() && net.need_level(kind) > 0.8 { net.drive_text(words[kind], 4); pending = Some((t + 30, kind)); stim_until = stim_until.max(t + 30 + 20 + 50); } }
         }
         if let Some((at, kind)) = pending {
@@ -754,7 +793,7 @@ fn dev_test(params: &NetParams, ticks: u64) {
             if t >= at + 200 { pending = None; }
         }
         if let Some((end, start)) = da_mark { if t == end { da_acc += net.da_spikes - start; da_n += 1; da_mark = None; } }
-        if t == next_stim {
+        if t == next_stim && !no_stim {
             if pending.is_none() { net.drive_text(words[rng.random_range(if needs { 2 } else { 0 }..words.len())], 4); stim_until = stim_until.max(t + 50); }
             next_stim = t + rng.random_range(100..=400);
         }
@@ -805,6 +844,49 @@ fn dev_test(params: &NetParams, ticks: u64) {
                     "", KINDS[k], kind_n[k], q(&r, 0.1), q(&r, 0.5), q(&r, 0.9), q(&w, 0.5),
                     hid_kind[k] as f64 * per_k / n, exp_kind_acc[k] * per_k / n, if hid_kind[k] > 0 { exp_kind_acc[k] / hid_kind[k] as f64 * 100.0 } else { 0.0 });
             }
+            // 단계 C 관찰 줄
+            let dv = net.dev_observe();
+            let hn = hidden_n as f64;
+            let med = |v: &mut Vec<f64>, p: f64| -> f64 { if v.is_empty() { return f64::NAN; } v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[((v.len() as f64 * p) as usize).min(v.len() - 1)] };
+            println!("{:>9} 접점 | 처음 쌍의 접점 {:.1}/뉴런 (그중 은닉→은닉 {:.1}), 자란 쌍의 접점 {:.1}/뉴런 | 쌍 수/뉴런: 처음 {:.1}, 자란 {:.1} | 처음 쌍에 더해진 접점 누계 {}",
+                "", dv.init_contacts as f64 / hn, dv.init_hh as f64 / hn, dv.grown_contacts as f64 / hn, dv.init_pairs as f64 / hn, dv.grown_pairs as f64 / hn, net.added_on_initial);
+            let by_kind = |now: &[u64; 5], last: &[u64; 5]| -> String { (0..5).filter(|&k| kind_n[k] > 0).map(|k| format!("{} {}", KINDS[k], now[k] - last[k])).collect::<Vec<_>>().join(", ") };
+            let drop_sum: u64 = (0..5).map(|k| net.gate_drop[k] - last_drop[k]).sum();
+            println!("{:>9} 받기 | 구간에 생긴 접점 (받는 쪽): {} | 받기 문에 걸려 버린 시도: {} (합 {})",
+                "", by_kind(&net.grow_made, &last_made), by_kind(&net.gate_drop, &last_drop), drop_sum);
+            let mut ages: Vec<f64> = net.prune_ages.drain(..).map(|a| a as f64).collect();
+            let age_n = ages.len();
+            println!("{:>9} 소멸 | 구간에 사라진 접점 {} 중 수명이 줄어서 사라진 수 {} | 사라진 접점의 나이 중앙값 {:.0}틱 (나이를 아는 {}개, 모르는 {}개)",
+                "", net.pruned - last_pruned, net.pruned_short - last_short, med(&mut ages, 0.5), age_n, net.prune_age_unknown);
+            net.prune_age_unknown = 0;
+            let ratio = |o: &(usize, usize, f64, f64, f64, usize, usize)| if o.4 > 0.0 { o.3 / o.4 } else { f64::NAN };
+            let mut inc: Vec<f64> = dv.per.iter().map(|o| (o.5 + o.6) as f64).collect();
+            let zero: Vec<&(usize, usize, f64, f64, f64, usize, usize)> = dv.per.iter().filter(|o| o.5 + o.6 == 0).collect();
+            let mut zero_ratio: Vec<f64> = zero.iter().map(|o| ratio(o)).filter(|r| !r.is_nan()).collect();
+            let lo = dv.per.iter().min_by_key(|o| o.5 + o.6).unwrap();
+            let hi = dv.per.iter().max_by_key(|o| o.5 + o.6).unwrap();
+            let mut ie: Vec<f64> = dv.per.iter().filter(|o| o.5 > 0).map(|o| o.6 as f64 / o.5 as f64).collect();
+            println!("{:>9} 입력 | 은닉에서 오는 접점이 0 인 뉴런 {}개 (느린÷목표 중앙값 {:.2}) | 들어오는 접점 수: 최소 {} (그 뉴런의 느린÷목표 {:.2}), 분위 10% {:.0}, 50% {:.0}, 90% {:.0}, 최대 {} ({}, {}, 느린÷목표 {:.2}) | 억제 ÷ 흥분 접점 수의 중앙값 {:.3}",
+                "", zero.len(), med(&mut zero_ratio, 0.5), lo.5 + lo.6, ratio(lo), med(&mut inc, 0.1), med(&mut inc, 0.5), med(&mut inc, 0.9),
+                hi.5 + hi.6, KINDS[hi.0], AREAS.get(hi.1).copied().unwrap_or("?"), ratio(hi), med(&mut ie, 0.5));
+            let area_line: Vec<String> = (0..6).map(|a| {
+                let mut r: Vec<f64> = dv.per.iter().filter(|o| o.0 == 0 && o.1 == a).map(|o| o.3 * 1000.0).collect();
+                format!("{} {:.2} (n={})", AREAS[a], med(&mut r, 0.5), r.len())
+            }).collect();
+            println!("{:>9} 영역 | 추체 발화율/1k 중앙값: {}", "", area_line.join(", "));
+            if params.act_target.is_some() {
+                for k in 0..5 {
+                    if kind_n[k] == 0 { continue; }
+                    let v: Vec<&(usize, usize, f64, f64, f64, usize, usize)> = dv.per.iter().filter(|o| o.0 == k).collect();
+                    let with: Vec<&&(usize, usize, f64, f64, f64, usize, usize)> = v.iter().filter(|o| o.4 > 0.0).collect();
+                    let n = v.len() as f64;
+                    let (f, sl, b) = (with.iter().filter(|o| o.2 > o.4).count(), with.iter().filter(|o| o.3 > o.4).count(), with.iter().filter(|o| o.2 > o.4 || o.3 > o.4).count());
+                    let mut r: Vec<f64> = with.iter().map(|o| o.3 / o.4).collect();
+                    println!("{:>9} {} 문 | 발화율이 목표를 넘은 뉴런의 비율: 빠른 {:.1}%, 느린 {:.1}%, 둘 중 하나 {:.1}% | 느린÷목표 분위 10% {:.2}, 50% {:.2}, 90% {:.2} | 목표가 0 인 뉴런 {}개",
+                        "", KINDS[k], f as f64 / n * 100.0, sl as f64 / n * 100.0, b as f64 / n * 100.0, med(&mut r, 0.1), med(&mut r, 0.5), med(&mut r, 0.9), v.len() - with.len());
+                }
+            }
+            last_made = net.grow_made; last_drop = net.gate_drop; last_short = net.pruned_short;
             std::io::stdout().flush().ok();
             spikes = 0; food_n = 0; water_n = 0; da_acc = 0; da_n = 0;
             exp_acc = 0.0; exp_kind_acc = [0.0; 5]; hid_kind = [0; 5]; peak_hid = 0;

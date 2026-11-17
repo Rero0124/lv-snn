@@ -137,11 +137,44 @@ pub struct NetParams {
     /// 확률적 전달: 은닉 뉴런이 내보내는 시냅스가 이 확률로만 전달한다 (None = 항상 전달).
     /// 평균 전달량은 같고, 같은 입력에도 시행마다 전달되는 조합이 달라진다
     pub release: Option<f64>,
+    /// 배선 씨앗. Some(N) 이면 초기 배선(은닉·입출력 연결, 도파민·가치·예측·몸 배선, 초기 접점 기한 흩음)의 난수를 N 에서 뽑는다.
+    ///   보장하는 것은 초기 배선까지다: 워밍업과 실행 중의 난수(잡음, 자발 발화, 확률 전달, 성장)에는 씨앗이 없다
+    pub seed: Option<u64>,
+    /// 처음부터 있던 접점의 기한을 흩는다 (발달 과정): 시계를 "워밍업 끝 + (0~1 난수) × 자기 수명" 으로 둔다.
+    ///   false(기존): 모두 워밍업 끝에 맞춰져, 수명이 같은 접점들의 기한이 한꺼번에 온다
+    pub scatter_co: bool,
+    /// 활동 목표의 배수 K: 뉴런의 목표 발화율 = K × 자기 자발 발화 확률(0.00001 × spont_scale). 받기 문과 활동 의존 소멸이 쓴다.
+    ///   자발 발화 확률이 0 인 뉴런에는 문도 소멸도 걸지 않는다
+    pub act_target: Option<f64>,
+    /// 받기 문 (발달 과정의 성장): 받는 뉴런의 발화율이 목표를 넘으면 그 뉴런으로 가는 새 접점 시도를 버린다 (다른 상대로 넘기지 않는다).
+    ///   Fast = 빠른 발화율(rate_fast, 시정수 약 100틱), Slow = 느린 발화율(rate_avg, 약 5000틱), Both = 둘 중 하나라도
+    pub grow_gate: Option<GateMode>,
+    /// 활동 의존 소멸의 지수 E (0 = 없음): 받는 뉴런의 느린 발화율이 목표보다 높으면, 받는 쪽 점검에서 그 뉴런으로 들어오는 접점의
+    ///   수명에 (목표 ÷ 느린 발화율)^E 를 곱한다 (최소 수명 2만 틱을 적용한 뒤에 곱한다). 목표 이하면 기존 그대로
+    pub prune_act: f64,
+}
+
+/// 받기 문이 보는 발화율
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GateMode { Fast, Slow, Both }
+
+/// 발달 시험의 관찰값 (읽기만 한다)
+pub struct DevObs {
+    /// 은닉 뉴런이 내보내는 접점 수: 처음부터 있던 쌍(born = 0)의 접점, 그중 은닉→은닉(지연 시냅스 제외), 자란 쌍(born > 0)의 접점
+    pub init_contacts: usize,
+    pub init_hh: usize,
+    pub grown_contacts: usize,
+    /// 쌍(연결) 수: 처음부터 있던 것, 자란 것
+    pub init_pairs: usize,
+    pub grown_pairs: usize,
+    /// 은닉 뉴런마다: (종류 0 추체·1 Pv·2 Sst·3 Vip·4 그 밖, 영역 0~5, 빠른 발화율, 느린 발화율, 목표(틱당. 목표가 없으면 0),
+    ///   은닉 흥분성 뉴런에서 들어오는 접점 수, 은닉 억제성 뉴런에서 들어오는 접점 수)
+    pub per: Vec<(usize, usize, f64, f64, f64, usize, usize)>,
 }
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0 }
     }
 }
 
@@ -149,7 +182,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, prune_act: 0.0 }
     }
 }
 
@@ -246,6 +279,18 @@ pub struct Network {
     unit_med: Vec<f64>,
     /// 방금 틱에 발화한 뉴런 (도파민·보상·예측 뉴런 제외). 연속 모드에서 출력을 발화하는 대로 읽을 때 쓴다
     pub tick_ids: Vec<NeuronId>,
+    /// 초기 배선의 합계 값 (보내는 뉴런, 받는 뉴런, 세기 등을 차례로 섞은 값). 같은 배선 씨앗이면 같아야 한다 (관찰용)
+    pub wiring_sum: u64,
+    /// 받는 쪽 종류별(추체, Pv, Sst, Vip, 그 밖) 누계: 생긴 접점 수, 받기 문에 걸려 버린 시도 수 (관찰용)
+    pub grow_made: [u64; 5],
+    pub gate_drop: [u64; 5],
+    /// 처음부터 있던 쌍(born = 0)에 더해진 접점 수 누계 (관찰용)
+    pub added_on_initial: u64,
+    /// 받는 쪽 점검에서 사라진 접점 중, 활동 의존 소멸로 수명이 줄지 않았다면 아직 남았을 접점 수 누계 (관찰용)
+    pub pruned_short: u64,
+    /// 사라진 접점이 속한 쌍의 나이(사라진 틱 − 쌍이 생긴 틱) 목록. 읽는 쪽(dev_test)이 비운다. 나이를 가릴 수 없던 수는 prune_age_unknown (관찰용)
+    pub prune_ages: Vec<u64>,
+    pub prune_age_unknown: u64,
 }
 
 // ── 도파민 구성 ──
@@ -415,6 +460,13 @@ impl Network {
             pruned: 0,
             unit_med: Vec::new(),
             tick_ids: Vec::new(),
+            wiring_sum: 0,
+            grow_made: [0; 5],
+            gate_drop: [0; 5],
+            added_on_initial: 0,
+            pruned_short: 0,
+            prune_ages: Vec::new(),
+            prune_age_unknown: 0,
         };
 
         // 세포 종류 지정: 억제성 뉴런을 순서대로 Pv 9 : Sst 8 : Vip 3 (45% / 40% / 15%) 으로 나눈다
@@ -447,6 +499,7 @@ impl Network {
             if !io.contains(&i) { for s in &mut n.synapses { s.weight *= gain; } }
         }
         if net.params.dopamine { net.build_dopamine(); }
+        net.wiring_sum = net.wiring_checksum();
         net.rebuild_incoming();
         net.rebuild_slow_index();
         let spont = net.params.spont;
@@ -468,8 +521,18 @@ impl Network {
             let hidden_end = net.hippocampus_range.1;
             let now = net.global_tick;
             let (tau, min_w) = (net.params.prune_tau, net.params.min_weight);
+            // scatter_co: 기한이 한꺼번에 오지 않게, 시계를 지금부터 자기 수명(prune_life 와 같은 식) 안의 무작위 시점으로 둔다 (난수는 배선 씨앗에서)
+            let scatter = net.params.scatter_co;
+            let mut srng = net.stage_rng(6);
             for n in net.neurons[..hidden_end].iter_mut() {
-                for s in n.synapses.iter_mut() { s.last_co = now; }
+                for s in n.synapses.iter_mut() {
+                    s.last_co = now;
+                    if scatter {
+                        use rand::prelude::*;
+                        let life = (tau * (s.weight / min_w.max(1e-12)).max(1.0).ln()).max(20_000.0);
+                        s.last_co = now + (srng.random::<f64>() * life) as u64;
+                    }
+                }
                 n.next_prune = now + 1000;
                 n.prune_tau = tau;
                 n.prune_min = min_w;
@@ -484,12 +547,64 @@ impl Network {
         net
     }
 
+    /// 초기 배선의 단계별 난수. 배선 씨앗이 있으면 (씨앗, 단계 번호)로 정해지고, 없으면 실행마다 다르다.
+    /// 단계마다 따로 두는 것은 한 단계의 유무(예: 가치 경로)가 다른 단계의 배선을 바꾸지 않게 하기 위해서다
+    fn stage_rng(&self, stage: u64) -> rand::rngs::StdRng {
+        use rand::SeedableRng;
+        match self.params.seed {
+            Some(s) => rand::rngs::StdRng::seed_from_u64(s.wrapping_mul(1_000_003).wrapping_add(stage)),
+            None => rand::rngs::StdRng::seed_from_u64(rand::random::<u64>()),
+        }
+    }
+
+    /// 초기 배선의 합계 값: 모든 시냅스의 (보내는 뉴런, 받는 뉴런, 세기, 지연, 붙는 자리)와 뉴런의 스스로 내는 전류·처음 전위를 차례로 섞는다
+    fn wiring_checksum(&self) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        let mut mix = |v: u64| { h ^= v; h = h.wrapping_mul(0x100000001b3); };
+        for (i, n) in self.neurons.iter().enumerate() {
+            mix(i as u64); mix(n.tonic.to_bits()); mix(n.potential.to_bits());
+            for s in &n.synapses {
+                mix(s.target as u64); mix(s.weight.to_bits()); mix(s.slow_rate.to_bits()); mix(s.on_dendrite as u64);
+            }
+        }
+        h
+    }
+
+    /// 뉴런의 활동 목표 (틱당 발화율): K × 자기 자발 발화 확률. 목표가 없거나 자발 발화가 0 이면 0
+    fn act_target_of(&self, idx: usize) -> f64 {
+        match self.params.act_target { Some(k) => k * 1e-5 * self.neurons[idx].spont_scale, None => 0.0 }
+    }
+
+    fn kind_index(t: CellType) -> usize {
+        match t { CellType::Pyramidal => 0, CellType::Pv => 1, CellType::Sst => 2, CellType::Vip => 3, _ => 4 }
+    }
+
+    /// 발달 시험의 관찰값
+    pub fn dev_observe(&self) -> DevObs {
+        let hidden_end = self.hippocampus_range.1;
+        let mut o = DevObs { init_contacts: 0, init_hh: 0, grown_contacts: 0, init_pairs: 0, grown_pairs: 0, per: Vec::with_capacity(hidden_end) };
+        let mut inc = vec![(0usize, 0usize); hidden_end];
+        for n in &self.neurons[..hidden_end] {
+            for s in &n.synapses {
+                let c = s.count as usize;
+                let hh = s.slow_rate == 0.0 && (s.target as usize) < hidden_end;
+                if s.born == 0 { o.init_contacts += c; o.init_pairs += 1; if hh { o.init_hh += c; } } else { o.grown_contacts += c; o.grown_pairs += 1; }
+                if hh { if n.inhibitory { inc[s.target as usize].1 += c; } else { inc[s.target as usize].0 += c; } }
+            }
+        }
+        for (i, n) in self.neurons[..hidden_end].iter().enumerate() {
+            o.per.push((Self::kind_index(n.cell_type), self.area_of(i), n.rate_fast, n.rate_avg, self.act_target_of(i), inc[i].0, inc[i].1));
+        }
+        o
+    }
+
     /// 도파민 뉴런 집단과 보상/처벌 입력 뉴런을 만들고 배선한다.
     ///   도파민 뉴런: 스스로 일정하게 발화(기준선)하고, 은닉·출력 뉴런 전체에 조절 신호를 보낸다 (받는 뉴런마다 DA_FANIN 개)
     ///   보상 입력: 도파민 뉴런을 흥분시켜 연달아 발화하게 한다.  처벌 입력: 억제해서 발화를 멈추게 한다
     fn build_dopamine(&mut self) {
         use rand::prelude::*;
-        let mut rng = rand::rng();
+        // 단계마다 난수를 따로 둔다: 1 도파민 뉴런, 2 가치, 3 예측, 4 도파민 → 표적, 5 몸
+        let mut rng = self.stage_rng(1);
         let mut targets: Vec<usize> = (0..self.hippocampus_range.1).collect();
         targets.extend(self.output_idx.iter().cloned());
         let da_count = ((DA_COUNT as f64 * self.params.scale).round() as usize).max(1);
@@ -517,6 +632,7 @@ impl Network {
         // 입력은 바로 전달되지만 학습에 쓰는 흔적은 약 20틱 뒤에 가장 커진다. 그래서 자극 직후 가치 뉴런이 스스로 일으킨
         // 도파민으로는 거의 강해지지 않고, 조금 뒤에 오는 보상(또는 다음 예고 자극이 일으킨 도파민)으로 강해진다
         if self.params.value {
+            let mut rng = self.stage_rng(2);
             let (ms, me) = self.memory_range;
             let sources: Vec<usize> = (self.emotion_range.0..self.reason_range.1).chain(ms..me)
                 .filter(|&i| !self.neurons[i].inhibitory).collect();
@@ -536,6 +652,9 @@ impl Network {
                 while picked.len() < PRED_FANIN.min(sources.len()) {
                     picked.insert(sources[rng.random_range(0..sources.len())]);
                 }
+                // 집합의 순회 순서는 실행마다 다르므로 정렬해서 쓴다 (같은 씨앗이면 같은 배선이 되게)
+                let mut picked: Vec<usize> = picked.into_iter().collect();
+                picked.sort_unstable();
                 for src in picked {
                     self.neurons[src].add_seed_synapse(id, PRED_INIT_WEIGHT);
                     let s = self.neurons[src].synapses.last_mut().unwrap();
@@ -546,6 +665,7 @@ impl Network {
             targets.extend(self.val_idx.iter().cloned());
         }
         if self.params.predict {
+            let mut rng = self.stage_rng(3);
             let (ms, me) = self.memory_range;
             // 가치 경로가 있으면 예측 뉴런은 은닉이 아니라 가치 뉴런에서 입력을 받는다: 예측(억제)은 가치(흥분)의 늦은 사본이 된다.
             // 그래야 가치가 먼저 생기고 그만큼만 보상이 상쇄되며, 둘이 같은 보상 신호를 두고 따로 경쟁하지 않는다
@@ -568,6 +688,8 @@ impl Network {
                     picked.insert(sources[rng.random_range(0..sources.len())]);
                 }
                 let delay = PRED_DELAYS[i % PRED_DELAYS.len()];
+                let mut picked: Vec<usize> = picked.into_iter().collect();
+                picked.sort_unstable();
                 for src in picked {
                     self.neurons[src].add_seed_synapse(id, PRED_INIT_WEIGHT);
                     self.neurons[src].synapses.last_mut().unwrap().slow_rate = 1.0 / delay;
@@ -583,6 +705,7 @@ impl Network {
             for k in 0..da_count { let d = self.da_idx[k]; self.neurons[d].add_seed_synapse(t as NeuronId, w); }
         }
         targets.retain(|t| !dense.contains(t));
+        let mut rng = self.stage_rng(4);
         for &t in &targets {
             let mut picked: Vec<usize> = Vec::with_capacity(DA_FANIN);
             while picked.len() < DA_FANIN.min(da_count) {
@@ -609,6 +732,7 @@ impl Network {
         }
         // 1차 보상과 몸의 상태: 종류마다 감각 입력 → 중계 → 도파민, 결핍 → 중계, 중계 → 포만 → 결핍
         if self.params.needs {
+            let mut rng = self.stage_rng(5);
             for kind in 0..2usize {
                 let y = 900.0 + 100.0 * kind as f32;
                 let mut make = |net: &mut Network, n: Neuron| -> usize { let i = net.neurons.len(); net.neurons.push(n); i };
@@ -916,7 +1040,7 @@ impl Network {
     /// 구조 기반 랜덤 시냅스 생성
     fn seed_random_synapses(&mut self, per_neuron: usize) {
         use rand::prelude::*;
-        let mut rng = rand::rng();
+        let mut rng = self.stage_rng(0);
 
         let (em_s, em_e) = self.emotion_main_range;
         let (emap_s, emap_e) = self.emotion_map_range;
@@ -949,7 +1073,7 @@ impl Network {
             .chain(rea_map_info.iter())
             .cloned().collect();
 
-        fn pick_random(rng: &mut rand::rngs::ThreadRng, candidates: &[(usize, f32, f32)], exclude: usize) -> Option<usize> {
+        fn pick_random(rng: &mut rand::rngs::StdRng, candidates: &[(usize, f32, f32)], exclude: usize) -> Option<usize> {
             if candidates.len() <= 1 { return None; }
             for _ in 0..10 {
                 let idx = rng.random_range(0..candidates.len());
@@ -961,7 +1085,7 @@ impl Network {
         }
 
         // 격자 위에서 (col, row) 근처의 한 칸을 고른다 (정규분포, 범위를 벗어나면 다시). list 는 한 영역의 뉴런들이 격자 순서로 들어 있다
-        fn pick_near(rng: &mut rand::rngs::ThreadRng, list: &[(usize, f32, f32)], cols: usize, col: f64, row: f64, sigma: f64) -> Option<usize> {
+        fn pick_near(rng: &mut rand::rngs::StdRng, list: &[(usize, f32, f32)], cols: usize, col: f64, row: f64, sigma: f64) -> Option<usize> {
             let rows = list.len() / cols;
             for _ in 0..10 {
                 let u1: f64 = rng.random::<f64>().max(1e-12);
@@ -974,7 +1098,7 @@ impl Network {
             None
         }
         // 영역 내부 연결의 상대: local_frac 의 확률로 가까운 뉴런, 아니면 영역 전체에서 무작위
-        fn pick_internal(rng: &mut rand::rngs::ThreadRng, list: &[(usize, f32, f32)], idx: usize, local_frac: f64) -> Option<usize> {
+        fn pick_internal(rng: &mut rand::rngs::StdRng, list: &[(usize, f32, f32)], idx: usize, local_frac: f64) -> Option<usize> {
             if local_frac > 0.0 && rng.random::<f64>() < local_frac && !list.is_empty() {
                 let k = idx - list[0].0;
                 for _ in 0..5 {
@@ -986,15 +1110,15 @@ impl Network {
 
         // 가중치 샘플러: 꼬리 긴 분포면 평균 mean 인 로그정규(중앙값 ≈ 0.43×평균, 상위 1% ≈ 9×평균), 최대 1.0
         let p = self.params.clone();
-        let sample = move |rng: &mut rand::rngs::ThreadRng, mean: f64| -> f64 {
+        let sample = move |rng: &mut rand::rngs::StdRng, mean: f64| -> f64 {
             let u1: f64 = rng.random::<f64>().max(1e-12);
             let u2: f64 = rng.random();
             let z = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
             (mean * 1.5 * (1.3 * z).exp() / 3.5).clamp(0.01, 1.0)
         };
         let lognormal = p.lognormal;
-        let hid_w = move |rng: &mut rand::rngs::ThreadRng| if lognormal { sample(rng, INITIAL_WEIGHT) } else { INITIAL_WEIGHT };
-        let io_w = move |rng: &mut rand::rngs::ThreadRng| if lognormal { sample(rng, 0.6) } else { 0.4 + rng.random::<f64>() * 0.4 };
+        let hid_w = move |rng: &mut rand::rngs::StdRng| if lognormal { sample(rng, INITIAL_WEIGHT) } else { INITIAL_WEIGHT };
+        let io_w = move |rng: &mut rand::rngs::StdRng| if lognormal { sample(rng, 0.6) } else { 0.4 + rng.random::<f64>() * 0.4 };
 
         // 1. 입력 → 감정_Main, 이성_Main, 기억 (흥분성만, weight 0.4~0.8 랜덤)
         let main_excitatory: Vec<(usize, f32, f32)> = main_areas.iter()
@@ -1696,6 +1820,20 @@ impl Network {
                     start + w as usize * cols + c as usize
                 } else { rng.random_range(0..hidden_end) };
                 if post == pre { continue; }
+                // 받기 문: 받는 뉴런의 발화율이 자기 목표를 넘으면 이 시도를 버린다 (다른 상대로 넘기지 않는다). 받는 뉴런 자신의 값만 읽는다
+                let post_kind = Self::kind_index(self.neurons[post].cell_type);
+                if let Some(mode) = self.params.grow_gate {
+                    let goal = self.act_target_of(post);
+                    if goal > 0.0 {
+                        let q = &self.neurons[post];
+                        let closed = match mode {
+                            GateMode::Fast => q.rate_fast > goal,
+                            GateMode::Slow => q.rate_avg > goal,
+                            GateMode::Both => q.rate_fast > goal || q.rate_avg > goal,
+                        };
+                        if closed { self.gate_drop[post_kind] += 1; continue; }
+                    }
+                }
                 let jitter = 1.0 + self.params.new_spread * (rng.random::<f64>() * 2.0 - 1.0);
                 let (post_med, new_w) = (self.unit_med.get(post).copied().unwrap_or(0.0), self.params.new_weight * jitter);
                 // 이미 연결된 상대면 접점이 하나 늘어난다: 접점 하나의 세기(가중치 ÷ 개수)만큼 가중치가 커진다
@@ -1710,7 +1848,10 @@ impl Network {
                     let room = (1.0 - s.weight / CONN_CAP).max(0.0);
                     s.weight += unit.max(2.0 * min_w) * room;
                     s.count += 1;
+                    let initial = s.born == 0;
                     self.sprouted += 1;
+                    self.grow_made[post_kind] += 1;
+                    if initial { self.added_on_initial += 1; }
                     continue;
                 }
                 let len = self.neurons[pre].synapses.len();
@@ -1737,6 +1878,7 @@ impl Network {
                 self.neurons[post].incoming.push((pre, len));
                 let _ = due;
                 self.sprouted += 1;
+                self.grow_made[post_kind] += 1;
             }
         }
     }
@@ -1760,8 +1902,20 @@ impl Network {
             // (1) 자기가 내보내는 쪽: 가지치기는 이미 했고, 죽은 연결의 자리만 비운다.
             //     뒤에서부터 본다: 연결을 지우면 마지막 시냅스가 그 자리로 오는데, 마지막 것은 이미 본 뒤다
             if self.neurons[post].pruned_n > 0 {
-                self.pruned += self.neurons[post].pruned_n as u64;
+                let total = self.neurons[post].pruned_n as u64;
+                self.pruned += total;
                 self.neurons[post].pruned_n = 0;
+                // 관찰용: 사라진 접점이 속한 쌍의 나이. 쌍이 통째로 사라진 것은 바로 알 수 있고, 접점만 하나 준 쌍은
+                // 방금 시계가 다시 맞춰진 것(last_co = 지금)으로 찾는다. 그 수가 맞지 않으면(같은 틱에 굳은 접점이 섞이면) 모름으로 센다
+                let mut dead = 0u64;
+                let mut reset: Vec<u64> = Vec::new();
+                for s in &self.neurons[post].synapses {
+                    if s.slow_rate > 0.0 { continue; }
+                    if s.count == 0 { dead += 1; self.prune_ages.push(now.saturating_sub(s.born)); }
+                    else if s.last_co == now { reset.push(now.saturating_sub(s.born)); }
+                }
+                let dec = total.saturating_sub(dead);
+                if reset.len() as u64 == dec { self.prune_ages.extend(reset); } else { self.prune_age_unknown += dec; }
                 let mut k = self.neurons[post].synapses.len();
                 while k > 0 {
                     k -= 1;
@@ -1772,13 +1926,23 @@ impl Network {
             // (2) 자기에게 들어오는 쪽: 보내는 뉴런이 조용해서 스스로 정리하지 못한 시냅스를, 받는 뉴런이 활동할 때 확인한다.
             //     (시냅스는 양쪽에 걸쳐 있으므로 어느 쪽이든 활동하는 쪽이 본다)
             let sources: Vec<usize> = self.neurons[post].incoming.iter().map(|e| e.0).filter(|&p| p < hidden_end).collect();
+            // 활동 의존 소멸: 받는 뉴런(지금 발화한 이 뉴런)의 느린 발화율이 자기 목표보다 높으면 들어오는 접점의 수명이 (목표 ÷ 느린 발화율)^E 배가 된다
+            let shrink = if self.params.prune_act > 0.0 {
+                let (goal, slow) = (self.act_target_of(post), self.neurons[post].rate_avg);
+                if goal > 0.0 && slow > goal { (goal / slow).powf(self.params.prune_act) } else { 1.0 }
+            } else { 1.0 };
             for pre in sources {
                 let Some(k) = self.neurons[pre].synapses.iter().position(|s| s.target as usize == post && s.slow_rate == 0.0) else { continue };
-                let (last, w, count) = { let s = &self.neurons[pre].synapses[k]; (s.last_co.max(s.born), s.weight, s.count) };
+                let (last, w, count, born) = { let s = &self.neurons[pre].synapses[k]; (s.last_co.max(s.born), s.weight, s.count, s.born) };
                 // 경쟁: 받는 뉴런(지금 발화한 이 뉴런)의 감응도가 낮을수록 수명이 짧다
                 let share = if self.params.compete > 0.0 { self.neurons[post].excitability.min(1.0).powf(self.params.compete) } else { 1.0 };
-                if count == 0 || last + self.prune_life(w * share) > now { continue; }
+                // 최소 수명(2만 틱)을 적용한 뒤에 곱한다. 곱한 값에는 바닥이 없다
+                let full = self.prune_life(w * share);
+                let life = if shrink < 1.0 { (full as f64 * shrink) as u64 } else { full };
+                if count == 0 || last + life > now { continue; }
                 self.pruned += 1;
+                if last + full > now { self.pruned_short += 1; }
+                self.prune_ages.push(now.saturating_sub(born));
                 if count > 1 {
                     let s = &mut self.neurons[pre].synapses[k];
                     s.weight -= s.weight / count as f64;
@@ -2220,6 +2384,13 @@ impl Network {
             pruned: 0,
             unit_med: Vec::new(),
             tick_ids: Vec::new(),
+            wiring_sum: 0,
+            grow_made: [0; 5],
+            gate_drop: [0; 5],
+            added_on_initial: 0,
+            pruned_short: 0,
+            prune_ages: Vec::new(),
+            prune_age_unknown: 0,
         };
         net.rebuild_incoming();
         net.rebuild_slow_index();
