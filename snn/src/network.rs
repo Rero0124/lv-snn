@@ -1850,7 +1850,8 @@ impl Network {
                 CellType::Vip => 3.0,
                 _ => 1.0,
             };
-            n.spont_scale = by_type * if by_weight { x * n.w_ref_med / 0.2 } else { x };
+            // 발화 확률(0.00001 × spont_scale)이 1을 넘지 않게 자른다 (넘으면 random_bool 이 실행을 죽인다)
+            n.spont_scale = (by_type * if by_weight { x * n.w_ref_med / 0.2 } else { x }).min(1e5);
         }
     }
 
@@ -1858,6 +1859,15 @@ impl Network {
     pub fn spont_expected(&self) -> (f64, f64) {
         let h = &self.neurons[..self.hippocampus_range.1];
         (h.iter().map(|n| 1e-5 * n.spont_scale).sum(), h.iter().map(|n| n.w_ref_med).sum::<f64>() / h.len() as f64)
+    }
+
+    /// 은닉 뉴런마다 (종류: 0 추체, 1 Pv, 2 Sst, 3 Vip, 4 그 밖), 느린 발화율 rate_avg(틱당 발화 수), 입력 가중치 중앙값 w_ref_med,
+    /// 틱당 자발 발화 확률(try_fire 가 평소에 쓰는 값: 0.00001 × spont_scale). 읽기만 한다 (관찰용)
+    pub fn hidden_observe(&self) -> Vec<(usize, f64, f64, f64)> {
+        self.neurons[..self.hippocampus_range.1].iter().map(|n| {
+            let k = match n.cell_type { CellType::Pyramidal => 0, CellType::Pv => 1, CellType::Sst => 2, CellType::Vip => 3, _ => 4 };
+            (k, n.rate_avg, n.w_ref_med, 1e-5 * n.spont_scale)
+        }).collect()
     }
 
     /// 검증된 학습 구성 적용

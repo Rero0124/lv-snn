@@ -201,8 +201,12 @@ fn main() {
         return;
     }
     // --spont-test TICKS: 입력 없이 자발 발화만으로 돌렸을 때 활동이 번지는지 (배수별)
+    //   --spont-list A,B,...: 시험할 배수 목록 (주지 않으면 1, 100, 1000, 10000, 30000)
     if let Some(n) = num("--spont-test") {
-        spont_test(&params, n as u64);
+        let list: Vec<f64> = args.iter().position(|a| a == "--spont-list").and_then(|i| args.get(i + 1))
+            .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+            .unwrap_or_else(|| vec![1.0, 100.0, 1000.0, 10000.0, 30000.0]);
+        spont_test(&params, n as u64, &list);
         return;
     }
     // --spread-test: 자극 한 번 뒤 틱별·영역별 발화 수 (활동이 어디서부터 번지는지)
@@ -583,34 +587,42 @@ fn stream_test(params: &NetParams, trials: usize) {
 }
 
 /// 자발 발화 점검: 입력 없이 돌렸을 때, 스스로 발화한 양에 비해 실제 발화가 얼마나 불어나는지
-fn spont_test(params: &NetParams, ticks: u64) {
+fn spont_test(params: &NetParams, ticks: u64, list: &[f64]) {
     println!("{:?}", params);
     println!("\n입력 없이 {ticks}틱. 넣은 양 = 자발 발화로 기대되는 발화 수, 실제 = 은닉 뉴런의 발화 수 (1000틱당, 구간별)");
     println!("불어남 = 실제 ÷ 넣은 양 (1 = 번지지 않음). 가장 큰 틱 = 한 틱에 발화한 뉴런 수의 최댓값. 뒤의 값 = 그 뒤 자극 A 를 한 번 주고 100~300틱 뒤 200틱 동안의 발화 수");
-    println!("{:>8} {:>10} {:>32} {:>8} {:>10} {:>14}", "배수", "넣은 양", "실제 (처음 / 중간 / 마지막 구간)", "불어남", "가장 큰 틱", "자극 뒤 잔여");
-    for scale in [1.0, 100.0, 1000.0, 10000.0, 30000.0] {
+    println!("실제·가장 큰 틱·자극 뒤 잔여는 은닉 뉴런만 센다 (입출력 뉴런 제외). 불어남의 넣은 양은 틱마다의 기대 자발 발화를 더한 값이다 (불응기를 빼지 않은 상한)");
+    println!("{:>8} {:>10} {:>32} {:>8} {:>10} {:>14}   {}", "배수", "넣은 양", "실제 (처음 / 중간 / 마지막 구간)", "불어남", "가장 큰 틱", "자극 뒤 잔여", "입력 가중치 중앙값의 평균 (처음 → 끝), 경과(초)");
+    for (row, &scale) in list.iter().enumerate() {
+        let t0 = std::time::Instant::now();
         let mut p = params.clone();
         p.spont = Some(scale);
         let mut net = Network::with_params(p);
         let (per_tick, w_med) = net.spont_expected();
         let injected = per_tick * 1000.0;
-        if scale == 1.0 { println!("  (은닉 뉴런 {}개, 입력 가중치 중앙값의 평균 {:.4})", net.hidden_count(), w_med); }
+        if row == 0 { println!("  (은닉 뉴런 {}개, 입력 가중치 중앙값의 평균 {:.4})", net.hidden_count(), w_med); }
+        let hidden_n = net.hidden_count();
+        let mut exp_acc = 0.0f64;
         let blocks = (ticks / 1000).max(1) as usize;
         let mut per_block = vec![0usize; blocks];
         let mut peak = 0usize;
         for t in 0..ticks {
+            exp_acc += net.spont_expected().0;
             net.step();
-            let n = net.tick_ids.len();
+            let n = net.tick_ids.iter().filter(|&&id| (id as usize) < hidden_n).count();
             peak = peak.max(n);
             per_block[((t / 1000) as usize).min(blocks - 1)] += n;
         }
         let total: usize = per_block.iter().sum();
+        let w_end = net.spont_expected().1;
+        let after_exp = net.spont_expected().0 * 200.0;
         net.drive_text("안녕", 4);
         let mut after = 0usize;
-        for t in 0..300 { net.step(); if t >= 100 { after += net.tick_ids.len(); } }
-        println!("{:>8} {:>10.0} {:>10} / {:>8} / {:>8} {:>8.2} {:>10} {:>10} (넣은 양 {:.0})", scale, injected,
+        for t in 0..300 { net.step(); if t >= 100 { after += net.tick_ids.iter().filter(|&&id| (id as usize) < hidden_n).count(); } }
+        println!("{:>8} {:>10.0} {:>10} / {:>8} / {:>8} {:>8.2} {:>10} {:>10} (넣은 양 {:.0})   {:.6} → {:.6}, {:.0}초", scale, injected,
             per_block[0], per_block[blocks / 2], per_block[blocks - 1],
-            total as f64 / (injected * blocks as f64), peak, after, injected * 0.2);
+            if exp_acc > 0.0 { total as f64 / exp_acc } else { 0.0 }, peak, after, after_exp, w_med, w_end, t0.elapsed().as_secs_f64());
+        { use std::io::Write; std::io::stdout().flush().ok(); }
     }
 }
 
@@ -688,6 +700,19 @@ fn dev_test(params: &NetParams, ticks: u64) {
     let (mut food_n, mut water_n) = (0usize, 0usize);
     let (mut da_acc, mut da_n, mut da_mark) = (0u64, 0usize, None::<(u64, u64)>);
     let da = net.da_count().max(1) as f64;
+    // 관찰용 (네트워크 동작은 바꾸지 않는다): 자발 발화의 기대값과 실제 발화를 종류별로 구간마다 모은다
+    const KINDS: [&str; 5] = ["추체", "Pv", "Sst", "Vip", "그 밖"];
+    let hidden_n = net.hidden_count();
+    let kind_of: Vec<usize> = net.hidden_observe().iter().map(|o| o.0).collect();
+    let mut kind_n = [0usize; 5];
+    for &k in &kind_of { kind_n[k] += 1; }
+    let spont_by_kind = |net: &Network| { let mut e = [0.0f64; 5]; for o in net.hidden_observe() { e[o.0] += o.3; } e };
+    let (mut exp_now, mut exp_kind_now) = (net.spont_expected().0, spont_by_kind(&net));
+    let (mut exp_acc, mut exp_kind_acc, mut hid_kind) = (0.0f64, [0.0f64; 5], [0usize; 5]);
+    let (mut last_t, mut last_sprouted, mut last_pruned) = (0u64, net.sprouted, net.pruned);
+    let mut peak_hid = 0usize;
+    println!("  (추가 줄의 뜻) 기대 자발 = 그 구간 틱마다 은닉 뉴런의 자발 발화 확률(0.00001 × spont_scale)을 더한 값. 불응기와 문턱 발화가 겹치는 틱을 빼지 않으므로 실제 자발 발화의 상한이다");
+    println!("  (추가 줄의 뜻) 은닉 발화 = 은닉 뉴런만 센 실제 발화 (윗줄의 발화/1k 는 입출력 뉴런 포함). 발화율 분위 = rate_avg × 1000 (시정수 약 5000틱)");
     for t in 1..=ticks {
         if needs && pending.is_none() {
             for kind in 0..2 { if pending.is_none() && net.need_level(kind) > 0.8 { net.drive_text(words[kind], 4); pending = Some((t + 30, kind)); } }
@@ -701,16 +726,49 @@ fn dev_test(params: &NetParams, ticks: u64) {
             if pending.is_none() { net.drive_text(words[rng.random_range(if needs { 2 } else { 0 }..words.len())], 4); }
             next_stim = t + rng.random_range(100..=400);
         }
+        // 이 틱에 쓰일 자발 발화 확률 (1만 틱마다의 갱신은 step 안에서 일어나므로, 갱신된 틱에는 한 틱 어긋난다)
+        exp_acc += exp_now;
+        for k in 0..5 { exp_kind_acc[k] += exp_kind_now[k]; }
         net.step();
         spikes += net.tick_ids.len();
+        let mut hid_now = 0usize;
+        for &id in &net.tick_ids { if (id as usize) < hidden_n { hid_kind[kind_of[id as usize]] += 1; hid_now += 1; } }
+        peak_hid = peak_hid.max(hid_now);
+        let e = net.spont_expected().0;
+        if e != exp_now { exp_now = e; exp_kind_now = spont_by_kind(&net); }
         if t % report == 0 || t == ticks {
             let (avg, lo, hi, conns) = net.out_degree_stats();
             println!("{:>9} {:>8.0} {:>6} {:>7} {:>7.0} {:>6.1} {:>11} {:>11} {:>9.0} {:>7} {:>7} {:>8.1} {:>7.0}", t, avg, lo, hi, conns, avg / conns.max(1.0), net.sprouted, net.pruned,
                 spikes as f64 * 1000.0 / report as f64, food_n, water_n, if da_n > 0 { da_acc as f64 / da / da_n as f64 } else { 0.0 }, t0.elapsed().as_secs_f64());
             let (em, el, eh) = net.excitability_stats();
             println!("{:>9} 감응도 평균 {:.3} (최소 {:.3}, 최대 {:.3})", "", em, el, eh);
+            // 추가 관찰 줄
+            let span = (t - last_t) as f64;
+            let per_k = 1000.0 / span;
+            let hid: usize = hid_kind.iter().sum();
+            let (per_tick, w_med) = net.spont_expected();
+            println!("{:>9} 자발 | 지금 기대 {:.3}/틱, 입력 가중치 중앙값의 평균 {:.6} | 구간({:.0}틱) 은닉 발화 {:.0}/1k, 기대 자발 {:.0}/1k, 비중 {:.1}% | 구간 생긴 수 {}, 사라진 수 {}",
+                "", per_tick, w_med, span, hid as f64 * per_k, exp_acc * per_k, if hid > 0 { exp_acc / hid as f64 * 100.0 } else { 0.0 },
+                net.sprouted - last_sprouted, net.pruned - last_pruned);
+            println!("{:>9} 번짐 | 불어남 {:.2} (구간 은닉 발화 ÷ 기대 자발) | 한 틱 최대 은닉 발화 {} (은닉의 {:.1}%)",
+                "", if exp_acc > 0.0 { hid as f64 / exp_acc } else { 0.0 }, peak_hid, peak_hid as f64 / hidden_n as f64 * 100.0);
+            let obs = net.hidden_observe();
+            for k in 0..5 {
+                if kind_n[k] == 0 { continue; }
+                let mut r: Vec<f64> = obs.iter().filter(|o| o.0 == k).map(|o| o.1 * 1000.0).collect();
+                let mut w: Vec<f64> = obs.iter().filter(|o| o.0 == k).map(|o| o.2).collect();
+                r.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let q = |v: &[f64], p: f64| v[((v.len() as f64 * p) as usize).min(v.len() - 1)];
+                let n = kind_n[k] as f64;
+                println!("{:>9} {} (n={}) | 발화율/1k 분위 10% {:.2}, 50% {:.2}, 90% {:.2} | 입력 가중치 중앙값의 중앙값 {:.6} | 구간 뉴런당 발화 {:.2}/1k, 기대 자발 {:.2}/1k, 비중 {:.1}%",
+                    "", KINDS[k], kind_n[k], q(&r, 0.1), q(&r, 0.5), q(&r, 0.9), q(&w, 0.5),
+                    hid_kind[k] as f64 * per_k / n, exp_kind_acc[k] * per_k / n, if hid_kind[k] > 0 { exp_kind_acc[k] / hid_kind[k] as f64 * 100.0 } else { 0.0 });
+            }
             std::io::stdout().flush().ok();
             spikes = 0; food_n = 0; water_n = 0; da_acc = 0; da_n = 0;
+            exp_acc = 0.0; exp_kind_acc = [0.0; 5]; hid_kind = [0; 5]; peak_hid = 0;
+            last_t = t; last_sprouted = net.sprouted; last_pruned = net.pruned;
         }
     }
 }
