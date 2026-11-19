@@ -1141,6 +1141,51 @@ fn op_trial(net: &mut Network, word: &str) -> Vec<bool> {
     fired
 }
 
+/// 자극 앞의 바탕을 보는 창: 앞 시행 쉬는 구간의 마지막 몇 틱 (자극 뒤에 출력을 읽는 40틱과 같은 길이)
+const OP_PRE: u64 = 40;
+
+/// 관찰용 쉼: net.rest(ticks) 와 같은 차례로 틱을 돌리면서 마지막 OP_PRE 틱에 발화한 출력을 적는다 (망의 동작에는 관여하지 않는다)
+fn op_rest_tail(net: &mut Network, ticks: u64) -> Vec<bool> {
+    let mut tail = vec![false; net.output_count()];
+    for t in 0..ticks {
+        net.tick();
+        if t + OP_PRE >= ticks { for &id in &net.tick_ids { if let Some(q) = net.output_seq(id as usize) { tail[q] = true; } } }
+    }
+    tail
+}
+
+/// --op-words 가,나[,다]: 기능 시험에 넣을 낱말. 없으면 None (시험마다 정해 둔 낱말)
+fn op_arg_words() -> Option<Vec<String>> {
+    let args: Vec<String> = std::env::args().collect();
+    let i = args.iter().position(|a| a == "--op-words")?;
+    let w: Vec<String> = args.get(i + 1)?.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+    if w.is_empty() { None } else { Some(w) }
+}
+
+/// 낱말마다 켜지는 서로 다른 입력(글자)의 수와, 낱말끼리 나눠 쓰는 입력의 수를 찍는다 (관찰)
+fn op_print_word_inputs(words: &[&str]) {
+    use std::collections::BTreeSet;
+    let sets: Vec<BTreeSet<String>> = words.iter().map(|w| tokenizer::decompose_to_jamo(w).into_iter().collect()).collect();
+    for (i, w) in words.iter().enumerate() {
+        let mut line = format!("  ◦ 낱말 '{}': 서로 다른 입력 {}개 ({})", w, sets[i].len(), sets[i].iter().cloned().collect::<Vec<_>>().join(" "));
+        for (j, v) in words.iter().enumerate() { if j != i { line += &format!(",  '{}' 와 나눠 쓰는 입력 {}개", v, sets[i].intersection(&sets[j]).count()); } }
+        println!("{line}");
+    }
+}
+
+/// 구간의 출력마다의 비율 (관찰): 90% 이상 / 10% 이하인 출력 수, full 이면 출력마다의 값도 한 줄로. post = 자극 뒤 40틱, pre = 자극 앞 40틱
+fn op_print_outputs(label: &str, post: &[usize], pre: &[usize], n: usize, full: bool) {
+    let n = n.max(1);
+    let hi = |c: &[usize]| c.iter().filter(|&&x| x * 10 >= n * 9).count();
+    let lo = |c: &[usize]| c.iter().filter(|&&x| x * 10 <= n).count();
+    println!("      ◦ 출력마다{label}: 자극 뒤 40틱에 90% 이상 {}개, 10% 이하 {}개  |  자극 앞 40틱에 90% 이상 {}개, 10% 이하 {}개  (출력 {}개, 시행 {}번)", hi(post), lo(post), hi(pre), lo(pre), post.len(), n);
+    if full {
+        let row = |c: &[usize]| c.iter().map(|&x| format!("{:.0}", x as f64 * 100.0 / n as f64)).collect::<Vec<_>>().join(" ");
+        println!("      ◦ 출력마다의 비율 %{label} (자극 뒤): {}", row(post));
+        println!("      ◦ 출력마다의 비율 %{label} (자극 앞): {}", row(pre));
+    }
+}
+
 /// 기능 시험의 시행 안 시간대 (자극을 넣은 뒤의 틱, 끝 포함): 1~5 / 6~10 / 11~20 / 21~40 / 41~60(보상 창) / 61~160 / 161~300(쉼)
 const OP_BINS: [usize; 7] = [5, 10, 20, 40, 60, 160, 300];
 /// 자극 뒤 처음 몇 틱을 틱마다 따로 볼지
@@ -1198,9 +1243,10 @@ impl OpObs {
 
 /// 기능 시험의 한 시행 전체(300틱)를 돌리면서 시간대별 값을 센다. 진행 순서는 op_trial + (보상) + rest(260) 과 같다:
 /// 입력 4틱, 40틱 동안 출력 읽기, 목표가 나왔고 reward 이면 보상 입력 20틱, 나머지 260틱.
-/// 반환: 출력별 발화 여부, 보상을 줬는지, 이 시행의 관찰값
-fn op_trial_observed(net: &mut Network, word: &str, target: usize, reward: bool) -> (Vec<bool>, bool, OpObs) {
+/// 반환: 출력별 발화 여부, 보상을 줬는지, 이 시행의 관찰값, 마지막 OP_PRE 틱에 발화한 출력(다음 시행의 '자극 앞' 바탕)
+fn op_trial_observed(net: &mut Network, word: &str, target: usize, reward: bool) -> (Vec<bool>, bool, OpObs, Vec<bool>) {
     let mut fired = vec![false; net.output_count()];
+    let mut tail = vec![false; net.output_count()];
     let mut o = OpObs { n: 1, ..Default::default() };
     let mut rewarded = false;
     let mut d_seen = false;
@@ -1226,6 +1272,7 @@ fn op_trial_observed(net: &mut Network, word: &str, target: usize, reward: bool)
                 }
             }
         }
+        if t as u64 + OP_PRE > 300 { for &id in &net.tick_ids { if let Some(q) = net.output_seq(id as usize) { tail[q] = true; } } }
         // 출력 뉴런의 편차: 처음 OP_FINE 틱은 매 틱, 그 뒤로는 5틱마다 표본
         if t <= OP_FINE || t % 5 == 0 {
             let devs = net.deviations_of(1);
@@ -1235,7 +1282,7 @@ fn op_trial_observed(net: &mut Network, word: &str, target: usize, reward: bool)
             if t <= OP_FINE { o.f_hi[t - 1] += hi; o.f_samp[t - 1] += devs.len() as u64; }
         }
     }
-    (fired, rewarded, o)
+    (fired, rewarded, o, tail)
 }
 
 /// 뉴런 집단별 편차(조절 수준 ÷ 기준선 − 1) 분포를 한 줄씩 찍는다: 은닉, 출력, 가치
@@ -1258,29 +1305,44 @@ fn op_print_deviations(net: &Network, when: &str) {
 fn op_test(params: &NetParams, trials: usize) {
     println!("{:?}", params);
     let mut net = Network::with_params(params.clone());
-    net.rest(300);
+    // 낱말: --op-words 의 첫 낱말, 없으면 안녕. 목표 고르는 법: --op-target-apart 면 '자극 뒤 − 자극 앞'이 +10%p 이상인 출력 가운데서
+    let word_owned: String = op_arg_words().map(|w| w[0].clone()).unwrap_or_else(|| "안녕".to_string());
+    let word: &str = &word_owned;
+    let apart = std::env::args().any(|a| a == "--op-target-apart");
+    // pre = 바로 앞 쉬는 구간의 마지막 40틱에 발화한 출력 (관찰. 틱의 차례는 net.rest 와 같다)
+    let mut pre = op_rest_tail(&mut net, 300);
     let nout = net.output_count();
     // 먼저 60번 넣어 출력별로 나오는 비율과, 출력끼리 같이 나오는 정도를 잰다
     let probes = 60usize;
     let mut hist: Vec<Vec<bool>> = Vec::new();
-    for _ in 0..probes { hist.push(op_trial(&mut net, "안녕")); net.rest(260); }
+    let mut pre_count = vec![0usize; nout];
+    for _ in 0..probes { for q in 0..nout { if pre[q] { pre_count[q] += 1; } } hist.push(op_trial(&mut net, word)); pre = op_rest_tail(&mut net, 260); }
     let count: Vec<usize> = (0..nout).map(|q| hist.iter().filter(|f| f[q]).count()).collect();
     let always = count.iter().filter(|&&c| c * 20 >= probes * 19).count();
     let never = count.iter().filter(|&&c| c * 20 <= probes).count();
     let per_trial = hist.iter().map(|f| f.iter().filter(|&&x| x).count()).sum::<usize>() as f64 / probes as f64;
     println!("\n한 시행에 나오는 출력 수 평균 {:.1}개", per_trial);
-    println!("입력 A = 안녕. 처음 {probes}번(보상 없음): 출력 {nout}개 중 거의 항상 나옴 {always}개, 거의 안 나옴 {never}개, 그 사이 {}개", nout - always - never);
+    println!("입력 A = {word}. 처음 {probes}번(보상 없음): 출력 {nout}개 중 거의 항상 나옴 {always}개, 거의 안 나옴 {never}개, 그 사이 {}개", nout - always - never);
     // 목표 = 나오는 비율이 50% 에 가장 가까운 출력. 비교 = 그다음으로 가까운 것들 중 목표와 같이 나오는 정도가 가장 낮은 출력
     let mut order: Vec<usize> = (0..nout).collect();
     order.sort_by_key(|&q| (count[q] as i64 * 2 - probes as i64).abs());
+    if apart {
+        // 자극 뒤 − 자극 앞이 +10%p 이상인 출력만 (자극 없이도 나오는 출력을 목표로 삼지 않는다). 없으면 그렇게 찍고 지금 법 그대로
+        let cand: Vec<usize> = order.iter().cloned().filter(|&q| (count[q] as i64 - pre_count[q] as i64) * 10 >= probes as i64).collect();
+        if cand.is_empty() { println!("  ◦ [--op-target-apart] '자극 뒤 − 자극 앞 +10%p 이상'인 출력이 없음: 지금 법(50% 에 가장 가까운 출력)으로 고른다"); } else { order = cand; }
+    }
     let target = order[0];
     let both = |a: usize, b: usize| hist.iter().filter(|f| f[a] == f[b]).count() as f64 / probes as f64;
-    let control = *order[1..6.min(nout)].iter().min_by(|&&a, &&b| both(target, a).partial_cmp(&both(target, b)).unwrap()).unwrap();
+    let control = *order[1.min(order.len() - 1)..6.min(order.len())].iter().min_by(|&&a, &&b| both(target, a).partial_cmp(&both(target, b)).unwrap()).unwrap();
     println!("목표 '{}' (처음 {}/{probes}),  비교 '{}' (처음 {}/{probes}),  둘이 같은 결과였던 시행 {:.0}%",
         net.token_of(target), count[target], net.token_of(control), count[control], both(target, control) * 100.0);
     // 비교를 출력 하나에 맡기면 흔들림이 크다: 처음에 25~75% 로 나오던 다른 출력 전부의 평균도 같이 본다
     let others: Vec<usize> = (0..nout).filter(|&q| q != target && count[q] * 4 >= probes && count[q] * 4 <= probes * 3).collect();
     println!("값 = 구간별로 그 출력이 나온 시행의 비율. '다른 출력' = 처음에 25~75% 로 나오던 나머지 {}개의 평균\n", others.len());
+    op_print_word_inputs(&[word]);
+    println!("  ◦ 처음 {probes}번의 자극 앞 40틱(바탕): 목표 {}/{probes}, 비교 {}/{probes}, 다른 출력 평균 {:.1}%.  목표 고르는 법: {}", pre_count[target], pre_count[control],
+        others.iter().map(|&q| pre_count[q]).sum::<usize>() as f64 * 100.0 / (probes * others.len().max(1)) as f64, if apart { "--op-target-apart (자극 뒤 − 앞 +10%p 이상 가운데 50% 에 가장 가까운 것)" } else { "50% 에 가장 가까운 출력" });
+    op_print_outputs(" (처음 60번)", &count, &pre_count, probes, true);
     println!("구간마다 아래에 붙는 줄 = 시행 안 시간대별 값 (보상 시행 / 보상 없는 시행으로 나눔). 발화 % = 그 집단 뉴런 하나가 한 틱에 발화한 비율,");
     println!("문 열림·닫힘 % = 출력 뉴런 표본 중 편차가 +{OP_GATE} 이상 / −{OP_GATE} 이하인 비율 (처음 {OP_FINE}틱은 매 틱, 그 뒤 5틱마다 표본). 틱 = 자극을 넣은 뒤의 틱\n");
     let (da_n, val_n, pred_n) = (net.da_count(), net.val_count(), net.pred_count());
@@ -1292,8 +1354,17 @@ fn op_test(params: &NetParams, trials: usize) {
         let (mut t_hit, mut c_hit, mut n, mut rewards) = (0usize, 0usize, 0usize, 0usize);
         let mut o_hit = 0usize;
         let (mut obs_r, mut obs_n) = (OpObs::default(), OpObs::default());
+        // 관찰: 자극 앞 40틱의 바탕(목표 / 비교 / 다른 출력), 출력마다의 횟수(자극 뒤 / 앞)
+        let (mut t_pre, mut c_pre, mut o_pre) = (0usize, 0usize, 0usize);
+        let (mut outc, mut prec) = (vec![0usize; nout], vec![0usize; nout]);
         for t in 1..=trials {
-            let (f, rewarded, o) = op_trial_observed(&mut net, "안녕", target, reward);
+            if pre[target] { t_pre += 1; }
+            if pre[control] { c_pre += 1; }
+            o_pre += others.iter().filter(|&&q| pre[q]).count();
+            for q in 0..nout { if pre[q] { prec[q] += 1; } }
+            let (f, rewarded, o, tail) = op_trial_observed(&mut net, word, target, reward);
+            pre = tail;
+            for q in 0..nout { if f[q] { outc[q] += 1; } }
             if f[target] { t_hit += 1; }
             if f[control] { c_hit += 1; }
             o_hit += others.iter().filter(|&&q| f[q]).count();
@@ -1305,6 +1376,9 @@ fn op_test(params: &NetParams, trials: usize) {
                 if reward { obs_r.print("보상 시행", da_n, val_n, pred_n); }
                 obs_n.print("보상 없는 시행", da_n, val_n, pred_n);
                 println!("      · {}", weights(&net));
+                println!("      ◦ 자극 앞 40틱(바탕):  목표 {:>5.1}%   비교 {:>5.1}%   다른 출력 {:>5.1}%", t_pre as f64 * 100.0 / n as f64, c_pre as f64 * 100.0 / n as f64, o_pre as f64 * 100.0 / (n * others.len().max(1)) as f64);
+                op_print_outputs("", &outc, &prec, n, t == block || t == block * 6);
+                t_pre = 0; c_pre = 0; o_pre = 0; outc.iter_mut().for_each(|x| *x = 0); prec.iter_mut().for_each(|x| *x = 0);
                 t_hit = 0; c_hit = 0; n = 0; rewards = 0; o_hit = 0;
                 obs_r = OpObs::default(); obs_n = OpObs::default();
             }
@@ -1321,34 +1395,84 @@ fn op2_test(params: &NetParams, trials: usize) {
     let mut rng = test_rng(params, 3);
     println!("{:?}", params);
     let mut net = Network::with_params(params.clone());
-    net.rest(300);
-    let words: Vec<&str> = if std::env::args().any(|a| a == "--three") { vec!["안녕", "고마워", "사랑해"] } else { vec!["안녕", "고마워"] };
+    // pre = 바로 앞 쉬는 구간의 마지막 40틱에 발화한 출력 (관찰. 틱의 차례는 net.rest 와 같다)
+    let mut pre = op_rest_tail(&mut net, 300);
+    // 낱말: --op-words 가,나[,다] 가 있으면 그것, 없으면 지금대로
+    let given = op_arg_words();
+    let words: Vec<&str> = match &given {
+        Some(v) => v.iter().map(|x| x.as_str()).collect(),
+        None => if std::env::args().any(|a| a == "--three") { vec!["안녕", "고마워", "사랑해"] } else { vec!["안녕", "고마워"] },
+    };
+    let apart = std::env::args().any(|a| a == "--op-target-apart");
     let (nw, nout, probes) = (words.len(), net.output_count(), 60usize);
-    // 입력별로 출력이 나오는 비율
+    // 입력별로 출력이 나오는 비율 (pre_count = 그 입력을 넣기 직전 40틱의 바탕)
     let mut count = vec![vec![0usize; nout]; nw];
-    for _ in 0..probes { for (w, word) in words.iter().enumerate() { let f = op_trial(&mut net, word); for q in 0..nout { if f[q] { count[w][q] += 1; } } net.rest(260); } }
+    let mut pre_count = vec![vec![0usize; nout]; nw];
+    for _ in 0..probes { for (w, word) in words.iter().enumerate() {
+        for q in 0..nout { if pre[q] { pre_count[w][q] += 1; } }
+        let f = op_trial(&mut net, word); for q in 0..nout { if f[q] { count[w][q] += 1; } } pre = op_rest_tail(&mut net, 260); } }
     // 목표: 그 입력에서 50% 에 가깝게 나오는 출력 (서로 겹치지 않게)
+    // --op-target-apart: 그 가운데 '자극 뒤 − 자극 앞'이 +10%p 이상이고 다른 낱말들에서는 25% 아래로 나오는 출력만.
+    //   그런 출력이 없으면 '없음'을 찍고, 그 낱말에서 25~75% 로 나오는 출력(없으면 전부) 가운데 다른 낱말에서의 비율이 가장 낮은 것을 쓴다
     let mut targets: Vec<usize> = Vec::new();
     for w in 0..nw {
         let mut order: Vec<usize> = (0..nout).filter(|q| !targets.contains(q)).collect();
         order.sort_by_key(|&q| (count[w][q] as i64 * 2 - probes as i64).abs());
+        if apart {
+            let other_max = |q: usize| (0..nw).filter(|&v| v != w).map(|v| count[v][q]).max().unwrap_or(0);
+            let cand: Vec<usize> = order.iter().cloned().filter(|&q| (count[w][q] as i64 - pre_count[w][q] as i64) * 10 >= probes as i64 && other_max(q) * 4 < probes).collect();
+            if let Some(&q) = cand.first() { targets.push(q); continue; }
+            let mid: Vec<usize> = order.iter().cloned().filter(|&q| count[w][q] * 4 >= probes && count[w][q] * 4 <= probes * 3).collect();
+            let pool = if mid.is_empty() { order.clone() } else { mid };
+            let q = *pool.iter().min_by_key(|&&q| other_max(q)).unwrap();
+            println!("  ◦ [--op-target-apart] 입력 '{}': 조건(자극 뒤 − 앞 +10%p 이상, 다른 낱말에서 25% 아래)에 맞는 출력이 없음 → 다른 낱말에서의 비율이 가장 낮은 것을 쓴다", words[w]);
+            targets.push(q);
+            continue;
+        }
         targets.push(order[0]);
     }
     let others: Vec<Vec<usize>> = (0..nw).map(|w| (0..nout).filter(|q| !targets.contains(q) && count[w][*q] * 4 >= probes && count[w][*q] * 4 <= probes * 3).collect()).collect();
     println!("\n입력 {nw}개를 무작위 순서로. 값 = 그 입력을 넣었을 때 나온 비율: 자기 목표 / 다른 입력의 목표(평균) / 나머지 출력(처음 25~75% 이던 것들의 평균)");
     for w in 0..nw { println!("  입력 '{}' 의 목표 '{}' (처음 {}/{probes}), 나머지 {}개", words[w], net.token_of(targets[w]), count[w][targets[w]], others[w].len()); }
+    // 여기부터 '◦' 로 시작하는 줄은 관찰(망의 동작과 무관)
+    op_print_word_inputs(&words);
+    println!("  ◦ 목표 고르는 법: {}", if apart { "--op-target-apart (자극 뒤 − 앞 +10%p 이상이고 다른 낱말에서 25% 아래인 출력 가운데 50% 에 가장 가까운 것)" } else { "그 낱말에서 50% 에 가장 가까운 출력" });
+    for w in 0..nw {
+        let mut line = format!("  ◦ 입력 '{}' 의 목표 '{}' 의 처음 {probes}번 비율 (자극 뒤 / 자극 앞 %):", words[w], net.token_of(targets[w]));
+        for v in 0..nw { line += &format!("  {} {:.1} / {:.1}", words[v], count[v][targets[w]] as f64 * 100.0 / probes as f64, pre_count[v][targets[w]] as f64 * 100.0 / probes as f64); }
+        println!("{line}");
+        op_print_outputs(&format!(" [{} 처음 60번]", words[w]), &count[w], &pre_count[w], probes, true);
+    }
+    let da_n = net.da_count();
+    let pred_w = |net: &Network| { let (_, (pw, pn)) = net.slow_input_weights(); format!("예측 입력 가중치 합 {:.4} ({}개)", pw, pn) };
+    println!("  ◦ [시작] {}", pred_w(&net));
     let block = (trials / 6).max(1);
     for (name, reward) in [("보상 없이 반복", false), ("자기 목표가 나오면 보상", true)] {
         let mut own = vec![0usize; nw]; let mut cross = vec![0usize; nw]; let mut oth = vec![0usize; nw]; let mut n = vec![0usize; nw]; let mut rew = vec![0usize; nw];
+        // 관찰: 자극 앞 40틱의 바탕(자기 / 남 / 나머지), 출력마다의 횟수(자극 뒤 / 앞), 보상 창(41~60틱)의 도파민 발화(보상 시행 / 보상 없는 시행: 발화 수, 시행 수)
+        let mut own_p = vec![0usize; nw]; let mut cross_p = vec![0usize; nw]; let mut oth_p = vec![0usize; nw];
+        let mut outc = vec![vec![0usize; nout]; nw]; let mut prec = vec![vec![0usize; nout]; nw];
+        let (mut da_r, mut da_n0) = ((0u64, 0u64), (0u64, 0u64));
         for t in 1..=trials * nw {
             let w = rng.random_range(0..nw);
+            if pre[targets[w]] { own_p[w] += 1; }
+            cross_p[w] += (0..nw).filter(|&v| v != w && pre[targets[v]]).count();
+            oth_p[w] += others[w].iter().filter(|&&q| pre[q]).count();
+            for q in 0..nout { if pre[q] { prec[w][q] += 1; } }
             let f = op_trial(&mut net, words[w]);
+            for q in 0..nout { if f[q] { outc[w][q] += 1; } }
             n[w] += 1;
             if f[targets[w]] { own[w] += 1; }
             cross[w] += (0..nw).filter(|&v| v != w && f[targets[v]]).count();
             oth[w] += others[w].iter().filter(|&&q| f[q]).count();
-            if reward && f[targets[w]] { net.drive_reward(true, 20); rew[w] += 1; }
-            net.rest(260);
+            let rewarded = reward && f[targets[w]];
+            if rewarded { net.drive_reward(true, 20); rew[w] += 1; }
+            // 쉼 260틱 = 보상 창 20틱(자극 뒤 41~60틱) + 240틱. 틱의 차례는 net.rest(260) 과 같다
+            let d0 = net.da_spikes;
+            net.rest(20);
+            let d = net.da_spikes - d0;
+            if rewarded { da_r.0 += d; da_r.1 += 1; } else { da_n0.0 += d; da_n0.1 += 1; }
+            pre = op_rest_tail(&mut net, 240);
             if t % (block * nw) == 0 || t == trials * nw {
                 let mut line = format!("  [{name}] {:>6}번까지:", t / nw);
                 for w in 0..nw {
@@ -1357,6 +1481,20 @@ fn op2_test(params: &NetParams, trials: usize) {
                         cross[w] as f64 * 100.0 / (k * (nw - 1) as f64), oth[w] as f64 * 100.0 / (k * others[w].len().max(1) as f64), rew[w]);
                 }
                 println!("{line}");
+                let mut pline = "      ◦ 자극 앞 40틱(바탕):".to_string();
+                for w in 0..nw {
+                    let k = n[w].max(1) as f64;
+                    pline += &format!("   {}: 목표 {:>5.1}% / 남의 목표 {:>5.1}% / 나머지 {:>5.1}%", words[w], own_p[w] as f64 * 100.0 / k,
+                        cross_p[w] as f64 * 100.0 / (k * (nw - 1).max(1) as f64), oth_p[w] as f64 * 100.0 / (k * others[w].len().max(1) as f64));
+                }
+                println!("{pline}");
+                let full = t == block * nw || t == block * nw * 6;
+                for w in 0..nw { op_print_outputs(&format!(" [{}]", words[w]), &outc[w], &prec[w], n[w], full); }
+                let pct = |p: (u64, u64)| if p.1 == 0 || da_n == 0 { "-".to_string() } else { format!("{:.2}", p.0 as f64 * 100.0 / (p.1 as f64 * 20.0 * da_n as f64)) };
+                println!("      ◦ 보상 창(자극 뒤 41~60틱)의 도파민 발화 % (뉴런 하나가 한 틱에): 보상 시행 {} ({}번) / 보상 없는 시행 {} ({}번)   |   {}", pct(da_r), da_r.1, pct(da_n0), da_n0.1, pred_w(&net));
+                own_p.iter_mut().for_each(|x| *x = 0); cross_p.iter_mut().for_each(|x| *x = 0); oth_p.iter_mut().for_each(|x| *x = 0);
+                outc.iter_mut().for_each(|v| v.iter_mut().for_each(|x| *x = 0)); prec.iter_mut().for_each(|v| v.iter_mut().for_each(|x| *x = 0));
+                da_r = (0, 0); da_n0 = (0, 0);
                 own.iter_mut().for_each(|x| *x = 0); cross.iter_mut().for_each(|x| *x = 0); oth.iter_mut().for_each(|x| *x = 0); n.iter_mut().for_each(|x| *x = 0); rew.iter_mut().for_each(|x| *x = 0);
             }
         }
