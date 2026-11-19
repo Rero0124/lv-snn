@@ -150,9 +150,13 @@ pub struct NetParams {
     /// 받기 문 (발달 과정의 성장): 받는 뉴런의 발화율이 목표를 넘으면 그 뉴런으로 가는 새 접점 시도를 버린다 (다른 상대로 넘기지 않는다).
     ///   Fast = 빠른 발화율(rate_fast, 시정수 약 100틱), Slow = 느린 발화율(rate_avg, 약 5000틱), Both = 둘 중 하나라도
     pub grow_gate: Option<GateMode>,
-    /// 받기 문을 차츰 줄이는 문으로 (지수 K, None = 끔 = 기존의 닫힘/열림): 받는 뉴런의 발화율이 목표를 넘으면 시도를 모두 버리는 대신
-    ///   확률 (목표 ÷ 발화율)^K 로 받는다 (목표 이하면 1). 발화율은 grow_gate 가 고른 것 — Fast = 빠른, Slow = 느린, Both = 둘 중 큰 쪽
-    ///   (K 가 아주 크면 기존 문과 같아진다). grow_gate 가 없으면 효과가 없다
+    /// 받기 문을 차츰 줄이는 문으로 (지수 K). 기본 Some(4.0). None = 옛 닫힘/열림 문(--grow-gate-hard): 받는 뉴런의 발화율이 목표를 넘으면 시도를 모두 버린다.
+    ///   Some(K): 모두 버리는 대신 확률 (목표 ÷ 발화율)^K 로 받는다 (목표 이하면 1). 발화율은 grow_gate 가 고른 것 — Fast = 빠른, Slow = 느린, Both = 둘 중 큰 쪽
+    ///   (K 가 아주 크면 옛 문과 같아진다). grow_gate 가 없으면 효과가 없다.
+    ///   K = 4 는 3(묶지 못함)과 6(입력을 잃는 추체가 덜 고쳐짐) 사이에서 대조로 고른 값이다. 빠른 발화율이 묶는 힘의 한 몫인 것은 뇌 근거가 아니라 계산의 장치다
+    ///   (판정: lv-snn-runs/review-session/softgate-verdict.md).
+    ///   이 칸이 없는 옛 저장 파일은 None 으로 읽는다(저장한 때의 동작 = 옛 문 그대로 이어진다)
+    #[serde(default = "gate_soft_missing")]
     pub grow_gate_soft: Option<f64>,
     /// 활동 의존 소멸의 지수 E (0 = 없음): 받는 뉴런의 느린 발화율이 목표보다 높으면, 받는 쪽 점검에서 그 뉴런으로 들어오는 접점의
     ///   수명에 (목표 ÷ 느린 발화율)^E 를 곱한다 (최소 수명 2만 틱을 적용한 뒤에 곱한다). 목표 이하면 기존 그대로
@@ -246,7 +250,7 @@ pub struct DevObs {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: None, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
     }
 }
 
@@ -254,7 +258,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: None, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
     }
 }
 
@@ -3153,6 +3157,8 @@ pub struct DevState {
     pub spikes: u64, pub food_n: u64, pub water_n: u64, pub da_acc: u64, pub da_n: u64,
     pub need_pre_acc: f64, pub need_drop_acc: f64, pub need_drop_n: u64,
 }
+/// 저장 파일에 grow_gate_soft 가 없으면(이 칸이 생기기 전의 파일) 옛 닫힘/열림 문
+fn gate_soft_missing() -> Option<f64> { None }
 fn default_pred_eta() -> f64 { 5e-5 }
 fn default_gate_base() -> f64 { 0.02 }
 fn default_da_gain() -> f64 { 0.05 }

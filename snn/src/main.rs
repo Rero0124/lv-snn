@@ -136,7 +136,14 @@ fn main() {
             other => { eprintln!("[오류] --grow-gate 는 fast, slow, both 중 하나여야 한다 (받은 값: {:?})", other); std::process::exit(2); }
         };
     }
-    // --grow-gate-soft K: 받기 문을 차츰 줄이는 문으로 — 목표를 넘으면 닫는 대신 확률 (목표 ÷ 발화율)^K 로 받는다 (--grow-gate 가 고른 발화율로. both 는 둘 중 큰 쪽)
+    // 받기 문(--grow-gate)은 기본으로 차츰 줄이는 문 K=4 다: 목표를 넘으면 닫는 대신 확률 (목표 ÷ 발화율)^K 로 받는다 (--grow-gate 가 고른 발화율로. both 는 둘 중 큰 쪽).
+    //   --grow-gate-soft K: K 를 바꾼다 / --grow-gate-hard: 옛 닫힘/열림 문(목표를 넘으면 시도를 모두 버린다).
+    //   K=4 는 3(묶지 못함)과 6(입력을 잃는 추체가 덜 고쳐짐) 사이에서 대조로 고른 값이고, 빠른 발화율이 묶는 힘의 한 몫인 것은 뇌 근거가 아니라 계산의 장치다 (판정: review-session/softgate-verdict.md)
+    let gate_soft_given = args.iter().any(|a| a == "--grow-gate-soft");
+    if args.iter().any(|a| a == "--grow-gate-hard") {
+        if gate_soft_given { eprintln!("[오류] --grow-gate-hard 와 --grow-gate-soft 는 함께 줄 수 없다"); std::process::exit(2); }
+        params.grow_gate_soft = None;
+    }
     if let Some(v) = num("--grow-gate-soft") {
         if !(v > 0.0) { eprintln!("[오류] --grow-gate-soft 의 지수는 0 보다 커야 한다 (받은 값: {v})"); std::process::exit(2); }
         params.grow_gate_soft = Some(v);
@@ -187,11 +194,14 @@ fn main() {
     if params.act_target.is_some() && params.spont_fixed.is_none() {
         println!("[경고] --act-target 을 --spont-fixed 없이 주면 목표(K × 자발 발화 확률)가 1만 틱마다의 갱신에서 움직인다");
     }
-    if params.grow_gate_soft.is_some() && params.grow_gate.is_none() {
+    if gate_soft_given && params.grow_gate.is_none() {
         println!("[경고] --grow-gate-soft 는 --grow-gate 가 없으면 효과가 없다 (어느 발화율을 볼지 정해지지 않는다)");
     }
     if let (Some(k), Some(mode)) = (params.grow_gate_soft, params.grow_gate) {
         println!("[설정] 받기 문: 차츰 줄이는 문 — 받는 뉴런의 발화율({:?})이 목표를 넘으면 확률 (목표 ÷ 발화율)^{k} 로 받는다. '받기 문에 걸려 버린 시도' 는 이 확률로 떨어진 시도다", mode);
+    }
+    if let (None, Some(mode)) = (params.grow_gate_soft, params.grow_gate) {
+        println!("[설정] 받기 문: 옛 닫힘/열림 문(--grow-gate-hard) — 받는 뉴런의 발화율({:?})이 목표를 넘으면 그 뉴런으로 가는 새 접점 시도를 모두 버린다", mode);
     }
     if (params.grow_gate.is_some() || params.prune_act > 0.0) && params.act_target.is_none() {
         println!("[경고] --grow-gate 와 --prune-act 는 --act-target 이 없으면 효과가 없다 (목표가 없다)");
