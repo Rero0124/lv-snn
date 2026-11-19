@@ -148,9 +148,10 @@ pub struct Neuron {
     #[serde(skip)]
     pub elig_in: Vec<(u32, u32)>,
     /// 교과서 BCM 의 LTD 배수와 그것을 계산한 틱 (입력 시냅스 전체를 훑어야 하는 값이라 BCM_CACHE_TICKS 틱 동안 다시 쓴다)
-    #[serde(skip, default = "default_out_gain")]
+    /// 저장한다: 저장하지 않으면 불러온 직후 배수를 새로 계산하게 되어, 끊지 않은 실행(아직 앞에 계산한 값을 쓰는 중)과 약화의 양이 달라진다
+    #[serde(default = "default_out_gain")]
     pub ltd_mult: f64,
-    #[serde(skip)]
+    #[serde(default)]
     pub ltd_mult_tick: u64,
     /// 자신에게로 들어오는 시냅스 역참조 (pre_neuron_idx, syn_idx)
     #[serde(default)]
