@@ -238,7 +238,7 @@ pub struct DevObs {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, rng_seed: None }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: None, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, rng_seed: None }
     }
 }
 
@@ -246,7 +246,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: None, prune_act: 0.0, slow_events: false, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, rng_seed: None }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: None, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, rng_seed: None }
     }
 }
 
@@ -363,6 +363,8 @@ pub struct Network {
     slow_sum: Vec<[f64; 3]>,
     slow_live: Vec<Vec<(u32, u32)>>,
     slow_listed: std::collections::HashSet<u64>,
+    /// 저장 파일에서 읽은 slow_events 의 상태 (받는 뉴런별 합, 살아 있는 입력 목록). 불러온 직후 한 번 쓰고 비운다
+    slow_saved: Option<(Vec<[f64; 3]>, Vec<Vec<(u32, u32)>>)>,
     /// slow_check: 옛 규칙으로 따로 굴린 지연 시냅스 가중치(slow_syn 과 같은 순서), 구간의 최대 차이들 (받은 양, 다시 맞출 때 합의 어긋남)
     slow_shadow: Vec<f64>,
     slow_init: Vec<f64>,
@@ -436,7 +438,10 @@ impl Network {
             net.params.wake_check = params.wake_check;
             net.params.pred_floor = params.pred_floor;
             net.apply_pred_floor();
-            if net.params.slow_events { net.slow_pos.clear(); net.slow_resync(); net.slow_chk_drift = 0.0; }
+            // 지연 시냅스의 방식은 명령줄을 따른다. 새 방식이고 저장 파일에 그 상태(합과 목록)가 있으면 그대로 되살린다: 끊지 않은 실행과 글자 그대로 이어진다.
+            // 없으면(옛 방식으로 저장한 파일, 옛 형식) 시냅스에서 다시 계산한다
+            if net.params.slow_events { net.slow_pos.clear(); if !net.slow_restore() { net.slow_resync(); } net.slow_chk_drift = 0.0; }
+            net.slow_saved = None;
             if net.params.wake_check { net.wake = Some(Box::new(WakeCheck::default())); }
             return net;
         }
@@ -566,6 +571,7 @@ impl Network {
             slow_sum: Vec::new(),
             slow_live: Vec::new(),
             slow_listed: std::collections::HashSet::new(),
+            slow_saved: None,
             slow_shadow: Vec::new(),
             slow_init: Vec::new(),
             slow_chk_recv: 0.0,
@@ -1001,6 +1007,23 @@ impl Network {
             };
             if t < self.neurons.len() { self.neurons[t].receive(amt); }
         }
+    }
+    /// slow_events: 저장 파일에서 읽은 합과 목록을 그대로 되살린다. 되살렸으면 true (저장된 것이 없거나 받는 뉴런 수가 맞지 않으면 false: 부르는 쪽이 다시 계산한다)
+    fn slow_restore(&mut self) -> bool {
+        let Some((sum, live)) = self.slow_saved.take() else { return false };
+        let recv: Vec<usize> = self.val_idx.iter().chain(self.pred_idx.iter()).cloned().collect();
+        if sum.len() != recv.len() { return false; }
+        self.slow_recv = recv;
+        self.slow_pos = vec![u32::MAX; self.neurons.len()];
+        for (p, &t) in self.slow_recv.iter().enumerate() { self.slow_pos[t] = p as u32; }
+        self.slow_listed = live.iter().flatten().map(|&(pre, j)| ((pre as u64) << 32) | j as u64).collect();
+        self.slow_sum = sum;
+        self.slow_live = live;
+        if self.params.slow_check {
+            self.slow_shadow = self.slow_syn.iter().map(|&(pre, j)| self.neurons[pre].synapses.get(j).map_or(0.0, |s| s.weight)).collect();
+            self.slow_init = self.slow_shadow.clone();
+        }
+        true
     }
     /// 지연 시냅스의 위치 목록을 다시 만든다 (전달할 때 전체 시냅스를 훑지 않기 위한 색인)
     /// slow_events: 모든 지연 시냅스를 지금 틱까지 따라잡고 받는 쪽 합을 처음부터 다시 계산한다 (만든 직후, 불러온 직후, 1만 틱마다. 부동소수 오차가 쌓이지 않게).
@@ -2800,6 +2823,8 @@ impl Network {
                 grow_made: self.grow_made, gate_drop: self.gate_drop, added_on_initial: self.added_on_initial, pruned_short: self.pruned_short,
                 wiring_sum: self.wiring_sum, dev_tick: self.dev_tick,
                 drives: self.drives.clone(), dev_state: self.dev_state.clone(),
+                slow_sum: if self.params.slow_events { self.slow_sum.clone() } else { Vec::new() },
+                slow_live: if self.params.slow_events { self.slow_live.clone() } else { Vec::new() },
             }),
         };
         let data = serde_json::to_vec(&snap).expect("직렬화 실패");
@@ -2884,6 +2909,7 @@ impl Network {
             slow_sum: Vec::new(),
             slow_live: Vec::new(),
             slow_listed: std::collections::HashSet::new(),
+            slow_saved: None,
             slow_shadow: Vec::new(),
             slow_init: Vec::new(),
             slow_chk_recv: 0.0,
@@ -2906,6 +2932,7 @@ impl Network {
                 net.grow_made = x.grow_made; net.gate_drop = x.gate_drop; net.added_on_initial = x.added_on_initial; net.pruned_short = x.pruned_short;
                 net.wiring_sum = x.wiring_sum; net.dev_tick = x.dev_tick;
                 net.drives = x.drives; net.dev_state = x.dev_state;
+                if !x.slow_sum.is_empty() && x.slow_sum.len() == x.slow_live.len() { net.slow_saved = Some((x.slow_sum, x.slow_live)); }
                 if net.params.validated { net.plasticity = Self::validated_plasticity(); }
                 if net.params.dopamine { net.apply_dopamine_options(); }
                 // 흔적이 남아 있는 시냅스의 목록(저장하지 않는다)을 다시 만든다
@@ -2924,7 +2951,7 @@ impl Network {
                 if net.params.dopamine { net.apply_dopamine_options(); }
             }
         }
-        if net.params.slow_events { net.slow_resync(); net.slow_chk_drift = 0.0; }
+        if net.params.slow_events && net.slow_saved.is_none() { net.slow_resync(); net.slow_chk_drift = 0.0; }
         Some(net)
     }
 }
@@ -3021,6 +3048,10 @@ struct SnapExt {
     /// 진행 중인 연속 입력 (입력 뉴런들, 남은 틱). 자극이 켜진 틱에 저장해도 이어 돌릴 때 같은 입력이 남은 틱만큼 들어간다
     drives: Vec<(Vec<usize>, u64)>,
     dev_state: Option<DevState>,
+    /// slow_events 로 돌던 망의 받는 뉴런별 합(Σ 가중치 × slow1, Σ 가중치 × slow2, 지연 값)과 살아 있는 입력 목록(차례 그대로).
+    /// 다시 계산하면 더하는 차례가 달라 끝자리가 달라지므로 저장한다. 옛 방식으로 돌던 망은 비어 있다
+    slow_sum: Vec<[f64; 3]>,
+    slow_live: Vec<Vec<(u32, u32)>>,
 }
 
 /// 발달 시험(dev_test)이 틱 사이에 들고 다니는 자극 상태. 저장 파일에 넣어 두면 불러온 실행이 끊지 않은 실행과 같은 자극 차례를 받는다.

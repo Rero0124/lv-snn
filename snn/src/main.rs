@@ -168,7 +168,8 @@ fn main() {
     }
     // --wake-check: 깨어남 확인 (동작은 그대로. "변동 있는 뉴런만 판정"의 규칙이 놓치는 발화가 있는지 센다)
     if args.iter().any(|a| a == "--wake-check") { params.wake_check = true; }
-    if args.iter().any(|a| a == "--slow-events") { params.slow_events = true; }
+    // 지연 시냅스는 기본으로 "발화했을 때만 알리기"(새 방식)로 계산한다. --no-slow-events: 옛 방식(매 틱 전체 훑기). --slow-events 는 받아들이되 기본과 같다(남겨 둠)
+    if args.iter().any(|a| a == "--no-slow-events") { params.slow_events = false; }
     if args.iter().any(|a| a == "--slow-check") {
         params.slow_check = true;
         if !params.slow_events { println!("[경고] --slow-check 는 --slow-events 와 함께 써야 한다. --slow-events 를 켠다"); params.slow_events = true; }
