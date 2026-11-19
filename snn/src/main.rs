@@ -194,6 +194,16 @@ fn main() {
     if params.act_target.is_some() && params.spont_fixed.is_none() {
         println!("[경고] --act-target 을 --spont-fixed 없이 주면 목표(K × 자발 발화 확률)가 1만 틱마다의 갱신에서 움직인다");
     }
+    // --grow-out: 성장이 출력 뉴런도 상대로 삼는다 (기본 꺼짐). 출력에는 받기 문을 걸고 목표는 추체의 목표(K × 자발 발화 확률)를 쓴다 —
+    //   성장·목표·고정 자발 발화 확률·받기 문이 없으면 출력으로 가는 접점이 묶이지 않으므로 켤 수 없다
+    if args.iter().any(|a| a == "--grow-out") {
+        let missing: Vec<&str> = [("--grow", params.grow.is_none()), ("--act-target", params.act_target.is_none()), ("--spont-fixed", params.spont_fixed.is_none()), ("--grow-gate", params.grow_gate.is_none())]
+            .iter().filter(|x| x.1).map(|x| x.0).collect();
+        if !missing.is_empty() { eprintln!("[오류] --grow-out 은 {} 이(가) 있어야 한다 (출력에 거는 받기 문의 목표가 없으면 출력으로 가는 접점이 묶이지 않는다)", missing.join(", ")); std::process::exit(2); }
+        params.grow_out = true;
+        println!("[설정] 출력으로 가는 성장(--grow-out): 발화한 은닉 흥분 뉴런이 감정 주·이성 주 영역이면 성장 빠르기 × {:.3}, 기억 영역이면 × {:.3} 만큼을 은닉으로 가는 시도에 얹어 출력 뉴런 하나(고르게 무작위)에 시도한다. 출력의 받기 문 목표 = 추체의 목표 {:.6}/틱",
+            params.output_frac, params.output_frac * 2.0 / 3.0, params.act_target.unwrap() * params.spont_fixed.unwrap());
+    }
     if gate_soft_given && params.grow_gate.is_none() {
         println!("[경고] --grow-gate-soft 는 --grow-gate 가 없으면 효과가 없다 (어느 발화율을 볼지 정해지지 않는다)");
     }
@@ -881,7 +891,8 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     println!("  (추가 줄의 뜻) 자극 밖 = 자극이 시작된 틱부터 50틱(보상이 붙는 자극은 보상이 끝나고 50틱까지)을 뺀 틱만 센 값. 입력 자극이 직접 일으킨 발화를 빼고 본다");
     println!("  (추가 줄의 뜻) 기대 자발 = 그 구간 틱마다 은닉 뉴런의 자발 발화 확률(0.00001 × spont_scale)을 더한 값. 불응기와 문턱 발화가 겹치는 틱을 빼지 않으므로 실제 자발 발화의 상한이다");
     println!("  (추가 줄의 뜻) 은닉 발화 = 은닉 뉴런만 센 실제 발화 (윗줄의 발화/1k 는 입출력 뉴런 포함). 발화율 분위 = rate_avg × 1000 (시정수 약 5000틱)");
-    println!("  (추가 줄의 뜻) 접점 = 은닉 뉴런이 내보내는 접점을 쌍이 생긴 때로 나눈 것. 처음 쌍(born = 0)에 나중에 더해진 접점은 처음 쪽에 들어간다(그 누계를 따로 찍는다). 자란 쌍은 모두 은닉→은닉");
+    println!("  (추가 줄의 뜻) 접점 = 은닉 뉴런이 내보내는 접점을 쌍이 생긴 때로 나눈 것. 처음 쌍(born = 0)에 나중에 더해진 접점은 처음 쪽에 들어간다(그 누계를 따로 찍는다). 자란 쌍은 은닉→은닉 (--grow-out 을 켜면 은닉→출력도 든다)");
+    println!("  (추가 줄의 뜻) 출력 = 은닉→출력 쌍: 보내는 뉴런이 은닉이고 받는 뉴런이 출력이며 접점이 1 이상인 시냅스 칸. 자란 쌍 = 그 가운데 born > 0. 느린 발화율 = 출력 뉴런의 rate_avg × 1000. 감응도 = excitability. 받은 접점·걸린 시도 = 받는 쪽이 '그 밖'(출력)인 것의 구간 값. 느린÷목표의 목표 = act_target × spont_fixed (없으면 NaN)");
     println!("  (추가 줄의 뜻) 받기 = 구간에 생긴 접점 수와 받기 문에 걸려 버린 시도 수를 받는 뉴런의 종류별로. 소멸의 나이 = 사라진 틱 − 그 접점이 속한 쌍이 생긴 틱 (처음부터 있던 쌍은 0틱에 생긴 것으로 센다)");
     println!("  (추가 줄의 뜻) 입력 = 은닉 뉴런마다 다른 은닉 뉴런에서 들어오는 접점 수(지연 시냅스 제외). 느린÷목표 = rate_avg ÷ (K × 자기 자발 발화 확률). 문이 닫힌 비율은 보고 시점의 값");
     println!("  (추가 줄의 뜻) 표의 '상대 수' = 서로 다른 상대의 수가 아니라 시냅스 칸의 수 (같은 상대로 가는 칸이 둘 이상일 수 있다: 초기 배선의 중복). '쌍 수'도 칸의 수다. 중복 시냅스 = 같은 (보내는 뉴런, 받는 뉴런)의 두 번째 이상인 칸");
@@ -1012,6 +1023,19 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
                     println!("{:>9} {} 문 | 발화율이 목표를 넘은 뉴런의 비율: 빠른 {:.1}%, 느린 {:.1}%, 둘 중 하나 {:.1}% | 느린÷목표 분위 10% {:.2}, 50% {:.2}, 90% {:.2} | 목표가 0 인 뉴런 {}개",
                         "", KINDS[k], f as f64 / n * 100.0, sl as f64 / n * 100.0, b as f64 / n * 100.0, med(&mut r, 0.1), med(&mut r, 0.5), med(&mut r, 0.9), v.len() - with.len());
                 }
+            }
+            {
+                // 출력 줄 (읽기만): 은닉→출력 쌍과 출력 뉴런의 발화율·감응도
+                let (ov, goal) = net.out_observe();
+                let q = |v: &mut Vec<f64>, p: f64| -> f64 { if v.is_empty() { return f64::NAN; } v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[((v.len() as f64 * p) as usize).min(v.len() - 1)] };
+                let mut pairs: Vec<f64> = ov.iter().map(|o| o.0 as f64).collect();
+                let mut rate: Vec<f64> = ov.iter().map(|o| o.3 * 1000.0).collect();
+                let mut exc: Vec<f64> = ov.iter().map(|o| o.4).collect();
+                let mut rg: Vec<f64> = if goal > 0.0 { ov.iter().map(|o| o.3 / goal).collect() } else { Vec::new() };
+                println!("{:>9} 출력 (n={}) | 은닉→출력 쌍 수 {} (그 가운데 자란 쌍 수 {}) | 출력 하나가 받는 쌍: 최소 {:.0} / 중앙 {:.0} / 최대 {:.0} | 받는 쌍이 0 인 출력 수 {} | 은닉→출력 접점 수 {} | 출력의 느린 발화율/1k: 10% {:.2} / 50% {:.2} / 90% {:.2} | 출력의 감응도 중앙 {:.3} | 구간에 출력이 받은 접점 {} / 문에 걸린 시도 {} | 출력의 느린 ÷ 목표: 10% {:.2} / 50% {:.2} / 90% {:.2} | 출력이 내보내는 시냅스 칸 {}",
+                    "", ov.len(), ov.iter().map(|o| o.0).sum::<usize>(), ov.iter().map(|o| o.1).sum::<usize>(), q(&mut pairs, 0.0), q(&mut pairs, 0.5), q(&mut pairs, 1.0),
+                    ov.iter().filter(|o| o.0 == 0).count(), ov.iter().map(|o| o.2).sum::<usize>(), q(&mut rate, 0.1), q(&mut rate, 0.5), q(&mut rate, 0.9), q(&mut exc, 0.5),
+                    net.grow_made[4] - last_made[4], net.gate_drop[4] - last_drop[4], q(&mut rg, 0.1), q(&mut rg, 0.5), q(&mut rg, 0.9), ov.iter().map(|o| o.5).sum::<usize>());
             }
             last_made = net.grow_made; last_drop = net.gate_drop; last_short = net.pruned_short;
             std::io::stdout().flush().ok();

@@ -158,6 +158,13 @@ pub struct NetParams {
     ///   이 칸이 없는 옛 저장 파일은 None 으로 읽는다(저장한 때의 동작 = 옛 문 그대로 이어진다)
     #[serde(default = "gate_soft_missing")]
     pub grow_gate_soft: Option<f64>,
+    /// 성장이 출력 뉴런도 상대로 삼는다 (기본 꺼짐. 이 칸이 없는 저장 파일은 꺼짐으로 읽는다).
+    ///   발화한 은닉 흥분 뉴런이 처음 배선에서 출력으로 보내던 영역(감정 주·이성 주: output_frac, 기억: output_frac × 2/3)에 있으면,
+    ///   은닉으로 가는 시도에 얹어서(줄이지 않는다) 성장 빠르기 × 그 몫만큼 출력 뉴런 하나(거리 없이 고르게 무작위)에 새 접점을 시도한다.
+    ///   받는 출력 뉴런에는 은닉과 같은 받기 문(grow_gate, grow_gate_soft)을 걸고, 목표는 추체의 목표(act_target × spont_fixed)를 쓴다 —
+    ///   출력은 자발 발화 배수가 0 이라 자기 목표가 없다. 바깥에서 준 목표가 출력에도 쓰이는 것이다. 새 상수는 없다
+    ///   (명세: lv-snn-runs/review-session/output-growth-spec.md)
+    pub grow_out: bool,
     /// 활동 의존 소멸의 지수 E (0 = 없음): 받는 뉴런의 느린 발화율이 목표보다 높으면, 받는 쪽 점검에서 그 뉴런으로 들어오는 접점의
     ///   수명에 (목표 ÷ 느린 발화율)^E 를 곱한다 (최소 수명 2만 틱을 적용한 뒤에 곱한다). 목표 이하면 기존 그대로
     pub prune_act: f64,
@@ -250,7 +257,7 @@ pub struct DevObs {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), grow_out: false, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
     }
 }
 
@@ -258,7 +265,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), grow_out: false, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
     }
 }
 
@@ -2218,22 +2225,20 @@ impl Network {
         use rand::prelude::*;
         // 성장의 난수: 평소에는 전역 난수기 하나를 순서대로 쓴다(기존). 결정적 난수면 발화한 뉴런마다
         // (씨앗, 5, 뉴런, 0, 틱)에서 작은 난수기를 만들어 그 뉴런의 성장에만 쓴다
-        enum Draw { Shared(rand::rngs::ThreadRng), Keyed(rand::rngs::StdRng) }
-        impl Draw {
-            fn f(&mut self) -> f64 { match self { Draw::Shared(r) => r.random::<f64>(), Draw::Keyed(r) => r.random::<f64>() } }
-            fn below(&mut self, n: usize) -> usize { match self { Draw::Shared(r) => r.random_range(0..n), Draw::Keyed(r) => r.random_range(0..n) } }
-        }
         let seed = self.params.rng_seed.map(|s| crate::neuron::keyed_u64(s, 0, 0, 0, 0) | 1);
-        let mut rng = Draw::Shared(rand::rng());
+        let mut rng = GrowDraw::Shared(rand::rng());
         let hidden_end = self.hippocampus_range.1;
         let now = self.global_tick;
         let target = self.params.target_syn as f64;
-        let min_w = self.params.min_weight;
         let regions = [(self.emotion_range, 50usize), (self.reason_range, 50), (self.memory_range, 50), (self.hippocampus_range, 25)];
+        let gated = self.params.grow_gate.is_some();
+        // 출력으로 가는 성장 (grow_out): 출력의 목표는 추체의 목표. 목표가 없으면(act_target 이나 spont_fixed 가 없으면) 출력으로 자라지 않는다
+        let out_goal = self.out_target();
+        let out_on = self.params.grow_out && gated && out_goal > 0.0 && !self.output_idx.is_empty();
         for &(nid, _) in spikes {
             let pre = nid as usize;
             if pre >= hidden_end { continue; }
-            if let Some(sd) = seed { rng = Draw::Keyed(rand::rngs::StdRng::seed_from_u64(crate::neuron::keyed_u64(sd, 5, pre as u64, 0, now))); }
+            if let Some(sd) = seed { rng = GrowDraw::Keyed(rand::rngs::StdRng::seed_from_u64(crate::neuron::keyed_u64(sd, 5, pre as u64, 0, now))); }
             // 뉴런이 세는 것은 연결 수가 아니라 자기 시냅스 접점 수의 합
             let n = self.neurons[pre].synapses.iter().map(|s| s.count as f64).sum::<f64>();
             // 목표가 0 이면 개수를 보지 않는다: 성장은 일정하고, 개수는 소멸과의 균형으로 정해진다
@@ -2246,89 +2251,133 @@ impl Network {
             let expect = rate * drive * da;
             let mut count = expect.floor() as usize;
             if rng.f() < expect - expect.floor() { count += 1; }
-            if count == 0 { continue; }
-            let Some(&((start, end), cols)) = regions.iter().find(|r| pre >= r.0.0 && pre < r.0.1) else { continue };
-            let (k, rows) = (pre - start, (end - start) / cols);
-            let (col, row) = ((k % cols) as f64, (k / cols) as f64);
             let inhibitory = self.neurons[pre].inhibitory;
-            for _ in 0..count {
-                let post = if inhibitory || rng.f() < 0.8 {
-                    let u1: f64 = rng.f().max(1e-12);
-                    let u2: f64 = rng.f();
-                    let r = (-2.0 * u1.ln()).sqrt() * self.params.grow_sigma;
-                    let (c, w) = ((col + r * (std::f64::consts::TAU * u2).cos()).round(), (row + r * (std::f64::consts::TAU * u2).sin()).round());
-                    if c < 0.0 || w < 0.0 || c >= cols as f64 || w >= rows as f64 { continue; }
-                    start + w as usize * cols + c as usize
-                } else { rng.below(hidden_end) };
-                if post == pre { continue; }
-                // 받기 문: 받는 뉴런의 발화율이 자기 목표를 넘으면 이 시도를 버린다 (다른 상대로 넘기지 않는다). 받는 뉴런 자신의 값만 읽는다
-                let post_kind = Self::kind_index(self.neurons[post].cell_type);
-                if let Some(mode) = self.params.grow_gate {
-                    let goal = self.act_target_of(post);
-                    if goal > 0.0 {
-                        let q = &self.neurons[post];
-                        let closed = match self.params.grow_gate_soft {
-                            None => match mode {
-                                GateMode::Fast => q.rate_fast > goal,
-                                GateMode::Slow => q.rate_avg > goal,
-                                GateMode::Both => q.rate_fast > goal || q.rate_avg > goal,
-                            },
-                            // 차츰 줄이는 문: 목표를 넘은 만큼 받을 확률이 준다. 난수는 이 뉴런의 성장 난수기에서 뽑는다 (목표를 넘었을 때만 하나)
-                            Some(k) => {
-                                let r = match mode { GateMode::Fast => q.rate_fast, GateMode::Slow => q.rate_avg, GateMode::Both => q.rate_fast.max(q.rate_avg) };
-                                r > goal && rng.f() >= (goal / r).powf(k)
-                            }
-                        };
-                        if closed { self.gate_drop[post_kind] += 1; continue; }
+            if count > 0 {
+                if let Some(&((start, end), cols)) = regions.iter().find(|r| pre >= r.0.0 && pre < r.0.1) {
+                    let (k, rows) = (pre - start, (end - start) / cols);
+                    let (col, row) = ((k % cols) as f64, (k / cols) as f64);
+                    for _ in 0..count {
+                        let post = if inhibitory || rng.f() < 0.8 {
+                            let u1: f64 = rng.f().max(1e-12);
+                            let u2: f64 = rng.f();
+                            let r = (-2.0 * u1.ln()).sqrt() * self.params.grow_sigma;
+                            let (c, w) = ((col + r * (std::f64::consts::TAU * u2).cos()).round(), (row + r * (std::f64::consts::TAU * u2).sin()).round());
+                            if c < 0.0 || w < 0.0 || c >= cols as f64 || w >= rows as f64 { continue; }
+                            start + w as usize * cols + c as usize
+                        } else { rng.below(hidden_end) };
+                        if post == pre { continue; }
+                        // 받기 문의 목표: 받는 뉴런 자신의 값만 읽는다 (문이 없으면 0 = 걸지 않는다)
+                        let goal = if gated { self.act_target_of(post) } else { 0.0 };
+                        self.grow_attempt(pre, post, goal, &mut rng, now);
                     }
                 }
-                let jitter = 1.0 + self.params.new_spread * (rng.f() * 2.0 - 1.0);
-                let (post_med, new_w) = (self.unit_med.get(post).copied().unwrap_or(0.0), self.params.new_weight * jitter);
-                // 이미 연결된 상대면 접점이 하나 늘어난다: 접점 하나의 세기(가중치 ÷ 개수)만큼 가중치가 커진다
-                if let Some(s) = self.neurons[pre].synapses.iter_mut().find(|s| s.target as usize == post && s.slow_rate == 0.0) {
-                    // 한 쌍 사이의 접점 수에는 한계가 있다 (축삭과 수상돌기가 만나는 자리가 한정됨). 많을수록 더 생기기 어렵고, 한계에 닿으면 생기지 않는다.
-                    // 세기가 한계(CONN_CAP)에 닿은 연결에도 더 생기지 않는다 — 세기는 그대로인데 개수만 늘어나는 일을 막는다
-                    if s.count >= MAX_CONTACTS_PER_PAIR || s.weight >= CONN_CAP * 0.98 { continue; }
-                    if rng.f() < s.count as f64 / MAX_CONTACTS_PER_PAIR as f64 { continue; }
-                    // 늘어나는 접점도 새 접점과 같은 세기로 시작한다
-                    let unit = if post_med > 0.0 { post_med * new_w } else { s.weight / s.count.max(1) as f64 };
-                    // 이미 강한 연결일수록 덜 보탠다 (한계에 닿으면 0)
-                    let room = (1.0 - s.weight / CONN_CAP).max(0.0);
-                    s.weight += unit.max(2.0 * min_w) * room;
-                    s.count += 1;
-                    let initial = s.born == 0;
-                    self.sprouted += 1;
-                    self.grow_made[post_kind] += 1;
-                    if initial { self.added_on_initial += 1; }
-                    continue;
-                }
-                let len = self.neurons[pre].synapses.len();
-                // 새 연결: 접점 하나짜리. 세기는 받는 뉴런의 입력에서 접점 하나의 세기 중앙값 × new_weight (보통보다 약하게 시작).
-                // 받는 뉴런에 아직 그 값이 없으면 보내는 뉴런이 가진 연결들의 중앙값을 쓴다
-                let um = self.unit_med.get(post).copied().unwrap_or(0.0);
-                let base = if um > 0.0 { um } else { self.neurons[pre].median_out_weight() };
-                // 너무 약하면 있으나 마나이고 곧 사라지므로 가지치기 기준의 2배를 바닥으로, 너무 강하지 않게 한계를 천장으로 둔다
-                let w = (base * new_w).max(2.0 * min_w).min(CONN_CAP);
-                let mut syn = crate::synapse::Synapse::new(post as NeuronId, w);
-                syn.born = now;
-                syn.t = now;
-                // 형태 규칙: 추체세포가 다른 영역의 추체세포에 붙으면 수상돌기, Sst 는 추체세포의 수상돌기, 추체 → Sst 는 촉진형
-                let (pt, qt) = (self.neurons[pre].cell_type, self.neurons[post].cell_type);
-                if self.neurons[post].has_dendrite {
-                    syn.on_dendrite = pt == CellType::Sst || (pt == CellType::Pyramidal && self.area_of(pre) != self.area_of(post));
-                }
-                if pt == CellType::Pyramidal && qt == CellType::Sst { syn.facilitating = true; }
-                syn.last_co = now;
-                if let Some(d) = self.plasticity.short_decay { syn.short_decay = d; }
-                if let Some(p) = self.params.release { syn.p_rel = p; }
-                let due = now + self.prune_life(w);
-                self.neurons[pre].synapses.push(syn);
-                self.neurons[post].incoming.push((pre, len));
-                let _ = due;
-                self.sprouted += 1;
-                self.grow_made[post_kind] += 1;
+            }
+            // 출력으로 가는 시도: 은닉으로 가는 시도를 다 한 뒤에 얹는다. 억제 뉴런은 하지 않는다(성장에서 억제 뉴런은 가까운 칸으로만 간다).
+            //   몫은 처음 배선에서 출력으로 가던 몫 그대로: 감정 주·이성 주 output_frac, 기억 output_frac × 2/3, 그 밖(지도·해마) 0
+            if !out_on || inhibitory { continue; }
+            let within = |r: (usize, usize)| pre >= r.0 && pre < r.1;
+            let frac = if within(self.emotion_main_range) || within(self.reason_main_range) { self.params.output_frac }
+                else if within(self.memory_range) { self.params.output_frac * 2.0 / 3.0 } else { 0.0 };
+            if frac <= 0.0 { continue; }
+            // 결정적 난수면 (씨앗, 7, 뉴런, 0, 틱)의 따로 된 난수기: 은닉 성장이 뽑는 난수의 차례를 건드리지 않는다. 씨앗이 없으면 전역 난수기를 이어 쓴다
+            if let Some(sd) = seed { rng = GrowDraw::Keyed(rand::rngs::StdRng::seed_from_u64(crate::neuron::keyed_u64(sd, 7, pre as u64, 0, now))); }
+            let expect = rate * da * frac;
+            let mut count = expect.floor() as usize;
+            if rng.f() < expect - expect.floor() { count += 1; }
+            for _ in 0..count {
+                let post = self.output_idx[rng.below(self.output_idx.len())];
+                self.grow_attempt(pre, post, out_goal, &mut rng, now);
             }
         }
+    }
+
+    /// 출력 뉴런에 거는 받기 문의 목표 (틱당 발화율): 추체의 목표 = act_target × spont_fixed. 둘 중 하나라도 없으면 0
+    fn out_target(&self) -> f64 {
+        match (self.params.act_target, self.params.spont_fixed) { (Some(k), Some(p)) => k * p, _ => 0.0 }
+    }
+
+    /// 새 접점 시도 하나 (pre → post): 받기 문(goal > 0 일 때만) → 이미 이어진 쌍이면 접점 +1, 아니면 새 쌍. 은닉으로 가는 시도와 출력으로 가는 시도가 함께 쓴다
+    fn grow_attempt(&mut self, pre: usize, post: usize, goal: f64, rng: &mut GrowDraw, now: u64) {
+        let min_w = self.params.min_weight;
+        // 받기 문: 받는 뉴런의 발화율이 목표를 넘으면 이 시도를 버린다 (다른 상대로 넘기지 않는다)
+        let post_kind = Self::kind_index(self.neurons[post].cell_type);
+        if let Some(mode) = self.params.grow_gate {
+            if goal > 0.0 {
+                let q = &self.neurons[post];
+                let closed = match self.params.grow_gate_soft {
+                    None => match mode {
+                        GateMode::Fast => q.rate_fast > goal,
+                        GateMode::Slow => q.rate_avg > goal,
+                        GateMode::Both => q.rate_fast > goal || q.rate_avg > goal,
+                    },
+                    // 차츰 줄이는 문: 목표를 넘은 만큼 받을 확률이 준다. 난수는 이 뉴런의 성장 난수기에서 뽑는다 (목표를 넘었을 때만 하나)
+                    Some(k) => {
+                        let r = match mode { GateMode::Fast => q.rate_fast, GateMode::Slow => q.rate_avg, GateMode::Both => q.rate_fast.max(q.rate_avg) };
+                        r > goal && rng.f() >= (goal / r).powf(k)
+                    }
+                };
+                if closed { self.gate_drop[post_kind] += 1; return; }
+            }
+        }
+        let jitter = 1.0 + self.params.new_spread * (rng.f() * 2.0 - 1.0);
+        let (post_med, new_w) = (self.unit_med.get(post).copied().unwrap_or(0.0), self.params.new_weight * jitter);
+        // 이미 연결된 상대면 접점이 하나 늘어난다: 접점 하나의 세기(가중치 ÷ 개수)만큼 가중치가 커진다
+        if let Some(s) = self.neurons[pre].synapses.iter_mut().find(|s| s.target as usize == post && s.slow_rate == 0.0) {
+            // 한 쌍 사이의 접점 수에는 한계가 있다 (축삭과 수상돌기가 만나는 자리가 한정됨). 많을수록 더 생기기 어렵고, 한계에 닿으면 생기지 않는다.
+            // 세기가 한계(CONN_CAP)에 닿은 연결에도 더 생기지 않는다 — 세기는 그대로인데 개수만 늘어나는 일을 막는다
+            if s.count >= MAX_CONTACTS_PER_PAIR || s.weight >= CONN_CAP * 0.98 { return; }
+            if rng.f() < s.count as f64 / MAX_CONTACTS_PER_PAIR as f64 { return; }
+            // 늘어나는 접점도 새 접점과 같은 세기로 시작한다
+            let unit = if post_med > 0.0 { post_med * new_w } else { s.weight / s.count.max(1) as f64 };
+            // 이미 강한 연결일수록 덜 보탠다 (한계에 닿으면 0)
+            let room = (1.0 - s.weight / CONN_CAP).max(0.0);
+            s.weight += unit.max(2.0 * min_w) * room;
+            s.count += 1;
+            let initial = s.born == 0;
+            self.sprouted += 1;
+            self.grow_made[post_kind] += 1;
+            if initial { self.added_on_initial += 1; }
+            return;
+        }
+        let len = self.neurons[pre].synapses.len();
+        // 새 연결: 접점 하나짜리. 세기는 받는 뉴런의 입력에서 접점 하나의 세기 중앙값 × new_weight (보통보다 약하게 시작).
+        // 받는 뉴런에 아직 그 값이 없으면 보내는 뉴런이 가진 연결들의 중앙값을 쓴다
+        let um = self.unit_med.get(post).copied().unwrap_or(0.0);
+        let base = if um > 0.0 { um } else { self.neurons[pre].median_out_weight() };
+        // 너무 약하면 있으나 마나이고 곧 사라지므로 가지치기 기준의 2배를 바닥으로, 너무 강하지 않게 한계를 천장으로 둔다
+        let w = (base * new_w).max(2.0 * min_w).min(CONN_CAP);
+        let mut syn = crate::synapse::Synapse::new(post as NeuronId, w);
+        syn.born = now;
+        syn.t = now;
+        // 형태 규칙: 추체세포가 다른 영역의 추체세포에 붙으면 수상돌기, Sst 는 추체세포의 수상돌기, 추체 → Sst 는 촉진형
+        let (pt, qt) = (self.neurons[pre].cell_type, self.neurons[post].cell_type);
+        if self.neurons[post].has_dendrite {
+            syn.on_dendrite = pt == CellType::Sst || (pt == CellType::Pyramidal && self.area_of(pre) != self.area_of(post));
+        }
+        if pt == CellType::Pyramidal && qt == CellType::Sst { syn.facilitating = true; }
+        syn.last_co = now;
+        if let Some(d) = self.plasticity.short_decay { syn.short_decay = d; }
+        if let Some(p) = self.params.release { syn.p_rel = p; }
+        self.neurons[pre].synapses.push(syn);
+        self.neurons[post].incoming.push((pre, len));
+        self.sprouted += 1;
+        self.grow_made[post_kind] += 1;
+    }
+
+    /// 출력 쪽 관찰값 (발달 시험의 "출력" 줄, 읽기만): 출력 뉴런마다 (은닉에서 받는 쌍 수, 그 가운데 자란 쌍(born > 0) 수, 접점 수 합,
+    /// 느린 발화율 rate_avg, 감응도 excitability, 내보내는 시냅스 칸 수), 그리고 출력에 거는 목표(없으면 0).
+    /// 쌍 = 보내는 뉴런이 은닉이고 받는 뉴런이 출력이며 접점(count)이 1 이상인 시냅스 칸
+    pub fn out_observe(&self) -> (Vec<(usize, usize, usize, f64, f64, usize)>, f64) {
+        let hidden_end = self.hippocampus_range.1;
+        let pos: std::collections::HashMap<usize, usize> = self.output_idx.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+        let mut v: Vec<(usize, usize, usize, f64, f64, usize)> = self.output_idx.iter().map(|&i| { let n = &self.neurons[i]; (0, 0, 0, n.rate_avg, n.excitability, n.synapses.len()) }).collect();
+        for n in &self.neurons[..hidden_end] {
+            for s in &n.synapses {
+                if s.count == 0 { continue; }
+                if let Some(&k) = pos.get(&(s.target as usize)) { v[k].0 += 1; if s.born > 0 { v[k].1 += 1; } v[k].2 += s.count as usize; }
+            }
+        }
+        (v, self.out_target())
     }
 
     /// 연결이 함께 활동하지 않고 버티는 시간 (틱): prune_tau × ln(가중치 ÷ min_weight), 최소 2만 틱.
@@ -3156,6 +3205,12 @@ pub struct DevState {
     /// 다음 보고 줄까지의 누적값 (저장 틱이 보고 간격의 배수가 아닐 때를 위해)
     pub spikes: u64, pub food_n: u64, pub water_n: u64, pub da_acc: u64, pub da_n: u64,
     pub need_pre_acc: f64, pub need_drop_acc: f64, pub need_drop_n: u64,
+}
+/// 성장의 난수기: 전역 난수기 하나를 차례로 쓰거나(씨앗 없음), 뉴런마다 열쇠로 만든 작은 난수기를 쓴다(결정적 난수)
+enum GrowDraw { Shared(rand::rngs::ThreadRng), Keyed(rand::rngs::StdRng) }
+impl GrowDraw {
+    fn f(&mut self) -> f64 { use rand::prelude::*; match self { GrowDraw::Shared(r) => r.random::<f64>(), GrowDraw::Keyed(r) => r.random::<f64>() } }
+    fn below(&mut self, n: usize) -> usize { use rand::prelude::*; match self { GrowDraw::Shared(r) => r.random_range(0..n), GrowDraw::Keyed(r) => r.random_range(0..n) } }
 }
 /// 저장 파일에 grow_gate_soft 가 없으면(이 칸이 생기기 전의 파일) 옛 닫힘/열림 문
 fn gate_soft_missing() -> Option<f64> { None }
