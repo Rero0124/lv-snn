@@ -141,6 +141,15 @@ fn main() {
         if !(v > 0.0) { eprintln!("[오류] --grow-gate-soft 의 지수는 0 보다 커야 한다 (받은 값: {v})"); std::process::exit(2); }
         params.grow_gate_soft = Some(v);
     }
+    // --scale-in η: 입력의 세기를 고르는 규칙 — 1만 틱마다 은닉의 추체마다 (느린 발화율 ÷ 받기 문의 목표 − 1)을 ±1 로 자른 오차만큼,
+    //   들어오는 흥분 시냅스(은닉의 흥분 뉴런 + 입력층)의 굳은 가중치에 (1 − η × 오차)를 곱한다. --act-target 이 있어야 한다
+    // --scale-in-hidden-only: 입력층에서 오는 시냅스는 빼고 은닉에서 오는 것만 / --no-homeo-hidden: 은닉 뉴런의 감응도 항상성을 끈다(대조용)
+    if let Some(v) = num("--scale-in") {
+        if !(v >= 0.0 && v <= 0.01) { eprintln!("[오류] --scale-in 의 η 는 0 이상 0.01 이하여야 한다 (받은 값: {v}). 감응도(한 번에 최대 2%)의 절반을 넘기지 않는다"); std::process::exit(2); }
+        params.scale_in = Some(v);
+    }
+    if args.iter().any(|a| a == "--scale-in-hidden-only") { params.scale_in_hidden_only = true; }
+    if args.iter().any(|a| a == "--no-homeo-hidden") { params.no_homeo_hidden = true; }
     if let Some(v) = num("--prune-act") { params.prune_act = v; }
     // --slow-events: 지연 시냅스를 "발화했을 때만 알리기"로 계산 (규칙은 같다) / --slow-check: 옛 방식의 값도 함께 계산해 차이를 1000틱마다 찍는다
     // --warmup-quiet: 기준선을 잡는 준비 구간 동안만 은닉 뉴런의 자발 발화를 끈다
@@ -174,6 +183,7 @@ fn main() {
         params.slow_check = true;
         if !params.slow_events { println!("[경고] --slow-check 는 --slow-events 와 함께 써야 한다. --slow-events 를 켠다"); params.slow_events = true; }
     }
+    if params.scale_in.is_some() && params.act_target.is_none() { eprintln!("[오류] --scale-in 은 목표가 있어야 한다: --act-target K 를 함께 준다"); std::process::exit(2); }
     if params.act_target.is_some() && params.spont_fixed.is_none() {
         println!("[경고] --act-target 을 --spont-fixed 없이 주면 목표(K × 자발 발화 확률)가 1만 틱마다의 갱신에서 움직인다");
     }
@@ -867,6 +877,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     println!("  (추가 줄의 뜻) 표의 '상대 수' = 서로 다른 상대의 수가 아니라 시냅스 칸의 수 (같은 상대로 가는 칸이 둘 이상일 수 있다: 초기 배선의 중복). '쌍 수'도 칸의 수다. 중복 시냅스 = 같은 (보내는 뉴런, 받는 뉴런)의 두 번째 이상인 칸");
     println!("  (추가 줄의 뜻) 조절 줄의 문 = 은닉 뉴런의 조절 수준을 10틱마다 읽어, 기준선보다 25% 이상 높은 비율(위)과 25% 이상 낮은 비율(아래)을 구간에 걸쳐 평균한 값. 도파민 수상돌기 = 도파민 뉴런 수상돌기 값의 10틱마다 표본 평균");
     let (mut gate_up, mut gate_down, mut gate_n, mut dend_acc, mut dend_n) = (0u64, 0u64, 0u64, 0.0f64, 0u64);
+    if params.scale_in.is_some() { println!("  (추가 줄의 뜻) 세기 = 입력의 세기를 고르는 규칙(--scale-in)이 지난 보고 뒤로 한 일. 1만 틱마다 추체마다 (느린 발화율 ÷ 목표 − 1)을 ±1 로 자른 오차 × η 만큼 들어오는 흥분 가중치를 곱해 고친다. 누적 배수 = 그 구간에 그 뉴런의 입력에 곱해진 값의 곱"); }
     println!("  (추가 줄의 뜻) 몸 = 구간에 끝난 보상(먹이·물)마다 보상 입력 직전의 결핍과 그 200틱 뒤까지 내려간 양의 평균, 그리고 보조 뉴런 무리별 평균 감응도(항상성이 1만 틱마다 고친다. 무리가 없으면 NaN)");
     let (mut need_before, mut need_pre_acc, mut need_drop_acc, mut need_drop_n) = (0.0f64, 0.0f64, 0.0f64, 0u64);
     if let Some(d) = &restored { need_before = d.need_before; need_pre_acc = d.need_pre_acc; need_drop_acc = d.need_drop_acc; need_drop_n = d.need_drop_n; }
@@ -960,6 +971,11 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
             println!("{:>9} 소멸 | 구간에 사라진 접점 {} 중 수명이 줄어서 사라진 수 {} | 사라진 접점의 나이 중앙값 {:.0}틱 (나이를 아는 {}개, 모르는 {}개)",
                 "", net.pruned - last_pruned, net.pruned_short - last_short, med(&mut ages, 0.5), age_n, net.prune_age_unknown);
             net.prune_age_unknown = 0;
+            if net.params_ref().scale_in.is_some() {
+                let (o, q, n) = net.scale_obs_take();
+                println!("{:>9} 세기 | 구간에 입력 세기를 고친 추체: 줄인 {}번, 키운 {}번 (뉴런·번, 1만 틱에 한 번) | 구간 누적 배수(고친 뉴런 {}개) 분위 10% {:.4}, 50% {:.4}, 90% {:.4} | 곱한 시냅스 {}번 중 아래 한계에 걸린 {}, 위 한계에 걸린 {}",
+                    "", o[0], o[1], n, q[0], q[1], q[2], o[4], o[2], o[3]);
+            }
             let ratio = |o: &(usize, usize, f64, f64, f64, usize, usize)| if o.4 > 0.0 { o.3 / o.4 } else { f64::NAN };
             let mut inc: Vec<f64> = dv.per.iter().map(|o| (o.5 + o.6) as f64).collect();
             let zero: Vec<&(usize, usize, f64, f64, f64, usize, usize)> = dv.per.iter().filter(|o| o.5 + o.6 == 0).collect();

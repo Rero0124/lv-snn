@@ -184,6 +184,14 @@ pub struct NetParams {
     pub no_homeo_da: bool,
     /// 시험용: 도파민 뉴런의 수상돌기 기여를 0 아래로 내리지 않는다 (예측 억제가 평소 발화를 누르지 못한다. 빠진 보상의 내려감도 없어진다 — 뇌와 다르다)
     pub pred_floor: bool,
+    /// 입력의 세기를 고르는 규칙 (None = 끔). Some(η): 1만 틱마다 은닉의 추체마다 오차 = clamp(느린 발화율 ÷ 받기 문의 목표 − 1, ±1) 를 내어,
+    ///   그 뉴런으로 들어오는 흥분 시냅스(은닉의 흥분 뉴런과 입력층에서 오는 것)의 굳은 가중치에 (1 − η × 오차)를 곱한다. 오차의 절댓값이 0.1 아래면 하지 않는다.
+    ///   억제·조절·지연 시냅스와 일시 성분·흔적은 건드리지 않는다. act_target(목표)이 있어야 한다
+    pub scale_in: Option<f64>,
+    /// scale_in 에서 입력층에서 오는 시냅스를 뺀다 (은닉의 흥분 뉴런에서 오는 것만 곱한다)
+    pub scale_in_hidden_only: bool,
+    /// 1만 틱마다의 항상성(감응도)에서 은닉 뉴런을 뺀다 (대조용: 입력 세기 조절만으로 발화율이 묶이는지)
+    pub no_homeo_hidden: bool,
     /// 결정적 난수의 씨앗 (None = 지금처럼 전역 난수기). Some(N) 이면 실행 중의 난수(잡음, 자발 발화, 확률 전달, 성장)를
     ///   (N, 쓰임새, 뉴런, 시냅스 번호, 틱)에서 정한다. 배선 씨앗(seed)이 없으면 배선도 N 으로 한다
     pub rng_seed: Option<u64>,
@@ -238,7 +246,7 @@ pub struct DevObs {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: None, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, rng_seed: None }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: None, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
     }
 }
 
@@ -246,7 +254,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: None, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, rng_seed: None }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: None, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
     }
 }
 
@@ -371,6 +379,9 @@ pub struct Network {
     slow_chk_recv: f64,
     slow_chk_drift: f64,
     wake: Option<Box<WakeCheck>>,
+    /// scale_in 의 관찰값 (읽기만. 저장하지 않는다): 지난 보고 뒤로 [줄인 뉴런·번, 키운 뉴런·번, 아래 한계에 걸린 시냅스·번, 위 한계에 걸린 시냅스·번, 곱한 시냅스·번] 과 뉴런별 누적 배수
+    pub scale_obs: [u64; 5],
+    pub scale_cum: Vec<f64>,
     /// 발달 시험(dev_test)이 진행한 틱 수. 저장할 때 함께 적어, 불러온 뒤 그 틱부터 이어 간다
     pub dev_tick: u64,
     /// 발달 시험이 들고 있는 자극 상태 (저장 직전에 시험이 넣고, 불러온 뒤 시험이 꺼내 쓴다). 옛 저장 파일에는 없다
@@ -577,6 +588,8 @@ impl Network {
             slow_chk_recv: 0.0,
             slow_chk_drift: 0.0,
             wake: None,
+            scale_obs: [0; 5],
+            scale_cum: Vec::new(),
             dev_tick: 0,
             dev_state: None,
         };
@@ -2449,12 +2462,77 @@ impl Network {
         let need_start = self.taste_idx.iter().flatten().copied().min().unwrap_or(self.aux_end);
         let (skip_need, skip_da, aux_end) = (self.params.no_homeo_need, self.params.no_homeo_da, self.aux_end);
         let validated = self.params.validated;
+        let (skip_hidden, hidden_end) = (self.params.no_homeo_hidden, self.hippocampus_range.1);
         for (i, n) in self.neurons.iter_mut().enumerate() {
-            let skip = (skip_need && i >= need_start && i < aux_end) || (skip_da && i >= da_start && i < need_start.min(aux_end));
+            let skip = (skip_need && i >= need_start && i < aux_end) || (skip_da && i >= da_start && i < need_start.min(aux_end)) || (skip_hidden && i < hidden_end);
             if skip { n.fire_count_window = 0; continue; }
             if validated { n.homeostasis_own(10_000.0, 0.02, 0.1); } else { n.homeostasis(); }
         }
+        // 차례: 감응도 → 입력 세기 조절 → 지역 값(경계, 잡음 크기, 새 접점 세기 기준). 곱한 가중치로 지역 값이 잡히게 한다
+        self.scale_inputs();
         if validated { self.refresh_local(); }
+    }
+
+    /// scale_in: 은닉의 추체마다 느린 발화율이 받기 문의 목표에서 벗어난 만큼, 그 뉴런으로 들어오는 흥분 시냅스의 굳은 가중치를 같은 비율로 조금 고친다.
+    ///   오차 = clamp(느린 발화율 ÷ 목표 − 1, −1, +1), 배수 = 1 − η × 오차. |오차| < 0.1 이면 하지 않는다. 목표가 0 인 뉴런은 건너뛴다.
+    ///   대상: 보내는 쪽이 은닉의 흥분 뉴런이거나 입력층(scale_in_hidden_only 면 은닉만)이고 지연 시냅스가 아닌 것. 억제·조절(도파민) 시냅스는 건드리지 않는다.
+    ///   한계: 줄일 때는 최소 가중치의 2배 아래로 내리지 않고(이미 그 아래면 그대로), 키울 때는 연결 한계(CONN_CAP) 위로 올리지 않는다(이미 그 위면 그대로).
+    ///   난수를 쓰지 않고 새 상태도 없다(가중치만 바뀐다). 곱하기 전에 그 시냅스를 지금 틱까지 따라잡는다
+    fn scale_inputs(&mut self) {
+        let Some(eta) = self.params.scale_in else { return };
+        if eta == 0.0 { return; }
+        let h = self.hippocampus_range.1.min(self.neurons.len());
+        let now = self.global_tick;
+        if self.scale_cum.len() != h { self.scale_cum = vec![1.0; h]; }
+        let mut mult = vec![1.0f64; h];
+        let mut any = false;
+        for i in 0..h {
+            if self.neurons[i].cell_type != CellType::Pyramidal { continue; }
+            let goal = self.act_target_of(i);
+            if goal <= 0.0 { continue; }
+            let err = (self.neurons[i].rate_avg / goal - 1.0).clamp(-1.0, 1.0);
+            if err.abs() < 0.1 { continue; }
+            mult[i] = 1.0 - eta * err;
+            self.scale_cum[i] *= mult[i];
+            if err > 0.0 { self.scale_obs[0] += 1; } else { self.scale_obs[1] += 1; }
+            any = true;
+        }
+        if !any { return; }
+        let mut is_input = vec![false; self.neurons.len()];
+        if !self.params.scale_in_hidden_only { for &i in &self.input_idx { if i < is_input.len() { is_input[i] = true; } } }
+        let (lo, hi) = (2.0 * self.params.min_weight, CONN_CAP);
+        let (mut at_lo, mut at_hi, mut done) = (0u64, 0u64, 0u64);
+        for pre in 0..self.neurons.len() {
+            let n = &mut self.neurons[pre];
+            let from_hidden = pre < h && !n.inhibitory && !n.modulatory;
+            if !from_hidden && !is_input[pre] { continue; }
+            for s in n.synapses.iter_mut() {
+                let t = s.target as usize;
+                if t >= h || mult[t] == 1.0 || s.slow_rate != 0.0 { continue; }
+                s.sync(now);
+                let m = mult[t];
+                let w = s.weight;
+                let nw = if m < 1.0 { (w * m).max(lo.min(w)) } else { (w * m).min(hi.max(w)) };
+                if m < 1.0 && nw > w * m { at_lo += 1; }
+                if m > 1.0 && nw < w * m { at_hi += 1; }
+                s.weight = nw;
+                done += 1;
+            }
+        }
+        self.scale_obs[2] += at_lo; self.scale_obs[3] += at_hi; self.scale_obs[4] += done;
+    }
+
+    /// scale_in 의 관찰값을 읽고 0 으로 되돌린다: (줄인 뉴런·번, 키운 뉴런·번, 아래 한계에 걸린 시냅스·번, 위 한계에 걸린 시냅스·번, 곱한 시냅스·번, 뉴런별 누적 배수의 10·50·90% 값 — 배수가 1 이 아닌 뉴런만)
+    pub fn scale_obs_take(&mut self) -> ([u64; 5], [f64; 3], usize) {
+        let o = self.scale_obs;
+        self.scale_obs = [0; 5];
+        let mut v: Vec<f64> = self.scale_cum.iter().cloned().filter(|&x| x != 1.0).collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let q = |p: f64| if v.is_empty() { 1.0 } else { v[((v.len() - 1) as f64 * p).round() as usize] };
+        let r = [q(0.1), q(0.5), q(0.9)];
+        let n = v.len();
+        for x in self.scale_cum.iter_mut() { *x = 1.0; }
+        (o, r, n)
     }
 
     /// 시냅스 하나를 지금 틱까지 따라잡은 사본 (실제 상태는 건드리지 않는다). 상태 비교용
@@ -2915,6 +2993,8 @@ impl Network {
             slow_chk_recv: 0.0,
             slow_chk_drift: 0.0,
             wake: None,
+            scale_obs: [0; 5],
+            scale_cum: Vec::new(),
             dev_tick: 0,
             dev_state: None,
         };
