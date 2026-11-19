@@ -1404,6 +1404,8 @@ fn op2_test(params: &NetParams, trials: usize) {
         None => if std::env::args().any(|a| a == "--three") { vec!["안녕", "고마워", "사랑해"] } else { vec!["안녕", "고마워"] },
     };
     let apart = std::env::args().any(|a| a == "--op-target-apart");
+    // --op-wrong-no-reward: 환경의 보상 규칙만 바꾼다(망은 그대로) — 자기 목표가 나왔더라도 다른 낱말의 목표가 함께 나온 시행에는 보상하지 않는다. 없으면 지금대로
+    let wrong_no_reward = std::env::args().any(|a| a == "--op-wrong-no-reward");
     let (nw, nout, probes) = (words.len(), net.output_count(), 60usize);
     // 입력별로 출력이 나오는 비율 (pre_count = 그 입력을 넣기 직전 40틱의 바탕)
     let mut count = vec![vec![0usize; nout]; nw];
@@ -1446,6 +1448,7 @@ fn op2_test(params: &NetParams, trials: usize) {
     let da_n = net.da_count();
     let pred_w = |net: &Network| { let (_, (pw, pn)) = net.slow_input_weights(); format!("예측 입력 가중치 합 {:.4} ({}개)", pw, pn) };
     println!("  ◦ [시작] {}", pred_w(&net));
+    println!("  ◦ 보상 규칙: {}", if wrong_no_reward { "--op-wrong-no-reward (자기 목표가 나왔고 다른 낱말의 목표는 하나도 안 나온 시행에만 보상)" } else { "자기 목표가 나온 시행에 보상" });
     let block = (trials / 6).max(1);
     for (name, reward) in [("보상 없이 반복", false), ("자기 목표가 나오면 보상", true)] {
         let mut own = vec![0usize; nw]; let mut cross = vec![0usize; nw]; let mut oth = vec![0usize; nw]; let mut n = vec![0usize; nw]; let mut rew = vec![0usize; nw];
@@ -1453,6 +1456,10 @@ fn op2_test(params: &NetParams, trials: usize) {
         let mut own_p = vec![0usize; nw]; let mut cross_p = vec![0usize; nw]; let mut oth_p = vec![0usize; nw];
         let mut outc = vec![vec![0usize; nout]; nw]; let mut prec = vec![vec![0usize; nout]; nw];
         let (mut da_r, mut da_n0) = ((0u64, 0u64), (0u64, 0u64));
+        // 관찰: 시행을 넷으로 가른다 — 0 자기 목표만 / 1 자기와 남의 목표 둘 다 / 2 남의 목표만 / 3 둘 다 안 나옴. 낱말마다 시행 수, 그리고 가름마다 보상 창의 도파민(발화 수, 시행 수)
+        let mut kind = vec![[0usize; 4]; nw];
+        let mut da_kind = [(0u64, 0u64); 4];
+        let mut filtered = vec![0usize; nw];
         for t in 1..=trials * nw {
             let w = rng.random_range(0..nw);
             if pre[targets[w]] { own_p[w] += 1; }
@@ -1465,13 +1472,18 @@ fn op2_test(params: &NetParams, trials: usize) {
             if f[targets[w]] { own[w] += 1; }
             cross[w] += (0..nw).filter(|&v| v != w && f[targets[v]]).count();
             oth[w] += others[w].iter().filter(|&&q| f[q]).count();
-            let rewarded = reward && f[targets[w]];
+            let other_hit = (0..nw).any(|v| v != w && f[targets[v]]);
+            let k = match (f[targets[w]], other_hit) { (true, false) => 0, (true, true) => 1, (false, true) => 2, (false, false) => 3 };
+            kind[w][k] += 1;
+            let rewarded = reward && f[targets[w]] && !(wrong_no_reward && other_hit);
+            if reward && wrong_no_reward && k == 1 { filtered[w] += 1; }
             if rewarded { net.drive_reward(true, 20); rew[w] += 1; }
             // 쉼 260틱 = 보상 창 20틱(자극 뒤 41~60틱) + 240틱. 틱의 차례는 net.rest(260) 과 같다
             let d0 = net.da_spikes;
             net.rest(20);
             let d = net.da_spikes - d0;
             if rewarded { da_r.0 += d; da_r.1 += 1; } else { da_n0.0 += d; da_n0.1 += 1; }
+            da_kind[k].0 += d; da_kind[k].1 += 1;
             pre = op_rest_tail(&mut net, 240);
             if t % (block * nw) == 0 || t == trials * nw {
                 let mut line = format!("  [{name}] {:>6}번까지:", t / nw);
@@ -1492,6 +1504,11 @@ fn op2_test(params: &NetParams, trials: usize) {
                 for w in 0..nw { op_print_outputs(&format!(" [{}]", words[w]), &outc[w], &prec[w], n[w], full); }
                 let pct = |p: (u64, u64)| if p.1 == 0 || da_n == 0 { "-".to_string() } else { format!("{:.2}", p.0 as f64 * 100.0 / (p.1 as f64 * 20.0 * da_n as f64)) };
                 println!("      ◦ 보상 창(자극 뒤 41~60틱)의 도파민 발화 % (뉴런 하나가 한 틱에): 보상 시행 {} ({}번) / 보상 없는 시행 {} ({}번)   |   {}", pct(da_r), da_r.1, pct(da_n0), da_n0.1, pred_w(&net));
+                let mut kline = "      ◦ 시행의 가름 (자기 목표만 / 자기와 남 둘 다 / 남의 목표만 / 둘 다 안 나옴):".to_string();
+                for w in 0..nw { kline += &format!("   {}: {} / {} / {} / {} (걸러져 보상 없던 시행 {})", words[w], kind[w][0], kind[w][1], kind[w][2], kind[w][3], filtered[w]); }
+                println!("{kline}");
+                println!("      ◦ 보상 창의 도파민 발화 %, 가름마다 (자기만 / 둘 다 / 남만 / 둘 다 안 나옴): {} / {} / {} / {}   (시행 {} / {} / {} / {}번)", pct(da_kind[0]), pct(da_kind[1]), pct(da_kind[2]), pct(da_kind[3]), da_kind[0].1, da_kind[1].1, da_kind[2].1, da_kind[3].1);
+                kind.iter_mut().for_each(|x| *x = [0; 4]); da_kind = [(0, 0); 4]; filtered.iter_mut().for_each(|x| *x = 0);
                 own_p.iter_mut().for_each(|x| *x = 0); cross_p.iter_mut().for_each(|x| *x = 0); oth_p.iter_mut().for_each(|x| *x = 0);
                 outc.iter_mut().for_each(|v| v.iter_mut().for_each(|x| *x = 0)); prec.iter_mut().for_each(|v| v.iter_mut().for_each(|x| *x = 0));
                 da_r = (0, 0); da_n0 = (0, 0);
