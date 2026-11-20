@@ -1343,6 +1343,27 @@ impl Network {
         }
     }
     pub fn val_count(&self) -> usize { self.val_idx.len() }
+    /// 은닉 뉴런마다 (종류: 0 추체, 1 Pv, 2 Sst, 3 Vip, 4 그 밖, x, y) (관찰용, 읽기만)
+    pub fn probe_hidden_info(&self) -> Vec<(usize, f32, f32)> {
+        self.neurons[..self.hippocampus_range.1].iter().map(|n| (match n.cell_type {
+            CellType::Pyramidal => 0, CellType::Pv => 1, CellType::Sst => 2, CellType::Vip => 3, _ => 4 }, n.x, n.y)).collect()
+    }
+    /// 출력 뉴런마다, 그 출력으로 보내는 은닉 뉴런의 목록(접점 1 이상인 쌍) (관찰용, 읽기만)
+    pub fn probe_out_sources(&self) -> Vec<Vec<usize>> {
+        let pos: std::collections::HashMap<usize, usize> = self.output_idx.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+        let mut v = vec![Vec::new(); self.output_idx.len()];
+        for (i, n) in self.neurons[..self.hippocampus_range.1].iter().enumerate() {
+            for s in &n.synapses { if s.count == 0 { continue; } if let Some(&k) = pos.get(&(s.target as usize)) { v[k].push(i); } }
+        }
+        v
+    }
+    /// text 의 글자들의 입력 뉴런이 직접 닿는 은닉 뉴런의 목록(되풀이 없이) (관찰용. 이미 아는 글자만 넣을 것 — drive_text 와 같은 길로 글자를 찾는다)
+    pub fn probe_input_targets(&mut self, text: &str) -> Vec<usize> {
+        let h = self.hippocampus_range.1;
+        let idx: Vec<usize> = tokenizer::decompose_to_jamo(text).iter().map(|j| { let seq = self.get_seq(j); self.input_neuron(seq) }).collect();
+        let mut t: Vec<usize> = idx.iter().flat_map(|&i| self.neurons[i].synapses.iter().filter(|s| s.count > 0).map(|s| s.target as usize)).filter(|&x| x < h).collect();
+        t.sort_unstable(); t.dedup(); t
+    }
     /// 입력 뉴런이 내보내는 시냅스의 세기 (관찰용, 읽기만): (개수, 중앙, 90%, 최대, th 를 넘은 것의 몫)
     pub fn input_weight_stats(&self, th: f64) -> (usize, f64, f64, f64, f64) {
         let mut w: Vec<f64> = self.input_idx.iter().flat_map(|&i| self.neurons[i].synapses.iter().map(|s| s.weight)).collect();

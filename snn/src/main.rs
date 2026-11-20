@@ -282,7 +282,10 @@ fn main() {
     // --in-probe 가,나,…: 짧은 확인. 글자(들)를 4틱 넣고, 자극 4틱과 그 뒤 6틱에 한 번이라도 발화한 은닉 뉴런의 수를 센다
     if let Some(list) = args.iter().position(|a| a == "--in-probe").and_then(|i| args.get(i + 1)) {
         params.dopamine = true;
-        in_probe(&params, &list.split(',').map(|x| x.to_string()).collect::<Vec<_>>());
+        let items = list.split(',').map(|x| x.to_string()).collect::<Vec<_>>();
+        // --in-probe-detail: 같은 차례(300틱 쉼, 4틱 넣고 10틱, 290틱 쉼)로 3바퀴 돌며 틱마다·종류마다·영역마다의 값과 겹침·자리·출력의 무리를 찍는다
+        if args.iter().any(|a| a == "--in-probe-detail") { in_probe_detail(&params, &items); return; }
+        in_probe(&params, &items);
         return;
     }
     // --op-test N: 기능 시험. 입력 A 에 정해 둔 출력이 나오면 보상. 그 출력이 나오는 비율이 올라가는지 (출력만 보고 보상을 준다)
@@ -1238,6 +1241,124 @@ fn in_probe(params: &NetParams, items: &[String]) {
             line += &format!("   '{}' {} ({} / {})", it, a + b, a, b);
         }
         println!("{line}");
+    }
+    op_print_inputs_always(&net, "끝");
+}
+/// --in-probe … --in-probe-detail: 낱말 하나가 은닉을 얼마나·어디를 켜는가 (관찰, 읽기만. 명세 lv-snn-runs/review-session/grown-test-verdict.md 5장).
+/// 틱의 차례는 --in-probe 와 같다: 300틱 쉰 뒤, 준 입력을 차례로 3바퀴 — 4틱 넣고 10틱을 돌리며 적고, 290틱 쉰다. 보상은 없다
+fn in_probe_detail(params: &NetParams, items: &[String]) {
+    println!("{:?}", params);
+    let mut net = Network::with_params(params.clone());
+    let h = net.hidden_count();
+    let info = net.probe_hidden_info();
+    let area: Vec<usize> = (0..h).map(|i| net.area_of(i)).collect();
+    let srcs = net.probe_out_sources();
+    const KIND: [&str; 5] = ["추체", "Pv", "Sst", "Vip", "그 밖"];
+    const AREA: [&str; 6] = ["감정 주", "감정 지도", "이성 주", "이성 지도", "기억", "해마"];
+    let mut nk = [0usize; 5]; let mut na = [0usize; 6];
+    for i in 0..h { nk[info[i].0] += 1; if area[i] < 6 { na[area[i]] += 1; } }
+    let refs: Vec<&str> = items.iter().map(|x| x.as_str()).collect();
+    op_print_word_inputs(&refs);
+    op_print_inputs_always(&net, "시작");
+    println!("은닉 {h}개: {}", (0..5).map(|k| format!("{} {}", KIND[k], nk[k])).collect::<Vec<_>>().join(", "));
+    println!("영역: {}", (0..6).map(|a| format!("{} {}", AREA[a], na[a])).collect::<Vec<_>>().join(", "));
+    { let mut n: Vec<usize> = srcs.iter().map(|v| v.len()).collect(); n.sort_unstable();
+      if !n.is_empty() { println!("출력 {}개가 받는 은닉 뉴런 수(쌍): 최소 {} / 중앙 {} / 최대 {}", n.len(), n[0], n[n.len() / 2], n[n.len() - 1]); } }
+    let targets: Vec<Vec<usize>> = items.iter().map(|it| net.probe_input_targets(it)).collect();
+    net.rest(300);
+    let pct = |a: usize, b: usize| if b > 0 { a as f64 * 100.0 / b as f64 } else { 0.0 };
+    let mut sets: Vec<Vec<Vec<bool>>> = Vec::new(); // [바퀴][입력] = 10틱에 한 번이라도 발화한 은닉
+    for round in 1..=3usize {
+        let mut rs = Vec::new();
+        for (ii, it) in items.iter().enumerate() {
+            let mut seen = vec![false; h];
+            let mut early = vec![false; h]; // 2~5틱에 발화
+            let mut per_tick: Vec<[usize; 5]> = Vec::new();
+            let mut outs_fired = vec![false; net.output_count()];
+            net.drive_text(it, 4);
+            for t in 1..=10usize {
+                net.tick();
+                let mut c = [0usize; 5];
+                for &id in &net.tick_ids {
+                    let i = id as usize;
+                    if i < h { c[info[i].0] += 1; seen[i] = true; if (2..=5).contains(&t) { early[i] = true; } }
+                    else if let Some(q) = net.output_seq(i) { outs_fired[q] = true; }
+                }
+                per_tick.push(c);
+            }
+            net.rest(290);
+            let tot = seen.iter().filter(|&&x| x).count();
+            println!("\n  ◦ [{round}바퀴] '{it}': 10틱에 한 번이라도 발화한 은닉 {tot}개 ({:.2}%), 그 10틱에 발화한 출력 {}개 / {}", pct(tot, h), outs_fired.iter().filter(|&&x| x).count(), outs_fired.len());
+            println!("      ◦ 틱마다 발화한 은닉의 몫 % (전체 | 추체 Pv Sst Vip — 저마다 그 종류 안의 몫):");
+            let mut peak = (0usize, 0usize); let mut peak_p = 0usize;
+            for (t, c) in per_tick.iter().enumerate() {
+                let all: usize = c.iter().sum();
+                if all > peak.0 { peak = (all, t + 1); }
+                peak_p = peak_p.max(c[0]);
+                println!("          {:>2}틱  {:>6.2} | {:>6.2} {:>6.2} {:>6.2} {:>6.2}   ({}개)", t + 1, pct(all, h), pct(c[0], nk[0]), pct(c[1], nk[1]), pct(c[2], nk[2]), pct(c[3], nk[3]), all);
+            }
+            println!("      ◦ 한 틱 최대: 은닉의 {:.2}% ({}틱째), 추체의 {:.2}%  |  10틱 합(발화 수 ÷ 은닉 수) {:.2}%", pct(peak.0, h), peak.1, pct(peak_p, nk[0]),
+                pct(per_tick.iter().map(|c| c.iter().sum::<usize>()).sum::<usize>(), h));
+            let mut uk = [0usize; 5]; let mut ua = [0usize; 6];
+            for i in 0..h { if seen[i] { uk[info[i].0] += 1; if area[i] < 6 { ua[area[i]] += 1; } } }
+            println!("      ◦ 10틱에 한 번이라도 발화한 몫 %: 종류 — {}  |  영역 — {}",
+                (0..4).map(|k| format!("{} {:.1}", KIND[k], pct(uk[k], nk[k]))).collect::<Vec<_>>().join(", "),
+                (0..6).map(|a| format!("{} {:.1}", AREA[a], pct(ua[a], na[a]))).collect::<Vec<_>>().join(", "));
+            // 자리: 영역마다 x·y 범위를 5×5 칸으로 나눠, 칸마다 켜진 몫과 켜진 뉴런이 가장 많은 다섯 칸에 든 몫(고르면 20% 둘레)
+            let mut line = String::from("      ◦ 자리(영역을 5×5 칸으로): ");
+            for a in 0..6 {
+                let ids: Vec<usize> = (0..h).filter(|&i| area[i] == a).collect();
+                if ids.is_empty() || ua[a] == 0 { continue; }
+                let (mut x0, mut x1, mut y0, mut y1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+                for &i in &ids { x0 = x0.min(info[i].1); x1 = x1.max(info[i].1); y0 = y0.min(info[i].2); y1 = y1.max(info[i].2); }
+                let cell = |i: usize| { let cx = (((info[i].1 - x0) / (x1 - x0).max(1e-6)) * 5.0).min(4.999) as usize; let cy = (((info[i].2 - y0) / (y1 - y0).max(1e-6)) * 5.0).min(4.999) as usize; cy * 5 + cx };
+                let mut n = [0usize; 25]; let mut f = [0usize; 25];
+                for &i in &ids { let c = cell(i); n[c] += 1; if seen[i] { f[c] += 1; } }
+                let mut fr: Vec<f64> = (0..25).filter(|&c| n[c] > 0).map(|c| pct(f[c], n[c])).collect();
+                fr.sort_by(|p, q| p.partial_cmp(q).unwrap());
+                let mut top = f.to_vec(); top.sort_unstable_by(|p, q| q.cmp(p));
+                line += &format!("{} 칸마다 켜진 몫 {:.0}/{:.0}/{:.0}% (최소/중앙/최대), 많은 다섯 칸에 든 몫 {:.0}%;  ", AREA[a], fr[0], fr[fr.len() / 2], fr[fr.len() - 1], pct(top[..5].iter().sum::<usize>(), ua[a]));
+            }
+            println!("{line}");
+            // 입력이 직접 닿는 뉴런 가운데 켜진 수, 켜진 것 가운데 직접 닿는 것의 몫
+            let tg = &targets[ii];
+            let hit = tg.iter().filter(|&&i| seen[i]).count();
+            println!("      ◦ 입력이 직접 닿는 은닉 {}개 가운데 켜진 것 {}개, 켜진 {}개 가운데 직접 닿는 것 {:.1}%", tg.len(), hit, tot, pct(hit, tot));
+            // 출력마다: 자기 무리(보내는 은닉) 가운데 2~5틱에 발화한 수
+            let mut cnt: Vec<usize> = srcs.iter().map(|v| v.iter().filter(|&&i| early[i]).count()).collect();
+            let mut frc: Vec<f64> = srcs.iter().zip(&cnt).filter(|(v, _)| !v.is_empty()).map(|(v, &c)| pct(c, v.len())).collect();
+            cnt.sort_unstable(); frc.sort_by(|p, q| p.partial_cmp(q).unwrap());
+            if !frc.is_empty() {
+                println!("      ◦ 출력마다 자기 무리 가운데 2~5틱에 발화한 수: 최소 {} / 중앙 {} / 최대 {}  |  무리 안의 몫 %: 최소 {:.1} / 중앙 {:.1} / 최대 {:.1}  (무리가 있는 출력 {}개)",
+                    cnt[0], cnt[cnt.len() / 2], cnt[cnt.len() - 1], frc[0], frc[frc.len() / 2], frc[frc.len() - 1], frc.len());
+            } else { println!("      ◦ 출력마다 자기 무리: 은닉에서 받는 출력이 없다"); }
+            rs.push(seen);
+        }
+        sets.push(rs);
+    }
+    // 겹침: 같은 바퀴의 두 입력이 켠 은닉(10틱 합집합). 몫 = 함께 켜진 수 ÷ 둘 가운데 작은 쪽. 우연 = 두 크기의 곱 ÷ 은닉 수 ÷ 작은 쪽
+    println!("\n  ◦ 겹침 (10틱에 한 번이라도 발화한 은닉. 함께 / 작은 쪽 = 몫, 괄호 = 고르게 뽑았을 때의 몫;  추체만 따로):");
+    for round in 0..3 {
+        for a in 0..items.len() { for b in a + 1..items.len() {
+            let (sa, sb) = (&sets[round][a], &sets[round][b]);
+            let f = |only_p: bool| {
+                let ok = |i: usize| !only_p || info[i].0 == 0;
+                let n = (0..h).filter(|&i| ok(i)).count();
+                let (ca, cb) = ((0..h).filter(|&i| ok(i) && sa[i]).count(), (0..h).filter(|&i| ok(i) && sb[i]).count());
+                let both = (0..h).filter(|&i| ok(i) && sa[i] && sb[i]).count();
+                let m = ca.min(cb).max(1);
+                (ca, cb, both, both as f64 / m as f64, ca as f64 * cb as f64 / n.max(1) as f64 / m as f64)
+            };
+            let (x, y) = (f(false), f(true));
+            println!("      [{}바퀴] '{}' {} · '{}' {} : 함께 {} → {:.3} ({:.3})   |  추체 {} · {} : 함께 {} → {:.3} ({:.3})", round + 1, items[a], x.0, items[b], x.1, x.2, x.3, x.4, y.0, y.1, y.2, y.3, y.4);
+        } }
+    }
+    println!("  ◦ 같은 입력의 1바퀴와 2바퀴 (되풀이했을 때 같은 뉴런이 켜지는가):");
+    for a in 0..items.len() {
+        let (sa, sb) = (&sets[0][a], &sets[1][a]);
+        let (ca, cb) = (sa.iter().filter(|&&x| x).count(), sb.iter().filter(|&&x| x).count());
+        let both = (0..h).filter(|&i| sa[i] && sb[i]).count();
+        println!("      '{}' {} · {} : 함께 {} → {:.3}", items[a], ca, cb, both, both as f64 / ca.min(cb).max(1) as f64);
     }
     op_print_inputs_always(&net, "끝");
 }
