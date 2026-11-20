@@ -181,6 +181,12 @@ pub struct NetParams {
     /// 자기 목표를 재는 동안에도 새 접점을 받는다 (기본 꺼짐 = 재는 동안 그 뉴런으로 가는 시도를 버린다. 이 칸이 없는 저장 파일은 꺼짐).
     ///   켜면 재는 중인 뉴런은 목표가 아직 0 이라 받기 문 없이 받는다. own_target 이 없으면 효과가 없다
     pub own_target_open: bool,
+    /// 감응도 항상성이 굳힌 자기 목표를 본다 (기본 꺼짐. 이 칸이 없는 저장 파일은 꺼짐). own_target 이 켜진 뉴런(own_on)의 own_homeo 를 켠다:
+    ///   목표가 굳은 뒤로는 따라가는 평소 수준(set_point) 대신 굳힌 목표와 견주어 감응도를 고친다 (명세: lv-snn-runs/review-session/self-target-verdict.md 13장 '라')
+    pub own_target_homeo: bool,
+    /// 받기 문이 억제 뉴런이 보내는 새 접점은 막지 않는다 (기본 꺼짐. 이 칸이 없는 저장 파일은 꺼짐). 받기 문(grow_gate)이 있는 구성이면 쓸 수 있다.
+    ///   보내는 뉴런이 억제면 받는 뉴런의 목표를 보지 않고 받는다. 자기 목표를 재는 동안 막는 것(own_target)은 그대로다 (같은 문서 13장 '다')
+    pub gate_exc_only: bool,
     /// (시험용) 입력 뉴런 하나가 가는 은닉 흥분 뉴런의 수 F: 주면 감정 주·이성 주·기억의 흥분 뉴런 가운데 F 개를 **되풀이 없이** 고른다.
     ///   없으면 지금 길(synapses_per_neuron × input_pop 번, 되풀이 허락). 처음 배선에만 쓰인다. --topo(발달 구성)에서는 자리 둘레로 고르는 법은 그대로 두고 수만 F 로 바꾼다(영역에 크기대로 나눔).
     ///   명세: lv-snn-runs/review-session/sparse-inhibit-spec.md ㉠. 바깥에서 준 값이다
@@ -286,7 +292,7 @@ pub struct DevObs {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), grow_out: false, in_fan: None, in_weight: None, prune_reset_floor: true, own_target: None, own_target_open: false, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), grow_out: false, in_fan: None, in_weight: None, prune_reset_floor: true, own_target: None, own_target_open: false, own_target_homeo: false, gate_exc_only: false, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
     }
 }
 
@@ -294,7 +300,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), grow_out: false, in_fan: None, in_weight: None, prune_reset_floor: true, own_target: None, own_target_open: false, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), grow_out: false, in_fan: None, in_weight: None, prune_reset_floor: true, own_target: None, own_target_open: false, own_target_homeo: false, gate_exc_only: false, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
     }
 }
 
@@ -398,6 +404,10 @@ pub struct Network {
     pub gate_drop: [u64; 5],
     /// 받는 뉴런이 자기 목표를 재는 중이라 버린 새 접점 시도의 누계 (gate_drop 에도 들어간다)
     pub own_wait_drop: u64,
+    /// gate_exc_only 의 관찰: 억제 뉴런이 보낸 시도 가운데 받는 뉴런의 발화율이 목표를 넘어 있던 수(문이 있었다면 걸릴 수 있던 시도),
+    /// 그리고 그 시도들이 문에서 떨어졌을 기대 수(차츰 줄이는 문이면 1 − (목표 ÷ 발화율)^K 의 합, 옛 문이면 그 수 그대로). 읽기만 하고 동작에 쓰지 않는다
+    pub exc_only_over: u64,
+    pub exc_only_expect: f64,
     /// 처음부터 있던 쌍(born = 0)에 더해진 접점 수 누계 (관찰용)
     pub added_on_initial: u64,
     /// 받는 쪽 점검에서 사라진 접점 중, 활동 의존 소멸로 수명이 줄지 않았다면 아직 남았을 접점 수 누계 (관찰용)
@@ -622,6 +632,8 @@ impl Network {
             grow_made: [0; 5],
             gate_drop: [0; 5],
             own_wait_drop: 0,
+            exc_only_over: 0,
+            exc_only_expect: 0.0,
             added_on_initial: 0,
             pruned_short: 0,
             prune_ages: Vec::new(),
@@ -725,6 +737,7 @@ impl Network {
                 n.prune_min = min_w;
                 n.reset_min = if net.params.prune_reset_floor { min_w } else { 0.0 };
                 // 자기 목표를 재기 시작한다 (준비 구간 뒤. 시계는 각자의 첫 발화에서 시작한다)
+                n.own_homeo = net.params.own_target_homeo && match net.params.own_target { Some(OwnMode::All) => true, Some(OwnMode::Pyr) => n.cell_type == CellType::Pyramidal, None => false };
                 n.own_on = match net.params.own_target { Some(OwnMode::All) => true, Some(OwnMode::Pyr) => n.cell_type == CellType::Pyramidal, None => false };
             }
         }
@@ -2318,6 +2331,7 @@ impl Network {
         let target = self.params.target_syn as f64;
         let regions = [(self.emotion_range, 50usize), (self.reason_range, 50), (self.memory_range, 50), (self.hippocampus_range, 25)];
         let gated = self.params.grow_gate.is_some();
+        let exc_only = self.params.gate_exc_only;
         // 재는 중인 받는 뉴런으로 가는 시도를 버리는가 (own_target_open 이면 버리지 않는다)
         let own_mode = self.params.own_target.is_some() && !self.params.own_target_open;
         // 출력으로 가는 성장 (grow_out): 출력의 목표는 추체의 목표. 목표가 없으면(act_target 이나 spont_fixed 가 없으면) 출력으로 자라지 않는다
@@ -2359,7 +2373,17 @@ impl Network {
                             self.gate_drop[Self::kind_index(self.neurons[post].cell_type)] += 1; self.own_wait_drop += 1; continue;
                         }
                         // 받기 문의 목표: 받는 뉴런 자신의 값만 읽는다 (문이 없으면 0 = 걸지 않는다)
-                        let goal = if gated { self.act_target_of(post) } else { 0.0 };
+                        let mut goal = if gated { self.act_target_of(post) } else { 0.0 };
+                        // gate_exc_only: 보내는 뉴런이 억제면 문을 걸지 않는다 (걸렸을 시도를 세어 두기만 한다)
+                        if exc_only && inhibitory && goal > 0.0 {
+                            let q = &self.neurons[post];
+                            let r = match self.params.grow_gate { Some(GateMode::Fast) => q.rate_fast, Some(GateMode::Slow) => q.rate_avg, _ => q.rate_fast.max(q.rate_avg) };
+                            if r > goal {
+                                self.exc_only_over += 1;
+                                self.exc_only_expect += match self.params.grow_gate_soft { Some(k) => 1.0 - (goal / r).powf(k), None => 1.0 };
+                            }
+                            goal = 0.0;
+                        }
                         self.grow_attempt(pre, post, goal, &mut rng, now);
                     }
                 }
@@ -2454,6 +2478,11 @@ impl Network {
         self.neurons[post].incoming.push((pre, len));
         self.sprouted += 1;
         self.grow_made[post_kind] += 1;
+    }
+
+    /// 은닉 뉴런마다 (종류 0 추체 1 Pv 2 Sst 3 Vip 4 그 밖, 감응도 excitability, own_homeo 이고 목표가 굳었는가) (관찰용, 읽기만)
+    pub fn excit_observe(&self) -> Vec<(usize, f64, bool)> {
+        self.neurons[..self.hippocampus_range.1].iter().map(|n| (Self::kind_index(n.cell_type), n.excitability, n.own_homeo && n.own_target > 0.0)).collect()
     }
 
     /// 자기 목표의 관찰값 (읽기만): 은닉 뉴런마다 (종류 0 추체 1 Pv 2 Sst 3 Vip 4 그 밖, own_on, own_target, 자발 발화 확률 0.00001 × spont_scale, own_n, own_t0)
@@ -3048,7 +3077,7 @@ impl Network {
                 val_idx: self.val_idx.clone(), taste_idx: self.taste_idx.clone(), need_idx: self.need_idx.clone(), aux_end: self.aux_end,
                 unit_med: self.unit_med.clone(), noise_amp: self.noise_amp.clone(),
                 sprouted: self.sprouted, pruned: self.pruned, da_spikes: self.da_spikes, pred_spikes: self.pred_spikes, val_spikes: self.val_spikes,
-                grow_made: self.grow_made, gate_drop: self.gate_drop, own_wait_drop: self.own_wait_drop, added_on_initial: self.added_on_initial, pruned_short: self.pruned_short,
+                grow_made: self.grow_made, gate_drop: self.gate_drop, own_wait_drop: self.own_wait_drop, exc_only_over: self.exc_only_over, exc_only_expect: self.exc_only_expect, added_on_initial: self.added_on_initial, pruned_short: self.pruned_short,
                 wiring_sum: self.wiring_sum, dev_tick: self.dev_tick,
                 drives: self.drives.clone(), dev_state: self.dev_state.clone(),
                 slow_sum: if self.params.slow_events { self.slow_sum.clone() } else { Vec::new() },
@@ -3129,6 +3158,8 @@ impl Network {
             grow_made: [0; 5],
             gate_drop: [0; 5],
             own_wait_drop: 0,
+            exc_only_over: 0,
+            exc_only_expect: 0.0,
             added_on_initial: 0,
             pruned_short: 0,
             prune_ages: Vec::new(),
@@ -3160,7 +3191,7 @@ impl Network {
                 net.val_idx = x.val_idx; net.taste_idx = x.taste_idx; net.need_idx = x.need_idx; net.aux_end = x.aux_end;
                 net.unit_med = x.unit_med; net.noise_amp = x.noise_amp;
                 net.sprouted = x.sprouted; net.pruned = x.pruned; net.da_spikes = x.da_spikes; net.pred_spikes = x.pred_spikes; net.val_spikes = x.val_spikes;
-                net.grow_made = x.grow_made; net.gate_drop = x.gate_drop; net.own_wait_drop = x.own_wait_drop; net.added_on_initial = x.added_on_initial; net.pruned_short = x.pruned_short;
+                net.grow_made = x.grow_made; net.gate_drop = x.gate_drop; net.own_wait_drop = x.own_wait_drop; net.exc_only_over = x.exc_only_over; net.exc_only_expect = x.exc_only_expect; net.added_on_initial = x.added_on_initial; net.pruned_short = x.pruned_short;
                 net.wiring_sum = x.wiring_sum; net.dev_tick = x.dev_tick;
                 net.drives = x.drives; net.dev_state = x.dev_state;
                 if !x.slow_sum.is_empty() && x.slow_sum.len() == x.slow_live.len() { net.slow_saved = Some((x.slow_sum, x.slow_live)); }
@@ -3274,6 +3305,10 @@ struct SnapExt {
     gate_drop: [u64; 5],
     #[serde(default)]
     own_wait_drop: u64,
+    #[serde(default)]
+    exc_only_over: u64,
+    #[serde(default)]
+    exc_only_expect: f64,
     added_on_initial: u64,
     pruned_short: u64,
     wiring_sum: u64,

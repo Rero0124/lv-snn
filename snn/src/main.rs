@@ -223,6 +223,18 @@ fn main() {
         println!("[설정] 자기 목표(--own-target {}): 은닉 뉴런 {} 자기 발화 {}번에 걸린 틱으로 목표를 재어 굳힌다 (목표 = {} ÷ 틱, 자기 자발 발화 확률 아래로는 내려가지 않음, 위 한계 없음). 재는 동안 그 뉴런으로 가는 새 접점 시도는 버린다",
             args[i + 1], if params.own_target == Some(network::OwnMode::Pyr) { "가운데 추체가" } else { "모두가" }, neuron::OWN_COUNT + 1, neuron::OWN_COUNT);
     }
+    // --own-target-homeo: 감응도 항상성이 굳힌 자기 목표를 본다 (기본 꺼짐. --own-target 과 함께만)
+    if args.iter().any(|a| a == "--own-target-homeo") {
+        if params.own_target.is_none() && params.load_from.is_none() { eprintln!("[오류] --own-target-homeo 는 --own-target 과 함께 준다"); std::process::exit(2); }
+        params.own_target_homeo = true;
+        println!("[설정] 감응도 항상성이 자기 목표를 본다(--own-target-homeo): 목표가 굳은 뉴런은 따라가는 평소 수준 대신 굳힌 목표와 견주어 감응도를 고친다 (오차의 자름 ±1, 빠르기, 한계 0.5~1.5 는 그대로)");
+    }
+    // --gate-exc-only: 받기 문이 억제 뉴런이 보내는 새 접점은 막지 않는다 (기본 꺼짐. 받기 문이 있어야 한다)
+    if args.iter().any(|a| a == "--gate-exc-only") {
+        if params.grow_gate.is_none() && params.load_from.is_none() { eprintln!("[오류] --gate-exc-only 는 --grow-gate 가 있어야 한다 (막지 않을 문이 없다)"); std::process::exit(2); }
+        params.gate_exc_only = true;
+        println!("[설정] 받기 문이 억제 뉴런이 보내는 새 접점은 막지 않는다(--gate-exc-only): 보내는 뉴런이 억제면 받는 뉴런의 목표를 보지 않고 받는다");
+    }
     // --own-target-open: 자기 목표를 재는 동안에도 새 접점을 받는다 (기본은 재는 동안 막음)
     if args.iter().any(|a| a == "--own-target-open") {
         if params.own_target.is_none() && params.load_from.is_none() { eprintln!("[오류] --own-target-open 은 --own-target 과 함께 준다"); std::process::exit(2); }
@@ -956,6 +968,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     if let Some(d) = &restored { need_before = d.need_before; need_pre_acc = d.need_pre_acc; need_drop_acc = d.need_drop_acc; need_drop_n = d.need_drop_n; }
     let (mut last_made, mut last_drop, mut last_short) = (net.grow_made, net.gate_drop, net.pruned_short);
     let mut last_own_wait = net.own_wait_drop;
+    let (mut last_exc_over, mut last_exc_expect) = (net.exc_only_over, net.exc_only_expect);
     const AREAS: [&str; 6] = ["감정 주", "감정 지도", "이성 주", "이성 지도", "기억", "해마"];
     for t in (start + 1)..=ticks {
         if needs && !no_stim && pending.is_none() {
@@ -1089,6 +1102,25 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
                     "", ov.len(), ov.iter().map(|o| o.0).sum::<usize>(), ov.iter().map(|o| o.1).sum::<usize>(), q(&mut pairs, 0.0), q(&mut pairs, 0.5), q(&mut pairs, 1.0),
                     ov.iter().filter(|o| o.0 == 0).count(), ov.iter().map(|o| o.2).sum::<usize>(), q(&mut rate, 0.1), q(&mut rate, 0.5), q(&mut rate, 0.9), q(&mut exc, 0.5),
                     net.grow_made[4] - last_made[4], net.gate_drop[4] - last_drop[4], q(&mut rg, 0.1), q(&mut rg, 0.5), q(&mut rg, 0.9), ov.iter().map(|o| o.5).sum::<usize>());
+            }
+            if net.params_ref().own_target_homeo {
+                // 감응도 줄 (읽기만): 종류마다 감응도의 분위와 한계(0.5 / 1.5)에 붙은 뉴런 수, 그리고 굳힌 목표를 보는 뉴런 수
+                let ev = net.excit_observe();
+                let q = |v: &mut Vec<f64>, p: f64| -> f64 { if v.is_empty() { return f64::NAN; } v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[((v.len() as f64 * p) as usize).min(v.len() - 1)] };
+                for k in 0..5 {
+                    let mut e: Vec<f64> = ev.iter().filter(|o| o.0 == k).map(|o| o.1).collect();
+                    if e.is_empty() { continue; }
+                    let (n, lo, hi, see) = (e.len(), e.iter().filter(|&&x| x <= 0.5 + 1e-9).count(), e.iter().filter(|&&x| x >= 1.5 - 1e-9).count(), ev.iter().filter(|o| o.0 == k && o.2).count());
+                    println!("{:>9} {} 감응도 (n={}) | 분위 10% {:.3}, 50% {:.3}, 90% {:.3}, 최소 {:.3}, 최대 {:.3} | 아래 한계 0.5 에 붙은 {} | 위 한계 1.5 에 붙은 {} | 굳힌 목표를 보는 {}",
+                        "", KINDS[k], n, q(&mut e, 0.1), q(&mut e, 0.5), q(&mut e, 0.9), q(&mut e, 0.0), q(&mut e, 1.0), lo, hi, see);
+                }
+            }
+            if net.params_ref().gate_exc_only {
+                // 억제 접점의 문 줄 (읽기만): 억제 뉴런이 보낸 시도 가운데 받는 뉴런이 목표를 넘어 있던 수와 문이 있었다면 떨어졌을 기대 수, 추체마다 억제 ÷ 흥분 접점의 분위
+                let mut ie: Vec<f64> = dv.per.iter().filter(|o| o.0 == 0 && o.5 > 0).map(|o| o.6 as f64 / o.5 as f64).collect();
+                println!("{:>9} 억제 접점의 문 | 억제 뉴런이 보낸 시도 가운데 받는 뉴런의 발화율이 목표를 넘어 있던 수: 누계 {} (구간 {}) | 그 시도들이 문에서 떨어졌을 기대 수: 누계 {:.0} (구간 {:.0}) | 추체마다 억제 ÷ 흥분 접점 분위 10% {:.3}, 50% {:.3}, 90% {:.3}",
+                    "", net.exc_only_over, net.exc_only_over - last_exc_over, net.exc_only_expect, net.exc_only_expect - last_exc_expect, med(&mut ie, 0.1), med(&mut ie, 0.5), med(&mut ie, 0.9));
+                last_exc_over = net.exc_only_over; last_exc_expect = net.exc_only_expect;
             }
             if net.params_ref().own_target.is_some() {
                 // 자기 목표 줄 (읽기만): 종류마다 목표가 굳은 뉴런의 수, 굳은 목표(1천 틱당)의 분위, 자기 자발의 몇 배인가, 굳은 틱(첫 발화 틱 + 16 ÷ 목표; 아래 한계에 걸린 것은 뺀다)
