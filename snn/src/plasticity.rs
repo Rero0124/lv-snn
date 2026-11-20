@@ -36,7 +36,9 @@ pub struct ConsolObs {
 /// 쌍 하나의 쌓인 값 (관찰용): 생긴 틱, 마지막으로 본 틱과 그때의 가중치, 생긴 뒤(또는 기한을 마지막으로 받은 뒤) 강화 쪽으로 굳은 양의 합,
 /// 그 합 ÷ 그때의 가중치가 가장 컸던 값, 기한을 다시 받은 횟수, 받는 뉴런
 #[derive(Clone, Copy)]
-pub struct PairAcc { pub born: u64, pub last_tick: u64, pub last_w: f64, pub acc: f64, pub peak: f64, pub resets: u32, pub post: u32 }
+pub struct PairAcc { pub born: u64, pub last_tick: u64, pub last_w: f64, pub acc: f64, pub peak: f64, pub resets: u32, pub post: u32,
+    /// 알짜: 굳히는 자리에서 가중치에 더해진 양의 부호 있는 합 (기준선 위에서는 +굳은 양, 아래에서는 −굳은 양; 생긴 뒤 또는 관찰이 켜진 뒤. 기한을 다시 받아도 비우지 않는다. 0·1 로 잘린 것은 셈하지 않는다)
+    pub net: f64 }
 static OBS: std::sync::Mutex<Option<ConsolObs>> = std::sync::Mutex::new(None);
 // 표시된 받는 뉴런 번호의 범위 [OBS_LO, OBS_HI): 잠그기 전에 이 범위 밖의 시냅스를 걸러 낸다 (빠르게)
 static OBS_LO: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -76,7 +78,7 @@ pub fn obs_sync_pairs(current: &[(u32, u32, u64, f64)], now: u64) -> (Vec<PairAc
     }
     let mut alive = Vec::with_capacity(current.len());
     for &(a, b, born, w) in current {
-        let e = o.pairs.entry((a, b)).or_insert(PairAcc { born, last_tick: now, last_w: w, acc: 0.0, peak: 0.0, resets: 0, post: b });
+        let e = o.pairs.entry((a, b)).or_insert(PairAcc { born, last_tick: now, last_w: w, acc: 0.0, peak: 0.0, resets: 0, post: b, net: 0.0 });
         e.last_tick = now; e.last_w = w;
         alive.push(*e);
     }
@@ -91,8 +93,9 @@ fn obs_consol(pre: usize, post: usize, l: f64, moved: f64, w: f64, reset: bool, 
     let key = (pre as u32, post as u32);
     let stale = match o.pairs.get(&key) { Some(e) => e.born != born, None => false };
     if stale { let old = o.pairs.remove(&key).unwrap(); o.dropped.push(old); }
-    let e = o.pairs.entry(key).or_insert(PairAcc { born, last_tick: tick, last_w: w, acc: 0.0, peak: 0.0, resets: 0, post: post as u32 });
+    let e = o.pairs.entry(key).or_insert(PairAcc { born, last_tick: tick, last_w: w, acc: 0.0, peak: 0.0, resets: 0, post: post as u32, net: 0.0 });
     e.last_tick = tick; e.last_w = w;
+    e.net += if l < 0.0 { -moved } else { moved };
     if l < 0.0 { o.down_events += 1; if moved > 0.0 { o.sum_down += moved; } else { o.sum_down_neg += -moved; } return; }
     if moved <= 0.0 { o.nonpos_events += 1; o.sum_up_neg += -moved; return; }
     o.pos_events += 1;

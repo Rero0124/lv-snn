@@ -2495,6 +2495,12 @@ impl Network {
         for &o in &self.output_idx { mark[o] = true; }
         plasticity::obs_start(mark, self.hippocampus_range.1);
     }
+    /// 조절 수준의 관찰 (읽기만): (출력 뉴런들, 은닉 추체들) 각각의 (지금의 조절 수준 mod_level, 기준선 mod_base, 기준선을 잡으며 본 틱 수 mod_seen)
+    pub fn mod_observe(&self) -> (Vec<(f64, f64, u32)>, Vec<(f64, f64, u32)>) {
+        let f = |n: &Neuron| (n.mod_level, n.mod_base, n.mod_seen);
+        (self.output_idx.iter().map(|&i| f(&self.neurons[i])).collect(),
+         self.neurons[..self.hippocampus_range.1].iter().filter(|n| n.cell_type == CellType::Pyramidal).map(f).collect())
+    }
     /// 지금 있는 은닉→출력 쌍의 목록 (보내는 뉴런, 받는 뉴런, 생긴 틱, 가중치) 과 지금 틱 (관찰용)
     pub fn out_pairs(&self) -> (Vec<(u32, u32, u64, f64)>, u64) {
         let h = self.hippocampus_range.1; let out: std::collections::HashSet<usize> = self.output_idx.iter().cloned().collect();

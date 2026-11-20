@@ -1318,6 +1318,30 @@ fn op_print_net(net: &Network, targets: &[usize], o: Option<&OpNet>) {
                 println!("      ◦ 쌍마다 쌓인 굳은 양 — {} {}개 (목표 출력의 쌍 {} / 그 밖 {}): 쌓인 양 ÷ 가중치 분위 10% {:.2e}, 50% {:.2e}, 90% {:.2e}, 최대 {:.2e} | 쌓인 양이 가중치의 1% 에 닿았던 쌍: 목표 출력 {} / {} , 그 밖 {} / {} | {} 분위 10% {:.0}, 50% {:.0}, 90% {:.0} 틱",
                     label, set.len(), tn, on, qq(&mut r, 0.1), qq(&mut r, 0.5), qq(&mut r, 0.9), qq(&mut r, 1.0), th, tn, oh, on,
                     if drop { "수명(마지막으로 본 틱 − 생긴 틱)" } else { "나이(지금 − 생긴 틱)" }, qq(&mut life, 0.1), qq(&mut life, 0.5), qq(&mut life, 0.9));
+                // 알짜 (기준선 위에서 오른 양 + 아래에서 오른 양 − 위에서 내린 양 − 아래에서 내린 양; 생긴 뒤 또는 시험 시작 뒤) — 목표마다와 그 밖
+                let tids: Vec<u32> = targets.iter().filter_map(|&q| ids.get(q).map(|&i| i as u32)).collect();
+                let mut parts: Vec<String> = Vec::new();
+                for g in 0..=tids.len() {
+                    let sel: Vec<&plasticity::PairAcc> = set.iter().filter(|e| if g < tids.len() { e.post == tids[g] } else { !tset.contains(&e.post) }).collect();
+                    let mut rn: Vec<f64> = sel.iter().map(|e| e.net / e.last_w.max(1e-300)).collect();
+                    let mut ab: Vec<f64> = sel.iter().map(|e| e.net).collect();
+                    let mut mag: Vec<f64> = sel.iter().map(|e| e.net.abs()).collect();
+                    let up = sel.iter().filter(|e| e.net > 0.0).count();
+                    parts.push(format!("{} {}쌍: 알짜 ÷ 가중치 10% {:+.2e}, 50% {:+.2e}, 90% {:+.2e} / 알짜의 중앙 {:+.3e}, 크기(절댓값)의 중앙 {:.3e} / 알짜가 양수인 쌍 {}",
+                        if g < tids.len() { format!("목표 {}", g + 1) } else { "그 밖".to_string() }, sel.len(), qq(&mut rn, 0.1), qq(&mut rn, 0.5), qq(&mut rn, 0.9), qq(&mut ab, 0.5), qq(&mut mag, 0.5), up));
+                }
+                println!("      ◦ 쌍마다의 알짜 — {}: {}", label, parts.join(" | "));
+            }
+            // 조절 수준 (관찰, 읽기만): 이 줄을 찍는 순간(구간의 마지막 시행이 끝난 쉬는 구간)의 조절 수준과 기준선
+            let (mo, mp) = net.mod_observe();
+            for (label, v) in [("출력", &mo), ("은닉 추체", &mp)] {
+                let w: Vec<&(f64, f64, u32)> = v.iter().filter(|x| x.1 > 1e-6).collect();
+                let mut r: Vec<f64> = w.iter().map(|x| x.0 / x.1).collect();
+                let mut lv: Vec<f64> = v.iter().map(|x| x.0).collect();
+                let mut bs: Vec<f64> = v.iter().map(|x| x.1).collect();
+                let mut seen: Vec<f64> = v.iter().map(|x| x.2 as f64).collect();
+                println!("      ◦ 조절 수준 (쉬는 구간, 이 줄을 찍는 순간) — {} {}개 (기준선이 잡힌 {}개): 수준 ÷ 기준선 10% {:.3}, 50% {:.3}, 90% {:.3} | 수준 10% {:.4}, 50% {:.4}, 90% {:.4} | 기준선 10% {:.4}, 50% {:.4}, 90% {:.4} | 기준선을 잡으며 본 틱 수 최소 {:.0}, 최대 {:.0}",
+                    label, v.len(), w.len(), qq(&mut r, 0.1), qq(&mut r, 0.5), qq(&mut r, 0.9), qq(&mut lv, 0.1), qq(&mut lv, 0.5), qq(&mut lv, 0.9), qq(&mut bs, 0.1), qq(&mut bs, 0.5), qq(&mut bs, 0.9), qq(&mut seen, 0.0), qq(&mut seen, 1.0));
             }
         },
     }
