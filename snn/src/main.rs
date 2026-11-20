@@ -229,11 +229,18 @@ fn main() {
         params.own_target_open = true;
         println!("[설정] 자기 목표를 재는 동안에도 새 접점을 받는다(--own-target-open): 재는 중인 뉴런은 목표가 아직 없어 받기 문 없이 받는다");
     }
-    // --prune-reset-floor: 가지치기 기한을 다시 세는 조건에 '굳은 뒤의 가중치가 최소 가중치 이상일 때만'을 더한다 (기본 꺼짐)
-    if args.iter().any(|a| a == "--prune-reset-floor") {
-        params.prune_reset_floor = true;
-        if params.grow.is_none() && params.load_from.is_none() { println!("[경고] --prune-reset-floor 는 --grow 가 없으면 효과가 없다 (가지치기가 꺼져 있다)"); }
-        println!("[설정] 가지치기 기한의 바닥(--prune-reset-floor): 도파민으로 강화 쪽이 굳어도 굳은 뒤의 가중치가 최소 가중치 {} 보다 작으면 기한을 다시 세지 않는다", params.min_weight);
+    // 가지치기 기한의 바닥은 기본으로 켜져 있다: 기한을 다시 세는 조건에 '굳은 뒤의 가중치가 최소 가중치 이상일 때만'이 든다.
+    //   --prune-reset-floor-off: 끈다(옛 동작). --prune-reset-floor: 받아들이되 아무 일도 하지 않는다(이미 기본이다).
+    //   불러온 망(--load)은 저장 파일의 설정을 따른다 — 이 옵션들로 바뀌지 않는다
+    let floor_off = args.iter().any(|a| a == "--prune-reset-floor-off");
+    if floor_off && args.iter().any(|a| a == "--prune-reset-floor") { eprintln!("[오류] --prune-reset-floor-off 와 --prune-reset-floor 는 함께 줄 수 없다"); std::process::exit(2); }
+    if floor_off { params.prune_reset_floor = false; }
+    if params.grow.is_some() && params.load_from.is_none() {
+        if params.prune_reset_floor {
+            println!("[설정] 가지치기 기한의 바닥: 도파민으로 강화 쪽이 굳어도 굳은 뒤의 가중치가 최소 가중치 {} 보다 작으면 기한을 다시 세지 않는다 (기본. --prune-reset-floor-off 로 끈다)", params.min_weight);
+        } else {
+            println!("[설정] 가지치기 기한의 바닥 끔(--prune-reset-floor-off): 옛 동작 — 굳은 양이 가중치의 1% 를 넘으면 가중치가 얼마든 기한을 다시 센다");
+        }
     }
     if gate_soft_given && params.grow_gate.is_none() {
         println!("[경고] --grow-gate-soft 는 --grow-gate 가 없으면 효과가 없다 (어느 발화율을 볼지 정해지지 않는다)");
