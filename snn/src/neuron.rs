@@ -21,6 +21,9 @@ const RELATIVE_REFRACTORY_INH: u64 = 4;   // 억제성: 짧은 상대 불응기
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum CellType { #[default] Legacy, Pyramidal, Pv, Sst, Vip, Modulatory, Predictor, Value }
 
+/// 자기 목표를 잴 때 세는 발화 간격의 수: 첫 발화에서 (OWN_COUNT + 1)째 발화까지의 틱으로 발화율을 잰다
+pub const OWN_COUNT: u32 = 16;
+
 /// 뉴런: potential + 시냅스 리스트 + 2D 위치
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Neuron {
@@ -126,6 +129,18 @@ pub struct Neuron {
     ///   0 이면(기본, 이 칸이 없는 저장 파일도) 조건이 없는 것과 같다 — 가중치는 0 이상이라 늘 참이다
     #[serde(default)]
     pub reset_min: f64,
+    /// 자기 값으로 정하는 목표 (받기 문의 목표를 뉴런 각자가 잰다). own_on 이 거짓이면(기본, 이 칸들이 없는 저장 파일도) 아무것도 하지 않는다.
+    ///   켜져 있고 아직 목표가 없으면(own_target == 0) 자기 발화를 센다: 첫 발화의 틱을 own_t0 에 적고, 열일곱째 발화에서
+    ///   목표 = 16 ÷ (지금 − own_t0) 로 굳힌다 (틱당 발화율). 자기 자발 발화 확률(0.00001 × spont_scale) 아래로는 내려가지 않고, 위 한계는 없다.
+    ///   한 번 굳으면 바뀌지 않는다. 공통 박자 없이 자기 발화와 그때 읽은 틱만 쓴다
+    #[serde(default)]
+    pub own_on: bool,
+    #[serde(default)]
+    pub own_target: f64,
+    #[serde(default)]
+    pub own_n: u32,
+    #[serde(default)]
+    pub own_t0: u64,
     /// 조절 수준이 틱마다 줄어드는 배수 (기본 0.98). 가치 뉴런은 더 빨리 줄어들게 해서(0.9) 도파민의 급증을 짧게 읽는다
     #[serde(default = "default_mod_decay")]
     pub mod_decay: f64,
@@ -209,7 +224,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: false, skip_refractory: false,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, reset_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, reset_min: 0.0, own_on: false, own_target: 0.0, own_n: 0, own_t0: 0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
         }
     }
 
@@ -217,7 +232,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: true, skip_refractory: false,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, reset_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, reset_min: 0.0, own_on: false, own_target: 0.0, own_n: 0, own_t0: 0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
         }
     }
 
@@ -226,7 +241,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory, skip_refractory: false,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.75, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 2, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, reset_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.75, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 2, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, reset_min: 0.0, own_on: false, own_target: 0.0, own_n: 0, own_t0: 0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
         }
     }
 
@@ -234,7 +249,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: false, skip_refractory: true,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, reset_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, reset_min: 0.0, own_on: false, own_target: 0.0, own_n: 0, own_t0: 0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
         }
     }
 
@@ -375,6 +390,15 @@ impl Neuron {
             self.rate_fast += 0.01;
             self.adapt += self.adapt_inc;
             self.rate_avg += 0.0002;
+            // 자기 목표를 재는 중이면 이 발화를 센다 (own_on 이 거짓이면 아무것도 하지 않는다)
+            if self.own_on && self.own_target == 0.0 {
+                if self.own_n == 0 { self.own_t0 = tick; }
+                self.own_n += 1;
+                if self.own_n >= OWN_COUNT + 1 {
+                    let dt = tick.saturating_sub(self.own_t0).max(1) as f64;
+                    self.own_target = (OWN_COUNT as f64 / dt).max(1e-5 * self.spont_scale);
+                }
+            }
             // 발화 시: self_threshold +0.001 (최대 1.0)
             if self.slow_adapt { self.self_threshold = (self.self_threshold + 0.001).min(1.0); }
             // 신호를 보내기 전에 먼저 자기 시냅스의 가지치기를 본다 (기한이 지난 연결은 이번 신호부터 전달하지 않는다)

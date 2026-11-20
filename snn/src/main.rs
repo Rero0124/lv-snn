@@ -208,6 +208,21 @@ fn main() {
         println!("[설정] 출력으로 가는 성장(--grow-out): 발화한 은닉 흥분 뉴런이 감정 주·이성 주 영역이면 성장 빠르기 × {:.3}, 기억 영역이면 × {:.3} 만큼을 은닉으로 가는 시도에 얹어 출력 뉴런 하나(고르게 무작위)에 시도한다. 출력의 받기 문 목표 = 추체의 목표 {:.6}/틱",
             params.output_frac, params.output_frac * 2.0 / 3.0, params.act_target.unwrap() * params.spont_fixed.unwrap());
     }
+    // --own-target all|pyr: 뉴런마다 자기 값으로 정하는 목표 (기본 꺼짐). all = 은닉 모두, pyr = 추체만
+    if let Some(i) = args.iter().position(|a| a == "--own-target") {
+        params.own_target = match args.get(i + 1).map(|s| s.as_str()) {
+            Some("all") => Some(network::OwnMode::All),
+            Some("pyr") => Some(network::OwnMode::Pyr),
+            other => { eprintln!("[오류] --own-target 은 all, pyr 중 하나여야 한다 (받은 값: {:?})", other); std::process::exit(2); }
+        };
+        if params.load_from.is_none() {
+            let missing: Vec<&str> = [("--grow", params.grow.is_none()), ("--grow-gate", params.grow_gate.is_none())].iter().filter(|x| x.1).map(|x| x.0).collect();
+            if !missing.is_empty() { eprintln!("[오류] --own-target 은 {} 이(가) 있어야 한다 (받기 문이 그 목표를 읽는다)", missing.join(", ")); std::process::exit(2); }
+            if params.own_target == Some(network::OwnMode::Pyr) && params.act_target.is_none() { println!("[경고] --own-target pyr 인데 --act-target 이 없다: 억제 뉴런에는 목표가 없어 받기 문이 걸리지 않는다"); }
+        }
+        println!("[설정] 자기 목표(--own-target {}): 은닉 뉴런 {} 자기 발화 {}번에 걸린 틱으로 목표를 재어 굳힌다 (목표 = {} ÷ 틱, 자기 자발 발화 확률 아래로는 내려가지 않음, 위 한계 없음). 재는 동안 그 뉴런으로 가는 새 접점 시도는 버린다",
+            args[i + 1], if params.own_target == Some(network::OwnMode::Pyr) { "가운데 추체가" } else { "모두가" }, neuron::OWN_COUNT + 1, neuron::OWN_COUNT);
+    }
     // --prune-reset-floor: 가지치기 기한을 다시 세는 조건에 '굳은 뒤의 가중치가 최소 가중치 이상일 때만'을 더한다 (기본 꺼짐)
     if args.iter().any(|a| a == "--prune-reset-floor") {
         params.prune_reset_floor = true;
@@ -927,6 +942,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     let (mut need_before, mut need_pre_acc, mut need_drop_acc, mut need_drop_n) = (0.0f64, 0.0f64, 0.0f64, 0u64);
     if let Some(d) = &restored { need_before = d.need_before; need_pre_acc = d.need_pre_acc; need_drop_acc = d.need_drop_acc; need_drop_n = d.need_drop_n; }
     let (mut last_made, mut last_drop, mut last_short) = (net.grow_made, net.gate_drop, net.pruned_short);
+    let mut last_own_wait = net.own_wait_drop;
     const AREAS: [&str; 6] = ["감정 주", "감정 지도", "이성 주", "이성 지도", "기억", "해마"];
     for t in (start + 1)..=ticks {
         if needs && !no_stim && pending.is_none() {
@@ -1060,6 +1076,27 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
                     "", ov.len(), ov.iter().map(|o| o.0).sum::<usize>(), ov.iter().map(|o| o.1).sum::<usize>(), q(&mut pairs, 0.0), q(&mut pairs, 0.5), q(&mut pairs, 1.0),
                     ov.iter().filter(|o| o.0 == 0).count(), ov.iter().map(|o| o.2).sum::<usize>(), q(&mut rate, 0.1), q(&mut rate, 0.5), q(&mut rate, 0.9), q(&mut exc, 0.5),
                     net.grow_made[4] - last_made[4], net.gate_drop[4] - last_drop[4], q(&mut rg, 0.1), q(&mut rg, 0.5), q(&mut rg, 0.9), ov.iter().map(|o| o.5).sum::<usize>());
+            }
+            if net.params_ref().own_target.is_some() {
+                // 자기 목표 줄 (읽기만): 종류마다 목표가 굳은 뉴런의 수, 굳은 목표(1천 틱당)의 분위, 자기 자발의 몇 배인가, 굳은 틱(첫 발화 틱 + 16 ÷ 목표; 아래 한계에 걸린 것은 뺀다)
+                let ov = net.own_observe();
+                let q = |v: &mut Vec<f64>, p: f64| -> f64 { if v.is_empty() { return f64::NAN; } v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[((v.len() as f64 * p) as usize).min(v.len() - 1)] };
+                let on_n = ov.iter().filter(|o| o.1).count(); let fixed_n = ov.iter().filter(|o| o.1 && o.2 > 0.0).count();
+                println!("{:>9} 자기 목표 | 재는 뉴런 {}개 가운데 굳은 {}개, 재는 중 {}개 (그 가운데 아직 한 번도 발화하지 않은 {}개) | 재는 중이라 버린 새 접점 시도 누계 {} (구간 {})",
+                    "", on_n, fixed_n, on_n - fixed_n, ov.iter().filter(|o| o.1 && o.2 == 0.0 && o.4 == 0).count(), net.own_wait_drop, net.own_wait_drop - last_own_wait);
+                for k in 0..5 {
+                    let v: Vec<&(usize, bool, f64, f64, u32, u64)> = ov.iter().filter(|o| o.0 == k && o.1).collect();
+                    if v.is_empty() { continue; }
+                    let f: Vec<&&(usize, bool, f64, f64, u32, u64)> = v.iter().filter(|o| o.2 > 0.0).collect();
+                    let mut t: Vec<f64> = f.iter().map(|o| o.2 * 1000.0).collect();
+                    let mut r: Vec<f64> = f.iter().filter(|o| o.3 > 0.0).map(|o| o.2 / o.3).collect();
+                    let floored = f.iter().filter(|o| o.2 <= o.3).count();
+                    let mut when: Vec<f64> = f.iter().filter(|o| o.2 > o.3).map(|o| o.5 as f64 + (neuron::OWN_COUNT as f64 / o.2).round()).collect();
+                    println!("{:>9} {} 자기 목표 | 굳은 {} / {} | 굳은 목표/1k 분위 10% {:.2}, 50% {:.2}, 90% {:.2}, 최대 {:.2} | 자기 자발의 배수 10% {:.2}, 50% {:.2}, 90% {:.2}, 최대 {:.2} | 아래 한계(자기 자발)에 걸린 {} | 굳은 틱 10% {:.0}, 50% {:.0}, 90% {:.0}, 최대 {:.0}",
+                        "", KINDS[k], f.len(), v.len(), q(&mut t, 0.1), q(&mut t, 0.5), q(&mut t, 0.9), q(&mut t, 1.0), q(&mut r, 0.1), q(&mut r, 0.5), q(&mut r, 0.9), q(&mut r, 1.0), floored,
+                        q(&mut when, 0.1), q(&mut when, 0.5), q(&mut when, 0.9), q(&mut when, 1.0));
+                }
+                last_own_wait = net.own_wait_drop;
             }
             last_made = net.grow_made; last_drop = net.gate_drop; last_short = net.pruned_short;
             std::io::stdout().flush().ok();
