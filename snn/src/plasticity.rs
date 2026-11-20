@@ -47,6 +47,8 @@ pub struct PairAcc { pub born: u64, pub last_tick: u64, pub last_w: f64, pub acc
 /// 알짜 조건의 스위치 (--prune-reset-net, 기본 꺼짐). PlasticityOptions 에 칸을 더하면 초파리 쪽의 만드는 자리를 고쳐야 해서 여기에 둔다.
 /// 망(network.rs)이 설정에 맞춰 켠다. 초파리는 켜지 않는다. 프로세스 하나에 하나다
 pub static PRUNE_RESET_NET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 알짜 조건의 범위 (--prune-reset-net-out): 표시가 있으면 mark[받는 뉴런 번호] 가 참인 시냅스에만 먹는다. None 이면 범위 없음(모든 시냅스). 망이 출력 뉴런의 표시를 넣는다
+pub static NET_MARK: std::sync::Mutex<Option<std::sync::Arc<Vec<bool>>>> = std::sync::Mutex::new(None);
 static OBS: std::sync::Mutex<Option<ConsolObs>> = std::sync::Mutex::new(None);
 // 표시된 받는 뉴런 번호의 범위 [OBS_LO, OBS_HI): 잠그기 전에 이 범위 밖의 시냅스를 걸러 낸다 (빠르게)
 static OBS_LO: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -313,7 +315,9 @@ pub struct EligibilityTrace {
 fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOptions) {
     // 조절 신호 방식: 조절 수준이 남아 있는 뉴런의 입력 시냅스에서, 남아 있는 흔적을 가중치 변화로 바꾼다
     if let Some(gain) = opt.mod_gate {
-        let net_on = PRUNE_RESET_NET.load(std::sync::atomic::Ordering::Relaxed);
+        let net_all = PRUNE_RESET_NET.load(std::sync::atomic::Ordering::Relaxed);
+        let net_mark: Option<std::sync::Arc<Vec<bool>>> = if net_all { NET_MARK.lock().unwrap().clone() } else { None };
+        let net_at = |post: usize| net_all && net_mark.as_ref().map_or(true, |m| m.get(post).copied().unwrap_or(false));
         // level = 흔적을 넘기는 세기와 부호. 기준선 방식이면 (조절 수준 ÷ 자기 기준선 − 1), 아니면 조절 수준 그대로
         let active: Vec<(usize, f64)> = neurons.iter().enumerate().filter_map(|(i, n)| {
             if opt.mod_baseline {
@@ -334,6 +338,7 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
                     if s.elig == 0.0 { s.lq = false; return false; }
                     s.sync(global_tick);
                     let moved = (gain * l.abs()).min(1.0) * s.elig;
+                    let net_on = net_at(post);
                     let w_before = s.weight;
                     s.weight = (s.weight + moved * l.signum()).clamp(0.0, 1.0);
                     s.elig -= moved;
@@ -368,6 +373,7 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
                         if l != 0.0 {
                             // 쌓여 있던 흔적을 가중치로 내보낸다. 내보낸 만큼 흔적은 비워지므로 변화 총량은 쌓인 흔적을 넘지 않는다
                             let moved = (gain * l.abs()).min(1.0) * s.elig;
+                            let net_on = net_at(s.target as usize);
                             let w_before = s.weight;
                             s.weight = (s.weight + moved * l.signum()).clamp(0.0, 1.0);
                             s.elig -= moved;

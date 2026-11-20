@@ -235,6 +235,11 @@ fn main() {
         params.prune_reset_net = true;
         println!("[설정] 알짜로 가지치기의 기한을 다시 센다(--prune-reset-net): 시냅스마다 조절 신호가 가중치를 옮긴 양을 부호째 쌓아, 쌓인 알짜가 자기 가중치의 1% 이상이고 가중치가 기한을 다시 세는 바닥 이상이면 기한을 다시 세고 쌓인 값을 0 으로 한다 (옛 조건 '한 번에 1%' 에 또는으로 더함. 기한을 다시 받으면 어느 조건이든 0 으로. 줄이는 박자 없음)");
     }
+    // --prune-reset-net-out: 알짜 조건을 받는 뉴런이 출력인 시냅스에만 (기본 꺼짐. 불러온 망에도 먹는다. --prune-reset-net 또는 --prune-reset-net-at-reward 와 함께)
+    if args.iter().any(|a| a == "--prune-reset-net-out") {
+        params.prune_reset_net_out = true;
+        println!("[설정] 알짜 조건의 범위(--prune-reset-net-out): 받는 뉴런이 출력인 시냅스에서만 알짜를 쌓고 기한을 다시 센다 (그 밖의 시냅스는 옛 조건만)");
+    }
     // --own-target-homeo: 감응도 항상성이 굳힌 자기 목표를 본다 (기본 꺼짐. --own-target 과 함께만)
     if args.iter().any(|a| a == "--own-target-homeo") {
         if params.own_target.is_none() && params.load_from.is_none() { eprintln!("[오류] --own-target-homeo 는 --own-target 과 함께 준다"); std::process::exit(2); }
@@ -1883,6 +1888,11 @@ fn op2_test(params: &NetParams, trials: usize) {
     let trials1 = trials;
     for (name, reward) in [("보상 없이 반복", false), ("자기 목표가 나오면 보상", !no_reward)] {
         let trials = if name == "보상 없이 반복" { trials1 } else { trials2 };
+        // --prune-reset-net-at-reward: 알짜 조건을 2단계의 첫 시행부터 켠다 (목표를 고르는 처음 60번과 1단계는 꺼진 길). 보상 없는 대조(--op-no-reward)에서도 2단계의 시작에서 켠다
+        if name != "보상 없이 반복" && std::env::args().any(|a| a == "--prune-reset-net-at-reward") {
+            net.set_prune_reset_net(true);
+            println!("  ◦ [--prune-reset-net-at-reward] 2단계의 시작에서 알짜 조건을 켠다 (쌓인 알짜는 모든 시냅스에서 0 부터)");
+        }
         // 관찰: 낱말마다, 은닉 뉴런이 자극 뒤 10틱 안에 발화한 시행 수 (구간마다 비운다)
         let hcount = net.hidden_count();
         let mut early = vec![vec![0u32; hcount]; nw];
