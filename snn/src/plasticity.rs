@@ -23,6 +23,9 @@ pub struct ConsolObs {
     pub max_ratio: f64,
     pub reset_events: u64,
     pub reset_pairs: std::collections::HashSet<(u32, u32)>,
+    /// 알짜 조건(쌓인 알짜 ≥ 가중치의 1%, 가중치 ≥ 바닥)에 닿은 사건의 수와 그 쌍. 옵션이 켜져 있으면 실제로 기한을 다시 받은 것, 꺼져 있으면 곁 표로 따라 센 '닿았을 것'
+    pub net_events: u64,
+    pub net_pairs: std::collections::HashSet<(u32, u32)>,
     /// 크기의 합 (사건의 수가 아니라 양): 기준선 위에서 오른 양(굳은 양 > 0) / 기준선 위에서 내린 양(굳은 양 < 0) / 기준선 아래에서 내린 양(굳은 양 > 0 이 깎임) / 기준선 아래에서 오른 양
     pub sum_up: f64,
     pub sum_up_neg: f64,
@@ -38,7 +41,12 @@ pub struct ConsolObs {
 #[derive(Clone, Copy)]
 pub struct PairAcc { pub born: u64, pub last_tick: u64, pub last_w: f64, pub acc: f64, pub peak: f64, pub resets: u32, pub post: u32,
     /// 알짜: 굳히는 자리에서 가중치에 더해진 양의 부호 있는 합 (기준선 위에서는 +굳은 양, 아래에서는 −굳은 양; 생긴 뒤 또는 관찰이 켜진 뒤. 기한을 다시 받아도 비우지 않는다. 0·1 로 잘린 것은 셈하지 않는다)
-    pub net: f64 }
+    pub net: f64,
+    /// 알짜 조건을 따라 세는 칸 (시냅스의 net_acc 와 같은 법: 가중치가 실제로 바뀐 양을 부호째 더하고, 기한을 다시 받으면(옛 조건이든 알짜 조건이든) 0) 과 알짜 조건에 닿은 횟수
+    pub nacc: f64, pub nhits: u32 }
+/// 알짜 조건의 스위치 (--prune-reset-net, 기본 꺼짐). PlasticityOptions 에 칸을 더하면 초파리 쪽의 만드는 자리를 고쳐야 해서 여기에 둔다.
+/// 망(network.rs)이 설정에 맞춰 켠다. 초파리는 켜지 않는다. 프로세스 하나에 하나다
+pub static PRUNE_RESET_NET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static OBS: std::sync::Mutex<Option<ConsolObs>> = std::sync::Mutex::new(None);
 // 표시된 받는 뉴런 번호의 범위 [OBS_LO, OBS_HI): 잠그기 전에 이 범위 밖의 시냅스를 걸러 낸다 (빠르게)
 static OBS_LO: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -47,7 +55,7 @@ static OBS_HI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::
 pub fn obs_start(mark: Vec<bool>, pre_end: usize) {
     let lo = mark.iter().position(|&m| m).unwrap_or(0); let hi = mark.iter().rposition(|&m| m).map_or(0, |i| i + 1);
     OBS_LO.store(lo, std::sync::atomic::Ordering::Relaxed); OBS_HI.store(hi, std::sync::atomic::Ordering::Relaxed);
-    *OBS.lock().unwrap() = Some(ConsolObs { mark, pre_end, hist: [0; 80], pos_events: 0, nonpos_events: 0, down_events: 0, over1: 0, max_ratio: 0.0, reset_events: 0, reset_pairs: std::collections::HashSet::new(), sum_up: 0.0, sum_up_neg: 0.0, sum_down: 0.0, sum_down_neg: 0.0, pairs: HashMap::new(), dropped: Vec::new() });
+    *OBS.lock().unwrap() = Some(ConsolObs { mark, pre_end, hist: [0; 80], pos_events: 0, nonpos_events: 0, down_events: 0, over1: 0, max_ratio: 0.0, reset_events: 0, reset_pairs: std::collections::HashSet::new(), net_events: 0, net_pairs: std::collections::HashSet::new(), sum_up: 0.0, sum_up_neg: 0.0, sum_down: 0.0, sum_down_neg: 0.0, pairs: HashMap::new(), dropped: Vec::new() });
     OBS_ON.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 /// 지금까지 모은 것을 꺼내고 비운다 (관찰은 켜진 채로 둔다). 켜져 있지 않으면 None
@@ -56,7 +64,7 @@ pub fn obs_take() -> Option<ConsolObs> {
     let o = g.as_mut()?;
     // 쌍마다의 곁 표는 구간을 넘어 이어져야 하므로 새 묶음으로 옮겨 두고, 꺼내는 쪽에는 그 사본을 준다
     let pairs = std::mem::take(&mut o.pairs);
-    let fresh = ConsolObs { mark: o.mark.clone(), pre_end: o.pre_end, hist: [0; 80], pos_events: 0, nonpos_events: 0, down_events: 0, over1: 0, max_ratio: 0.0, reset_events: 0, reset_pairs: std::collections::HashSet::new(),
+    let fresh = ConsolObs { mark: o.mark.clone(), pre_end: o.pre_end, hist: [0; 80], pos_events: 0, nonpos_events: 0, down_events: 0, over1: 0, max_ratio: 0.0, reset_events: 0, reset_pairs: std::collections::HashSet::new(), net_events: 0, net_pairs: std::collections::HashSet::new(),
         sum_up: 0.0, sum_up_neg: 0.0, sum_down: 0.0, sum_down_neg: 0.0, pairs: pairs.clone(), dropped: Vec::new() };
     let mut out = std::mem::replace(o, fresh);
     out.pairs = pairs;
@@ -78,13 +86,14 @@ pub fn obs_sync_pairs(current: &[(u32, u32, u64, f64)], now: u64) -> (Vec<PairAc
     }
     let mut alive = Vec::with_capacity(current.len());
     for &(a, b, born, w) in current {
-        let e = o.pairs.entry((a, b)).or_insert(PairAcc { born, last_tick: now, last_w: w, acc: 0.0, peak: 0.0, resets: 0, post: b, net: 0.0 });
+        let e = o.pairs.entry((a, b)).or_insert(PairAcc { born, last_tick: now, last_w: w, acc: 0.0, peak: 0.0, resets: 0, post: b, net: 0.0, nacc: 0.0, nhits: 0 });
         e.last_tick = now; e.last_w = w;
         alive.push(*e);
     }
     (dropped, alive)
 }
-fn obs_consol(pre: usize, post: usize, l: f64, moved: f64, w: f64, reset: bool, born: u64, tick: u64) {
+/// reset = 옛 조건(한 번에 1%)으로 기한을 다시 받았는가. delta = 가중치가 실제로 바뀐 양(부호 있음), floor = 기한을 다시 세는 바닥, net_real = 옵션이 켜져 있을 때 알짜 조건으로 실제로 다시 받았는가(꺼져 있으면 None)
+fn obs_consol(pre: usize, post: usize, l: f64, moved: f64, w: f64, reset: bool, born: u64, tick: u64, delta: f64, floor: f64, net_real: Option<bool>) {
     if post < OBS_LO.load(std::sync::atomic::Ordering::Relaxed) || post >= OBS_HI.load(std::sync::atomic::Ordering::Relaxed) { return; }
     let mut g = OBS.lock().unwrap();
     let Some(o) = g.as_mut() else { return };
@@ -93,9 +102,16 @@ fn obs_consol(pre: usize, post: usize, l: f64, moved: f64, w: f64, reset: bool, 
     let key = (pre as u32, post as u32);
     let stale = match o.pairs.get(&key) { Some(e) => e.born != born, None => false };
     if stale { let old = o.pairs.remove(&key).unwrap(); o.dropped.push(old); }
-    let e = o.pairs.entry(key).or_insert(PairAcc { born, last_tick: tick, last_w: w, acc: 0.0, peak: 0.0, resets: 0, post: post as u32, net: 0.0 });
+    let e = o.pairs.entry(key).or_insert(PairAcc { born, last_tick: tick, last_w: w, acc: 0.0, peak: 0.0, resets: 0, post: post as u32, net: 0.0, nacc: 0.0, nhits: 0 });
     e.last_tick = tick; e.last_w = w;
     e.net += if l < 0.0 { -moved } else { moved };
+    // 알짜 조건: 옵션이 켜져 있으면 실제 결과를, 꺼져 있으면 같은 법으로 따라 센 것을 적는다
+    e.nacc += delta;
+    let hit = match net_real { Some(x) => x, None => e.nacc > 0.0 && e.nacc >= 0.01 * w && w >= floor };
+    if hit { e.nhits += 1; }
+    if hit || reset { e.nacc = 0.0; }
+    if hit && net_real.is_some() { e.acc = 0.0; }
+    if hit { o.net_events += 1; o.net_pairs.insert(key); }
     if l < 0.0 { o.down_events += 1; if moved > 0.0 { o.sum_down += moved; } else { o.sum_down_neg += -moved; } return; }
     if moved <= 0.0 { o.nonpos_events += 1; o.sum_up_neg += -moved; return; }
     o.pos_events += 1;
@@ -297,6 +313,7 @@ pub struct EligibilityTrace {
 fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOptions) {
     // 조절 신호 방식: 조절 수준이 남아 있는 뉴런의 입력 시냅스에서, 남아 있는 흔적을 가중치 변화로 바꾼다
     if let Some(gain) = opt.mod_gate {
+        let net_on = PRUNE_RESET_NET.load(std::sync::atomic::Ordering::Relaxed);
         // level = 흔적을 넘기는 세기와 부호. 기준선 방식이면 (조절 수준 ÷ 자기 기준선 − 1), 아니면 조절 수준 그대로
         let active: Vec<(usize, f64)> = neurons.iter().enumerate().filter_map(|(i, n)| {
             if opt.mod_baseline {
@@ -317,14 +334,17 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
                     if s.elig == 0.0 { s.lq = false; return false; }
                     s.sync(global_tick);
                     let moved = (gain * l.abs()).min(1.0) * s.elig;
+                    let w_before = s.weight;
                     s.weight = (s.weight + moved * l.signum()).clamp(0.0, 1.0);
                     s.elig -= moved;
                     // 굳은 만큼은 더 이상 일시적인 부분이 아니다 (합쳐진 세기가 두 번 세어지지 않게)
                     if s.short_decay > 0.0 { s.w_short -= moved; }
                     // 도파민으로 강화 쪽이 굳었으면 이 시냅스는 쓰인 것이다: 가지치기 기한을 지금부터 다시 센다
                     let reset = l > 0.0 && moved > 0.01 * s.weight && s.weight >= floor; // 가중치의 1% 이상 굳었고, 굳은 뒤의 가중치가 바닥(reset_min) 이상일 때만
-                    if reset { s.last_co = global_tick; }
-                    if OBS_ON.load(std::sync::atomic::Ordering::Relaxed) { obs_consol(pre as usize, post, l, moved, s.weight, reset, s.born, global_tick); }
+                    // 알짜 조건 (--prune-reset-net, 기본 꺼짐): 쌓인 알짜가 가중치의 1% 이상이고 가중치가 바닥 이상이면 기한을 다시 센다. 옛 조건에 '또는'으로 더한다
+                    let net_reset = if net_on { s.net_acc += s.weight - w_before; let r = s.net_acc > 0.0 && s.net_acc >= 0.01 * s.weight && s.weight >= floor; if r || reset { s.net_acc = 0.0; } r } else { false };
+                    if reset || net_reset { s.last_co = global_tick; }
+                    if OBS_ON.load(std::sync::atomic::Ordering::Relaxed) { obs_consol(pre as usize, post, l, moved, s.weight, reset, s.born, global_tick, s.weight - w_before, floor, if net_on { Some(net_reset) } else { None }); }
                     if s.elig.abs() < 1e-3 * s.weight.max(1e-9) { s.elig = 0.0; s.lq = false; false } else { true }
                 });
                 neurons[post].elig_in = list;
@@ -348,13 +368,16 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
                         if l != 0.0 {
                             // 쌓여 있던 흔적을 가중치로 내보낸다. 내보낸 만큼 흔적은 비워지므로 변화 총량은 쌓인 흔적을 넘지 않는다
                             let moved = (gain * l.abs()).min(1.0) * s.elig;
+                            let w_before = s.weight;
                             s.weight = (s.weight + moved * l.signum()).clamp(0.0, 1.0);
                             s.elig -= moved;
                             if s.short_decay > 0.0 { s.w_short -= moved; }
                             // 도파민으로 강화 쪽이 굳었으면 이 시냅스는 쓰인 것이다: 가지치기 기한을 지금부터 다시 센다
                             let reset = l > 0.0 && moved > 0.01 * s.weight && s.weight >= floor; // 가중치의 1% 이상 굳었고, 굳은 뒤의 가중치가 바닥(reset_min) 이상일 때만
-                            if reset { s.last_co = global_tick; }
-                            if OBS_ON.load(std::sync::atomic::Ordering::Relaxed) { obs_consol(pre_id, s.target as usize, l, moved, s.weight, reset, s.born, global_tick); }
+                            // 알짜 조건 (--prune-reset-net, 기본 꺼짐): 쌓인 알짜가 가중치의 1% 이상이고 가중치가 바닥 이상이면 기한을 다시 센다. 옛 조건에 '또는'으로 더한다
+                            let net_reset = if net_on { s.net_acc += s.weight - w_before; let r = s.net_acc > 0.0 && s.net_acc >= 0.01 * s.weight && s.weight >= floor; if r || reset { s.net_acc = 0.0; } r } else { false };
+                            if reset || net_reset { s.last_co = global_tick; }
+                            if OBS_ON.load(std::sync::atomic::Ordering::Relaxed) { obs_consol(pre_id, s.target as usize, l, moved, s.weight, reset, s.born, global_tick, s.weight - w_before, floor, if net_on { Some(net_reset) } else { None }); }
                         }
                     }
                     // 흔적이 가중치의 0.1% 아래로 줄면 없는 것으로 본다 (틱당 0.993배로 줄어서, 그냥 두면 수천 틱 동안 목록에 남는다)

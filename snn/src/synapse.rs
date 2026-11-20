@@ -81,6 +81,10 @@ pub struct Synapse {
     /// 일시적인 변화가 틱마다 줄어드는 배수 (0 = 이 방식을 쓰지 않음)
     #[serde(default)]
     pub short_decay: f64,
+    /// 쌓인 알짜 (--prune-reset-net 이 켜져 있을 때만 쌓는다. 꺼져 있으면 늘 0 이고 저장 파일에도 쓰지 않는다):
+    /// 조절 신호가 흔적을 가중치로 넘길 때 가중치가 실제로 바뀐 양을 부호째 더한 값. 가지치기의 기한을 다시 받으면 0 으로 돌아간다. 줄이는 박자는 없다
+    #[serde(default, skip_serializing_if = "net_acc_is_zero")]
+    pub net_acc: f64,
     /// 이 시냅스가 "흔적이 있는 시냅스" 목록에 올라 있는지: 보내는 뉴런의 목록(lp), 받는 뉴런의 목록(lq)
     #[serde(skip)]
     pub lp: bool,
@@ -88,14 +92,15 @@ pub struct Synapse {
     pub lq: bool,
 }
 fn default_count() -> u32 { 1 }
+fn net_acc_is_zero(v: &f64) -> bool { *v == 0.0 }
 
 impl Synapse {
     pub fn new(target: NeuronId, weight: f64) -> Self {
-        Self { target, weight, seed: false, fatigue: 0.0, ltp_trace: 0.0, last_used_tick: 0, recent_rate: 0.0, elig: 0.0, on_dendrite: false, facilitating: false, facil: 0.0, use_avg: 0.0, ltd_mark: 0, slow_rate: 0.0, slow1: 0.0, slow2: 0.0, t: 0, born: 0, count: 1, last_co: 0, p_rel: 0.0, slow_fast: false, w_short: 0.0, short_decay: 0.0, lp: false, lq: false }
+        Self { target, weight, seed: false, fatigue: 0.0, ltp_trace: 0.0, last_used_tick: 0, recent_rate: 0.0, elig: 0.0, on_dendrite: false, facilitating: false, facil: 0.0, use_avg: 0.0, ltd_mark: 0, slow_rate: 0.0, slow1: 0.0, slow2: 0.0, t: 0, born: 0, count: 1, last_co: 0, p_rel: 0.0, slow_fast: false, w_short: 0.0, short_decay: 0.0, lp: false, lq: false, net_acc: 0.0 }
     }
 
     pub fn new_seed(target: NeuronId, weight: f64) -> Self {
-        Self { target, weight, seed: true, fatigue: 0.0, ltp_trace: 0.0, last_used_tick: 0, recent_rate: 0.0, elig: 0.0, on_dendrite: false, facilitating: false, facil: 0.0, use_avg: 0.0, ltd_mark: 0, slow_rate: 0.0, slow1: 0.0, slow2: 0.0, t: 0, born: 0, count: 1, last_co: 0, p_rel: 0.0, slow_fast: false, w_short: 0.0, short_decay: 0.0, lp: false, lq: false }
+        Self { target, weight, seed: true, fatigue: 0.0, ltp_trace: 0.0, last_used_tick: 0, recent_rate: 0.0, elig: 0.0, on_dendrite: false, facilitating: false, facil: 0.0, use_avg: 0.0, ltd_mark: 0, slow_rate: 0.0, slow1: 0.0, slow2: 0.0, t: 0, born: 0, count: 1, last_co: 0, p_rel: 0.0, slow_fast: false, w_short: 0.0, short_decay: 0.0, lp: false, lq: false, net_acc: 0.0 }
     }
 
     /// 발화 시 남은 자원의 15%를 소모 (fatigue += 0.15 × (1 - fatigue))

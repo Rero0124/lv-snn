@@ -230,6 +230,11 @@ fn main() {
         params.freeze_wiring = true;
         println!("[설정] 배선을 얼린다(--freeze-wiring): 성장(출력으로 가는 것 포함)과 가지치기를 하지 않는다. 가중치의 학습·감응도 항상성·자발 발화·결핍은 그대로");
     }
+    // --prune-reset-net: 알짜로 가지치기의 기한을 다시 센다 (기본 꺼짐. 불러온 망에도 먹는다)
+    if args.iter().any(|a| a == "--prune-reset-net") {
+        params.prune_reset_net = true;
+        println!("[설정] 알짜로 가지치기의 기한을 다시 센다(--prune-reset-net): 시냅스마다 조절 신호가 가중치를 옮긴 양을 부호째 쌓아, 쌓인 알짜가 자기 가중치의 1% 이상이고 가중치가 기한을 다시 세는 바닥 이상이면 기한을 다시 세고 쌓인 값을 0 으로 한다 (옛 조건 '한 번에 1%' 에 또는으로 더함. 기한을 다시 받으면 어느 조건이든 0 으로. 줄이는 박자 없음)");
+    }
     // --own-target-homeo: 감응도 항상성이 굳힌 자기 목표를 본다 (기본 꺼짐. --own-target 과 함께만)
     if args.iter().any(|a| a == "--own-target-homeo") {
         if params.own_target.is_none() && params.load_from.is_none() { eprintln!("[오류] --own-target-homeo 는 --own-target 과 함께 준다"); std::process::exit(2); }
@@ -1259,7 +1264,9 @@ const OP_PRE: u64 = 40;
 
 /// 구간 동안의 망 값 누적 (관찰): 은닉 발화 수와 틱 수, 쉬는 구간(자극 뒤 61~300틱)의 한 틱 최대 은닉 발화, 그 최대가 은닉의 2% 를 넘은 / 5% 이상인 시행 수, 시행 수
 #[derive(Default, Clone)]
-struct OpNet { hid: u64, ticks: u64, rest_peak: usize, over2: usize, over5: usize, trials: usize, trial_peak: usize }
+struct OpNet { hid: u64, ticks: u64, rest_peak: usize, over2: usize, over5: usize, trials: usize, trial_peak: usize,
+    /// 출력 뉴런의 조절 수준이 기준선의 ±25% 를 벗어난 뉴런·틱의 수: [모든 틱, 쉬는 구간의 틱] × (위, 아래, 센 수)
+    band: [(u64, u64, u64); 2] }
 impl OpNet {
     /// 방금 돈 틱의 은닉 발화를 센다. rest = 쉬는 구간(자극 뒤 61틱부터)의 틱인가
     fn tick(&mut self, net: &Network, rest: bool) {
@@ -1267,6 +1274,8 @@ impl OpNet {
         let n = net.tick_ids.iter().filter(|&&id| (id as usize) < h).count();
         self.hid += n as u64; self.ticks += 1;
         if rest { self.trial_peak = self.trial_peak.max(n); }
+        let (hi, lo, k) = net.mod_band();
+        for b in 0..(if rest { 2 } else { 1 }) { self.band[b].0 += hi; self.band[b].1 += lo; self.band[b].2 += k; }
     }
     /// 시행 하나가 끝났다: 그 시행의 쉬는 구간 최대를 구간 값에 넣는다
     fn end_trial(&mut self, net: &Network) {
@@ -1279,7 +1288,8 @@ impl OpNet {
 }
 
 /// 망 값 한 줄 (관찰, 읽기만): 접점·상대 수, 은닉 → 출력 쌍, 목표 출력이 받는 쌍, 은닉 입력 0 인 뉴런, 구간의 은닉 발화와 쉬는 구간의 한 틱 최대
-fn op_print_net(net: &Network, targets: &[usize], o: Option<&OpNet>) {
+fn op_print_net(net: &Network, targets: &[usize], o: Option<&OpNet>) -> Option<(Vec<(u32, u32)>, Vec<(u32, u32)>)> {
+    let mut ret = None;
     let (avg, _, _, conns) = net.out_degree_stats();
     let (ov, _) = net.out_observe();
     let zero = net.dev_observe().per.iter().filter(|x| x.5 + x.6 == 0).count();
@@ -1295,7 +1305,7 @@ fn op_print_net(net: &Network, targets: &[usize], o: Option<&OpNet>) {
     // 굳는 양 줄 (관찰, 읽기만): 시작 줄에서 관찰을 켜고, 구간마다 그동안 모인 것을 찍고 비운다
     match o {
         None => { net.consol_obs_start(); let (cur, now) = net.out_pairs(); let _ = plasticity::obs_sync_pairs(&cur, now); } // 시작할 때 있는 쌍을 곁 표에 넣어 둔다 (사건 없이 떨어지는 쌍도 세도록)
-        Some(_) => if let Some(c) = plasticity::obs_take() {
+        Some(on) => if let Some(c) = plasticity::obs_take() {
             let ids = net.output_ids(); let tset: std::collections::HashSet<u32> = targets.iter().filter_map(|&q| ids.get(q).map(|&i| i as u32)).collect();
             let n = c.pos_events;
             let q = |p: f64| -> f64 { if n == 0 { return f64::NAN; } let want = (n as f64 * p).ceil().max(1.0) as u64; let mut acc = 0u64; for (b, &h) in c.hist.iter().enumerate() { acc += h; if acc >= want { return 10f64.powf((b as f64 + 0.5) / 10.0 - 7.0); } } f64::NAN };
@@ -1332,6 +1342,23 @@ fn op_print_net(net: &Network, targets: &[usize], o: Option<&OpNet>) {
                 }
                 println!("      ◦ 쌍마다의 알짜 — {}: {}", label, parts.join(" | "));
             }
+            // 알짜 조건 (관찰): 쌓인 알짜가 가중치의 1% 에 닿은 사건과 쌍 — 옵션이 켜져 있으면 실제로 기한을 다시 받은 것, 꺼져 있으면 같은 법으로 따라 센 '닿았을 것'
+            {
+                let tids: Vec<u32> = targets.iter().filter_map(|&q| ids.get(q).map(|&i| i as u32)).collect();
+                let grp = |v: &mut dyn Iterator<Item = u32>| -> String { let mut c = vec![0usize; tids.len() + 1]; for p in v { c[tids.iter().position(|&t| t == p).unwrap_or(tids.len())] += 1; } c.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" / ") };
+                let either: std::collections::HashSet<(u32, u32)> = c.net_pairs.union(&c.reset_pairs).cloned().collect();
+                let lab: String = (0..tids.len()).map(|g| format!("목표 {}", g + 1)).chain(std::iter::once("그 밖".to_string())).collect::<Vec<_>>().join(" / ");
+                println!("      ◦ 기한을 다시 받은 쌍, 조건마다 (은닉→출력; 알짜 조건은 {}) [{}]: 알짜 조건(쌓인 알짜 ≥ 가중치의 1%)으로 사건 {}, 쌍 {} ({}) | 옛 조건(한 번에 1%)으로 사건 {}, 쌍 {} ({}) | 둘 가운데 하나라도 쌍 {} ({}) | 구간 끝에 있는 쌍 {} ({}) | 구간에 떨어진 쌍 {} ({})",
+                    if net.prune_reset_net() { "켜짐 — 실제로 다시 받음" } else { "꺼짐 — 닿았을 것을 따라 셈, 기한은 그대로" }, lab,
+                    c.net_events, c.net_pairs.len(), grp(&mut c.net_pairs.iter().map(|p| p.1)), c.reset_events, c.reset_pairs.len(), grp(&mut c.reset_pairs.iter().map(|p| p.1)),
+                    either.len(), grp(&mut either.iter().map(|p| p.1)), alive.len(), grp(&mut alive.iter().map(|e| e.post)), dropped.len(), grp(&mut dropped.iter().map(|e| e.post)));
+                println!("      ◦ 알짜가 1% 에 닿았던 쌍 (생긴 뒤 또는 시험 시작 뒤 한 번이라도) [{}]: 구간에 떨어진 쌍 가운데 {} | 구간 끝에 있는 쌍 가운데 {}",
+                    lab, grp(&mut dropped.iter().filter(|e| e.nhits > 0).map(|e| e.post)), grp(&mut alive.iter().filter(|e| e.nhits > 0).map(|e| e.post)));
+                let pc = |a: u64, k: u64| if k == 0 { f64::NAN } else { a as f64 * 100.0 / k as f64 };
+                println!("      ◦ 조절 수준이 기준선의 ±25% 를 벗어난 몫 (출력 뉴런 × 틱, 구간): 모든 틱 — 위 {:.3}% / 아래 {:.3}% ({} 뉴런·틱) | 쉬는 구간(자극 뒤 61~300틱) — 위 {:.3}% / 아래 {:.3}% ({} 뉴런·틱)",
+                    pc(on.band[0].0, on.band[0].2), pc(on.band[0].1, on.band[0].2), on.band[0].2, pc(on.band[1].0, on.band[1].2), pc(on.band[1].1, on.band[1].2), on.band[1].2);
+                ret = Some((c.net_pairs.iter().cloned().collect(), c.reset_pairs.iter().cloned().collect()));
+            }
             // 조절 수준 (관찰, 읽기만): 이 줄을 찍는 순간(구간의 마지막 시행이 끝난 쉬는 구간)의 조절 수준과 기준선
             let (mo, mp) = net.mod_observe();
             for (label, v) in [("출력", &mo), ("은닉 추체", &mp)] {
@@ -1345,6 +1372,7 @@ fn op_print_net(net: &Network, targets: &[usize], o: Option<&OpNet>) {
             }
         },
     }
+    ret
 }
 
 /// 입력 시냅스의 세기 한 줄 (관찰, 읽기만). --in-fan / --in-weight / --op-in-obs 가 있을 때만 찍는다(옵션 없는 기록은 그대로)
@@ -1849,7 +1877,15 @@ fn op2_test(params: &NetParams, trials: usize) {
     if no_reward { println!("  ◦ 보상 규칙: --op-no-reward (대조: 2단계에도 보상 없음)"); }
     op_print_net(&net, &targets, None);
     let block = (trials / 6).max(1);
+    // --op2-reward-trials N: 2단계(보상 단계)만 N 번으로 한다 (없으면 1단계와 같은 수). 구간의 길이는 그대로(1단계의 1/6)
+    let trials2 = { let a: Vec<String> = std::env::args().collect(); a.iter().position(|x| x == "--op2-reward-trials").and_then(|i| a.get(i + 1)).and_then(|x| x.parse::<usize>().ok()).unwrap_or(trials) };
+    if trials2 != trials { println!("  ◦ 2단계의 길이: --op2-reward-trials {} (1단계는 {}번, 구간은 {}번씩)", trials2, trials, block); }
+    let trials1 = trials;
     for (name, reward) in [("보상 없이 반복", false), ("자기 목표가 나오면 보상", !no_reward)] {
+        let trials = if name == "보상 없이 반복" { trials1 } else { trials2 };
+        // 관찰: 낱말마다, 은닉 뉴런이 자극 뒤 10틱 안에 발화한 시행 수 (구간마다 비운다)
+        let hcount = net.hidden_count();
+        let mut early = vec![vec![0u32; hcount]; nw];
         let mut nobs = OpNet::default();
         let mut own = vec![0usize; nw]; let mut cross = vec![0usize; nw]; let mut oth = vec![0usize; nw]; let mut n = vec![0usize; nw]; let mut rew = vec![0usize; nw];
         // 관찰: 자극 앞 40틱의 바탕(자기 / 남 / 나머지), 출력마다의 횟수(자극 뒤 / 앞), 보상 창(41~60틱)의 도파민 발화(보상 시행 / 보상 없는 시행: 발화 수, 시행 수)
@@ -1869,10 +1905,13 @@ fn op2_test(params: &NetParams, trials: usize) {
             // op_trial 과 같은 차례(입력 4틱, 40틱 동안 출력 읽기)에 은닉 발화만 더 센다
             let f = {
                 let mut fired = vec![false; nout];
+                let mut seen: Vec<u32> = Vec::new();
                 net.drive_text(words[w], 4);
-                for _ in 0..40 {
+                for st in 0..40 {
                     net.step();
                     nobs.tick(&net, false);
+                    if st < 10 { for &id in &net.tick_ids { if (id as usize) < hcount { seen.push(id as u32); } } }
+                    if st == 9 { seen.sort_unstable(); seen.dedup(); for &i in &seen { early[w][i as usize] += 1; } }
                     for &id in &net.tick_ids { if let Some(q) = net.output_seq(id as usize) { fired[q] = true; } }
                 }
                 fired
@@ -1919,7 +1958,26 @@ fn op2_test(params: &NetParams, trials: usize) {
                 for w in 0..nw { kline += &format!("   {}: {} / {} / {} / {} (걸러져 보상 없던 시행 {})", words[w], kind[w][0], kind[w][1], kind[w][2], kind[w][3], filtered[w]); }
                 println!("{kline}");
                 println!("      ◦ 보상 창의 도파민 발화 %, 가름마다 (자기만 / 둘 다 / 남만 / 둘 다 안 나옴): {} / {} / {} / {}   (시행 {} / {} / {} / {}번)", pct(da_kind[0]), pct(da_kind[1]), pct(da_kind[2]), pct(da_kind[3]), da_kind[0].1, da_kind[1].1, da_kind[2].1, da_kind[3].1);
-                op_print_net(&net, &targets, Some(&nobs));
+                if let Some((np, op)) = op_print_net(&net, &targets, Some(&nobs)) {
+                    // 관찰: 기한을 다시 받은 목표의 쌍이 그 낱말에 켜지는 은닉에서 오는가 — 보내는 뉴런이 이 구간에 그 낱말의 자극 뒤 10틱 안에 발화한 시행의 몫(%)의 평균
+                    let ids = net.output_ids();
+                    let (cur, _) = net.out_pairs();
+                    let share = |pre: u32, v: usize| if n[v] == 0 { 0.0 } else { early[v].get(pre as usize).copied().unwrap_or(0) as f64 * 100.0 / n[v] as f64 };
+                    let mean = |pres: &[u32], v: usize| if pres.is_empty() { "-".to_string() } else { format!("{:.1}", pres.iter().map(|&p| share(p, v)).sum::<f64>() / pres.len() as f64) };
+                    let mut sline = "      ◦ 보내는 뉴런이 자극 뒤 10틱 안에 발화한 시행의 몫 %의 평균 (자기 낱말 / 다른 낱말의 평균; 쌍 수):".to_string();
+                    for w in 0..nw {
+                        let tid = ids.get(targets[w]).map(|&i| i as u32).unwrap_or(u32::MAX);
+                        let ov: Vec<usize> = (0..nw).filter(|&v| v != w).collect();
+                        let both = |pres: &[u32]| -> String { let o = if pres.is_empty() || ov.is_empty() { "-".to_string() } else { format!("{:.1}", ov.iter().map(|&v| pres.iter().map(|&p| share(p, v)).sum::<f64>() / pres.len() as f64).sum::<f64>() / ov.len() as f64) }; format!("{} / {} ({}쌍)", mean(pres, w), o, pres.len()) };
+                        let a: Vec<u32> = np.iter().filter(|p| p.1 == tid).map(|p| p.0).collect();
+                        let b: Vec<u32> = op.iter().filter(|p| p.1 == tid).map(|p| p.0).collect();
+                        let c: Vec<u32> = cur.iter().filter(|p| p.1 == tid).map(|p| p.0).collect();
+                        let all: Vec<u32> = (0..hcount as u32).collect();
+                        sline += &format!("   목표 {} ({}): 알짜 조건에 닿은 쌍 {} | 옛 조건으로 다시 받은 쌍 {} | 구간 끝에 그 목표가 받는 쌍 모두 {} | 은닉 모두 {}", w + 1, words[w], both(&a), both(&b), both(&c), both(&all));
+                    }
+                    println!("{sline}");
+                }
+                early.iter_mut().for_each(|v| v.iter_mut().for_each(|x| *x = 0));
                 nobs = OpNet::default();
                 kind.iter_mut().for_each(|x| *x = [0; 4]); da_kind = [(0, 0); 4]; filtered.iter_mut().for_each(|x| *x = 0);
                 own_p.iter_mut().for_each(|x| *x = 0); cross_p.iter_mut().for_each(|x| *x = 0); oth_p.iter_mut().for_each(|x| *x = 0);
