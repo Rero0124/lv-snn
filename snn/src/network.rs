@@ -187,6 +187,10 @@ pub struct NetParams {
     /// 받기 문이 억제 뉴런이 보내는 새 접점은 막지 않는다 (기본 꺼짐. 이 칸이 없는 저장 파일은 꺼짐). 받기 문(grow_gate)이 있는 구성이면 쓸 수 있다.
     ///   보내는 뉴런이 억제면 받는 뉴런의 목표를 보지 않고 받는다. 자기 목표를 재는 동안 막는 것(own_target)은 그대로다 (같은 문서 13장 '다')
     pub gate_exc_only: bool,
+    /// 배선을 얼린다 (기본 꺼짐. 이 칸이 없는 저장 파일은 꺼짐): 성장(grow_step, 출력으로 가는 것 포함)과 가지치기(받는 쪽 점검 run_prune,
+    ///   보내는 쪽 prune_own)를 하지 않는다. 가중치의 학습·감응도 항상성·자발 발화·결핍은 그대로다. 불러온 망에 명령줄(--freeze-wiring)로 켤 수 있다 —
+    ///   자란 망의 기능 시험에서 '시험 동안 연결이 갈리는 것'을 빼 보려는 대조용
+    pub freeze_wiring: bool,
     /// (시험용) 입력 뉴런 하나가 가는 은닉 흥분 뉴런의 수 F: 주면 감정 주·이성 주·기억의 흥분 뉴런 가운데 F 개를 **되풀이 없이** 고른다.
     ///   없으면 지금 길(synapses_per_neuron × input_pop 번, 되풀이 허락). 처음 배선에만 쓰인다. --topo(발달 구성)에서는 자리 둘레로 고르는 법은 그대로 두고 수만 F 로 바꾼다(영역에 크기대로 나눔).
     ///   명세: lv-snn-runs/review-session/sparse-inhibit-spec.md ㉠. 바깥에서 준 값이다
@@ -292,7 +296,7 @@ pub struct DevObs {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), grow_out: false, in_fan: None, in_weight: None, prune_reset_floor: true, own_target: None, own_target_open: false, own_target_homeo: false, gate_exc_only: false, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), grow_out: false, in_fan: None, in_weight: None, prune_reset_floor: true, own_target: None, own_target_open: false, own_target_homeo: false, gate_exc_only: false, freeze_wiring: false, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
     }
 }
 
@@ -300,7 +304,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), grow_out: false, in_fan: None, in_weight: None, prune_reset_floor: true, own_target: None, own_target_open: false, own_target_homeo: false, gate_exc_only: false, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), grow_out: false, in_fan: None, in_weight: None, prune_reset_floor: true, own_target: None, own_target_open: false, own_target_homeo: false, gate_exc_only: false, freeze_wiring: false, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
     }
 }
 
@@ -504,6 +508,11 @@ impl Network {
             // 자기 목표: 저장 파일의 설정을 따른다. 옵션 없이 기른 망을 옵션을 켜서 부르는 것은 막는다 (이미 자란 망의 발화율이 목표로 굳는다)
             if params.own_target.is_some() && net.params.own_target.is_none() {
                 eprintln!("[오류] --own-target 없이 기른 망({})을 --own-target 을 켜서 불러올 수 없다 (자란 뒤의 발화율이 목표로 굳는다)", path); std::process::exit(2);
+            }
+            // 배선을 얼린다: 명령줄에서 켜면 불러온 망의 성장과 가지치기를 끈다 (보내는 쪽 가지치기는 뉴런의 prune_tau 를 0 으로 해서 끈다)
+            if params.freeze_wiring && !net.params.freeze_wiring {
+                net.params.freeze_wiring = true;
+                for n in net.neurons.iter_mut() { n.prune_tau = 0.0; }
             }
             // 기한을 다시 세는 바닥(prune_reset_floor)은 저장 파일의 설정 그대로다: 뉴런의 reset_min 이 저장돼 있고, 명령줄로 켜거나 끄지 않는다
             // (이 칸이 없는 옛 저장 파일은 꺼짐 — 바닥 없이 기른 망이 이어 돌 때 그대로 이어진다)
@@ -733,7 +742,7 @@ impl Network {
                     }
                 }
                 n.next_prune = now + 1000;
-                n.prune_tau = tau;
+                n.prune_tau = if net.params.freeze_wiring { 0.0 } else { tau };
                 n.prune_min = min_w;
                 n.reset_min = if net.params.prune_reset_floor { min_w } else { 0.0 };
                 // 자기 목표를 재기 시작한다 (준비 구간 뒤. 시계는 각자의 첫 발화에서 시작한다)
@@ -2143,7 +2152,7 @@ impl Network {
 
         if !self.recent_spikes.is_empty() {
             let spikes: Vec<(NeuronId, u64)> = self.recent_spikes.drain(..).collect();
-            if let Some(rate) = self.params.grow { self.run_prune(&spikes); self.grow_step(&spikes, rate); }
+            if let Some(rate) = self.params.grow { if !self.params.freeze_wiring { self.run_prune(&spikes); self.grow_step(&spikes, rate); } }
         }
 
         completed_ids
@@ -2478,6 +2487,22 @@ impl Network {
         self.neurons[post].incoming.push((pre, len));
         self.sprouted += 1;
         self.grow_made[post_kind] += 1;
+    }
+
+    /// 굳는 양의 관찰을 켠다 (읽기만): 은닉 뉴런이 출력 뉴런으로 보내는 시냅스만 센다
+    pub fn consol_obs_start(&self) {
+        let mut mark = vec![false; self.neurons.len()];
+        for &o in &self.output_idx { mark[o] = true; }
+        plasticity::obs_start(mark, self.hippocampus_range.1);
+    }
+    /// 출력 뉴런의 차례(seq) → 뉴런 번호
+    pub fn output_ids(&self) -> Vec<usize> { self.output_idx.clone() }
+    /// 은닉→은닉 쌍 수(지연 시냅스 제외, count >= 1)와 은닉→출력 쌍 수 (관찰용)
+    pub fn pair_counts(&self) -> (usize, usize) {
+        let h = self.hippocampus_range.1; let out: std::collections::HashSet<usize> = self.output_idx.iter().cloned().collect();
+        let (mut hh, mut ho) = (0, 0);
+        for n in &self.neurons[..h] { for s in &n.synapses { if s.count == 0 { continue; } let t = s.target as usize; if t < h { if s.slow_rate == 0.0 { hh += 1; } } else if out.contains(&t) { ho += 1; } } }
+        (hh, ho)
     }
 
     /// 은닉 뉴런마다 (종류 0 추체 1 Pv 2 Sst 3 Vip 4 그 밖, 감응도 excitability, own_homeo 이고 목표가 굳었는가) (관찰용, 읽기만)

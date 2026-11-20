@@ -5,6 +5,59 @@
 use crate::neuron::{Neuron, NeuronId};
 use std::collections::HashMap;
 
+// ── 굳는 양의 관찰 (읽기만) ─────────────────────────────────────────────────────────
+// 도파민으로 굳을 때(조절 수준이 기준선을 벗어난 받는 뉴런으로 흔적이 가중치로 넘어갈 때), 표시해 둔 받는 뉴런(예: 출력 뉴런)으로 가는
+// 시냅스의 '굳은 양 ÷ 굳은 뒤의 가중치'와 가지치기 기한을 다시 받은 쌍을 모아 둔다. OBS_ON 이 꺼져 있으면(기본, 초파리도) 아무것도 하지 않고,
+// 켜져 있어도 가중치·흔적·기한을 바꾸지 않는다 (동작에 닿지 않는다).
+pub static OBS_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 관찰 묶음: 받는 뉴런 표시(뉴런 번호 → 참이면 센다), 보내는 뉴런 번호의 위 끝(그 아래만 센다),
+/// 강화 쪽(l > 0)에서 굳은 양이 양수였던 사건의 '굳은 양 ÷ 가중치' 로그 눈금 히스토그램(10^-7 ~ 10, 한 자리에 열 칸), 사건 수들, 기한을 다시 받은 쌍
+pub struct ConsolObs {
+    pub mark: Vec<bool>,
+    pub pre_end: usize,
+    pub hist: [u64; 80],
+    pub pos_events: u64,   // l > 0 이고 굳은 양 > 0
+    pub nonpos_events: u64, // l > 0 이고 굳은 양 <= 0 (흔적이 0 이하)
+    pub down_events: u64,  // l < 0 (조절 수준이 기준선 아래)
+    pub over1: u64,        // 굳은 양 > 가중치의 1%
+    pub max_ratio: f64,
+    pub reset_events: u64,
+    pub reset_pairs: std::collections::HashSet<(u32, u32)>,
+}
+static OBS: std::sync::Mutex<Option<ConsolObs>> = std::sync::Mutex::new(None);
+// 표시된 받는 뉴런 번호의 범위 [OBS_LO, OBS_HI): 잠그기 전에 이 범위 밖의 시냅스를 걸러 낸다 (빠르게)
+static OBS_LO: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static OBS_HI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// 관찰을 켠다: mark[받는 뉴런 번호] 가 참인 시냅스만, 보내는 뉴런 번호가 pre_end 아래인 것만 센다
+pub fn obs_start(mark: Vec<bool>, pre_end: usize) {
+    let lo = mark.iter().position(|&m| m).unwrap_or(0); let hi = mark.iter().rposition(|&m| m).map_or(0, |i| i + 1);
+    OBS_LO.store(lo, std::sync::atomic::Ordering::Relaxed); OBS_HI.store(hi, std::sync::atomic::Ordering::Relaxed);
+    *OBS.lock().unwrap() = Some(ConsolObs { mark, pre_end, hist: [0; 80], pos_events: 0, nonpos_events: 0, down_events: 0, over1: 0, max_ratio: 0.0, reset_events: 0, reset_pairs: std::collections::HashSet::new() });
+    OBS_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+/// 지금까지 모은 것을 꺼내고 비운다 (관찰은 켜진 채로 둔다). 켜져 있지 않으면 None
+pub fn obs_take() -> Option<ConsolObs> {
+    let mut g = OBS.lock().unwrap();
+    let o = g.as_mut()?;
+    let fresh = ConsolObs { mark: o.mark.clone(), pre_end: o.pre_end, hist: [0; 80], pos_events: 0, nonpos_events: 0, down_events: 0, over1: 0, max_ratio: 0.0, reset_events: 0, reset_pairs: std::collections::HashSet::new() };
+    Some(std::mem::replace(o, fresh))
+}
+fn obs_consol(pre: usize, post: usize, l: f64, moved: f64, w: f64, reset: bool) {
+    if post < OBS_LO.load(std::sync::atomic::Ordering::Relaxed) || post >= OBS_HI.load(std::sync::atomic::Ordering::Relaxed) { return; }
+    let mut g = OBS.lock().unwrap();
+    let Some(o) = g.as_mut() else { return };
+    if pre >= o.pre_end || !o.mark.get(post).copied().unwrap_or(false) { return; }
+    if l < 0.0 { o.down_events += 1; return; }
+    if moved <= 0.0 { o.nonpos_events += 1; return; }
+    o.pos_events += 1;
+    let r = moved / w.max(1e-300);
+    if moved > 0.01 * w { o.over1 += 1; }
+    if r > o.max_ratio { o.max_ratio = r; }
+    let b = ((r.log10() + 7.0) * 10.0).floor().clamp(0.0, 79.0) as usize;
+    o.hist[b] += 1;
+    if reset { o.reset_events += 1; o.reset_pairs.insert((pre as u32, post as u32)); }
+}
+
 /// 실험용 스위치. 기본값은 기존 동작과 동일.
 #[derive(Debug, Clone)]
 pub struct PlasticityOptions {
@@ -215,7 +268,9 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
                     // 굳은 만큼은 더 이상 일시적인 부분이 아니다 (합쳐진 세기가 두 번 세어지지 않게)
                     if s.short_decay > 0.0 { s.w_short -= moved; }
                     // 도파민으로 강화 쪽이 굳었으면 이 시냅스는 쓰인 것이다: 가지치기 기한을 지금부터 다시 센다
-                    if l > 0.0 && moved > 0.01 * s.weight && s.weight >= floor { s.last_co = global_tick; } // 가중치의 1% 이상 굳었고, 굳은 뒤의 가중치가 바닥(reset_min) 이상일 때만
+                    let reset = l > 0.0 && moved > 0.01 * s.weight && s.weight >= floor; // 가중치의 1% 이상 굳었고, 굳은 뒤의 가중치가 바닥(reset_min) 이상일 때만
+                    if reset { s.last_co = global_tick; }
+                    if OBS_ON.load(std::sync::atomic::Ordering::Relaxed) { obs_consol(pre as usize, post, l, moved, s.weight, reset); }
                     if s.elig.abs() < 1e-3 * s.weight.max(1e-9) { s.elig = 0.0; s.lq = false; false } else { true }
                 });
                 neurons[post].elig_in = list;
@@ -230,6 +285,7 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
                 if n.modulatory || n.elig_idx.is_empty() { return; }
                 let mut list = std::mem::take(&mut n.elig_idx);
                 let floor = n.reset_min;
+                let pre_id = n.id as usize;
                 list.retain(|&k| {
                     let Some(s) = n.synapses.get_mut(k as usize) else { return false };
                     if s.elig == 0.0 { s.lp = false; return false; }
@@ -242,7 +298,9 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
                             s.elig -= moved;
                             if s.short_decay > 0.0 { s.w_short -= moved; }
                             // 도파민으로 강화 쪽이 굳었으면 이 시냅스는 쓰인 것이다: 가지치기 기한을 지금부터 다시 센다
-                            if l > 0.0 && moved > 0.01 * s.weight && s.weight >= floor { s.last_co = global_tick; } // 가중치의 1% 이상 굳었고, 굳은 뒤의 가중치가 바닥(reset_min) 이상일 때만
+                            let reset = l > 0.0 && moved > 0.01 * s.weight && s.weight >= floor; // 가중치의 1% 이상 굳었고, 굳은 뒤의 가중치가 바닥(reset_min) 이상일 때만
+                            if reset { s.last_co = global_tick; }
+                            if OBS_ON.load(std::sync::atomic::Ordering::Relaxed) { obs_consol(pre_id, s.target as usize, l, moved, s.weight, reset); }
                         }
                     }
                     // 흔적이 가중치의 0.1% 아래로 줄면 없는 것으로 본다 (틱당 0.993배로 줄어서, 그냥 두면 수천 틱 동안 목록에 남는다)

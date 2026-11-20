@@ -223,6 +223,11 @@ fn main() {
         println!("[설정] 자기 목표(--own-target {}): 은닉 뉴런 {} 자기 발화 {}번에 걸린 틱으로 목표를 재어 굳힌다 (목표 = {} ÷ 틱, 자기 자발 발화 확률 아래로는 내려가지 않음, 위 한계 없음). 재는 동안 그 뉴런으로 가는 새 접점 시도는 버린다",
             args[i + 1], if params.own_target == Some(network::OwnMode::Pyr) { "가운데 추체가" } else { "모두가" }, neuron::OWN_COUNT + 1, neuron::OWN_COUNT);
     }
+    // --freeze-wiring: 배선을 얼린다 — 성장과 가지치기를 끈다 (기본 꺼짐. 불러온 망에도 먹는다)
+    if args.iter().any(|a| a == "--freeze-wiring") {
+        params.freeze_wiring = true;
+        println!("[설정] 배선을 얼린다(--freeze-wiring): 성장(출력으로 가는 것 포함)과 가지치기를 하지 않는다. 가중치의 학습·감응도 항상성·자발 발화·결핍은 그대로");
+    }
     // --own-target-homeo: 감응도 항상성이 굳힌 자기 목표를 본다 (기본 꺼짐. --own-target 과 함께만)
     if args.iter().any(|a| a == "--own-target-homeo") {
         if params.own_target.is_none() && params.load_from.is_none() { eprintln!("[오류] --own-target-homeo 는 --own-target 과 함께 준다"); std::process::exit(2); }
@@ -1285,6 +1290,19 @@ fn op_print_net(net: &Network, targets: &[usize], o: Option<&OpNet>) {
             if o.ticks > 0 { o.hid as f64 * 1000.0 / (o.ticks as f64 * h) } else { 0.0 }, o.ticks, o.rest_peak as f64 * 100.0 / h, o.over2, o.over5, o.trials);
     }
     println!("{line}");
+    // 굳는 양 줄 (관찰, 읽기만): 시작 줄에서 관찰을 켜고, 구간마다 그동안 모인 것을 찍고 비운다
+    match o {
+        None => net.consol_obs_start(),
+        Some(_) => if let Some(c) = plasticity::obs_take() {
+            let ids = net.output_ids(); let tset: std::collections::HashSet<u32> = targets.iter().filter_map(|&q| ids.get(q).map(|&i| i as u32)).collect();
+            let n = c.pos_events;
+            let q = |p: f64| -> f64 { if n == 0 { return f64::NAN; } let want = (n as f64 * p).ceil().max(1.0) as u64; let mut acc = 0u64; for (b, &h) in c.hist.iter().enumerate() { acc += h; if acc >= want { return 10f64.powf((b as f64 + 0.5) / 10.0 - 7.0); } } f64::NAN };
+            let (rt, ro) = (c.reset_pairs.iter().filter(|p| tset.contains(&p.1)).count(), c.reset_pairs.iter().filter(|p| !tset.contains(&p.1)).count());
+            let (hh, ho) = net.pair_counts();
+            println!("      ◦ 굳는 양 (은닉→출력 시냅스, 조절 수준이 기준선 위일 때 굳은 양이 양수였던 사건 {}번): 굳은 양 ÷ 가중치 분위 10% {:.2e}, 50% {:.2e}, 90% {:.2e}, 최대 {:.2e} (분위는 한 자리를 열 칸으로 나눈 눈금의 가운데) | 가중치의 1% 를 넘은 사건 {} | 굳은 양이 0 이하였던 사건 {} | 기준선 아래에서의 사건 {} | 가지치기 기한을 다시 받은 사건 {}, 다시 받은 은닉→출력 쌍: 목표 출력 {} / 그 밖 {} | 은닉→은닉 쌍 {}, 은닉→출력 쌍 {}",
+                n, q(0.1), q(0.5), q(0.9), c.max_ratio, c.over1, c.nonpos_events, c.down_events, c.reset_events, rt, ro, hh, ho);
+        },
+    }
 }
 
 /// 입력 시냅스의 세기 한 줄 (관찰, 읽기만). --in-fan / --in-weight / --op-in-obs 가 있을 때만 찍는다(옵션 없는 기록은 그대로)
