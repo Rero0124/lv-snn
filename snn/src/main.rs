@@ -62,6 +62,10 @@ fn main() {
     if let Some(v) = num("--gain") { params.hidden_gain = v; }
     if let Some(v) = num("--inh") { params.inhibitory_ratio = v; }
     if let Some(v) = num("--input-pop") { params.input_pop = v as usize; }
+    // (시험용) --in-fan F: 입력 뉴런 하나가 은닉 흥분 뉴런 F 개에 되풀이 없이 간다. --in-weight W: 입력 시냅스의 처음 세기를 모두 W 로.
+    //   둘 다 없으면 지금 길 그대로. 명세: lv-snn-runs/review-session/sparse-inhibit-spec.md ㉠
+    if let Some(v) = num("--in-fan") { params.in_fan = Some(v as usize); }
+    if let Some(v) = num("--in-weight") { params.in_weight = Some(v); }
     if let Some(v) = num("--out-frac") { params.output_frac = v; }
     if args.iter().any(|a| a == "--lognormal") { params.lognormal = true; }
     // --validated: 초파리 커넥톰에서 검증한 학습 구성
@@ -265,6 +269,20 @@ fn main() {
             print!("  {:.1}/{:.2}", d, net.need_level(0));
         }
         println!();
+        return;
+    }
+    if (params.in_fan.is_some() || params.in_weight.is_some()) && params.topo {
+        eprintln!("[오류] --in-fan / --in-weight 는 --topo(발달 구성)와 함께 쓰지 않는다 (입력이 자리 둘레로 가는 길에는 넣지 않았다)"); std::process::exit(2);
+    }
+    if params.in_fan.is_some() || params.in_weight.is_some() {
+        println!("[설정] (시험용) 입력 배선: 가는 곳 {} / 처음 세기 {}",
+            params.in_fan.map(|f| format!("{f}개, 되풀이 없이 (--in-fan)")).unwrap_or_else(|| "지금 그대로".into()),
+            params.in_weight.map(|w| format!("모두 {w} (--in-weight)")).unwrap_or_else(|| "지금 그대로(넓은 분포)".into()));
+    }
+    // --in-probe 가,나,…: 짧은 확인. 글자(들)를 4틱 넣고, 자극 4틱과 그 뒤 6틱에 한 번이라도 발화한 은닉 뉴런의 수를 센다
+    if let Some(list) = args.iter().position(|a| a == "--in-probe").and_then(|i| args.get(i + 1)) {
+        params.dopamine = true;
+        in_probe(&params, &list.split(',').map(|x| x.to_string()).collect::<Vec<_>>());
         return;
     }
     // --op-test N: 기능 시험. 입력 A 에 정해 둔 출력이 나오면 보상. 그 출력이 나오는 비율이 올라가는지 (출력만 보고 보상을 준다)
@@ -1187,6 +1205,47 @@ fn op_print_net(net: &Network, targets: &[usize], o: Option<&OpNet>) {
     println!("{line}");
 }
 
+/// 입력 시냅스의 세기 한 줄 (관찰, 읽기만). --in-fan / --in-weight / --op-in-obs 가 있을 때만 찍는다(옵션 없는 기록은 그대로)
+fn op_print_inputs(net: &Network, label: &str) {
+    let on = std::env::args().any(|a| a == "--in-fan" || a == "--in-weight" || a == "--op-in-obs");
+    if !on { return; }
+    let (n, med, p90, max, over) = net.input_weight_stats(0.37);
+    println!("      ◦ 입력 시냅스의 세기 ({label}): {n}개, 중앙 {med:.4}, 90% {p90:.4}, 최대 {max:.4}, 0.37 넘은 것 {:.2}%", over * 100.0);
+}
+
+/// --in-probe: 짧은 확인(명세 sparse-inhibit-spec.md 7장). 300틱 쉰 뒤, 준 입력을 차례로 5바퀴:
+/// 4틱 넣고 10틱(자극 4틱 + 그 뒤 6틱) 동안 한 번이라도 발화한 은닉 뉴런을 세고, 290틱 쉰다. 보상은 없다
+fn in_probe(params: &NetParams, items: &[String]) {
+    println!("{:?}", params);
+    let mut net = Network::with_params(params.clone());
+    let h = net.hidden_count();
+    let refs: Vec<&str> = items.iter().map(|x| x.as_str()).collect();
+    op_print_word_inputs(&refs);
+    op_print_inputs_always(&net, "시작");
+    net.rest(300);
+    println!("값 = 자극 4틱과 그 뒤 6틱(모두 10틱)에 한 번이라도 발화한 은닉 뉴런의 수 (은닉 {h}개). 그 가운데 처음 4틱 / 뒤 6틱에 처음 발화한 수를 괄호에");
+    for round in 1..=5 {
+        let mut line = format!("  ◦ {round}바퀴:");
+        for it in items {
+            let mut seen = vec![false; h];
+            let (mut a, mut b) = (0usize, 0usize);
+            net.drive_text(it, 4);
+            for t in 1..=10 {
+                net.tick();
+                for &id in &net.tick_ids { let i = id as usize; if i < h && !seen[i] { seen[i] = true; if t <= 4 { a += 1 } else { b += 1 } } }
+            }
+            net.rest(290);
+            line += &format!("   '{}' {} ({} / {})", it, a + b, a, b);
+        }
+        println!("{line}");
+    }
+    op_print_inputs_always(&net, "끝");
+}
+fn op_print_inputs_always(net: &Network, label: &str) {
+    let (n, med, p90, max, over) = net.input_weight_stats(0.37);
+    println!("      ◦ 입력 시냅스의 세기 ({label}): {n}개, 중앙 {med:.4}, 90% {p90:.4}, 최대 {max:.4}, 0.37 넘은 것 {:.2}%", over * 100.0);
+}
+
 /// --save-path P 가 있으면 시험이 끝난 망을 P 에 저장한다 (기능 시험에서만: 발달 시험의 --save-every 와 따로)
 fn op_save_end(net: &Network) {
     let args: Vec<String> = std::env::args().collect();
@@ -1399,6 +1458,7 @@ fn op_test(params: &NetParams, trials: usize) {
     let others: Vec<usize> = (0..nout).filter(|&q| q != target && count[q] * 4 >= probes && count[q] * 4 <= probes * 3).collect();
     println!("값 = 구간별로 그 출력이 나온 시행의 비율. '다른 출력' = 처음에 25~75% 로 나오던 나머지 {}개의 평균\n", others.len());
     op_print_word_inputs(&[word]);
+    op_print_inputs(&net, "처음 60번 뒤");
     println!("  ◦ 처음 {probes}번의 자극 앞 40틱(바탕): 목표 {}/{probes}, 비교 {}/{probes}, 다른 출력 평균 {:.1}%.  목표 고르는 법: {}", pre_count[target], pre_count[control],
         others.iter().map(|&q| pre_count[q]).sum::<usize>() as f64 * 100.0 / (probes * others.len().max(1)) as f64, if apart { "--op-target-apart (자극 뒤 − 앞 +10%p 이상 가운데 50% 에 가장 가까운 것)" } else { "50% 에 가장 가까운 출력" });
     op_print_outputs(" (처음 60번)", &count, &pre_count, probes, true);
@@ -1450,6 +1510,7 @@ fn op_test(params: &NetParams, trials: usize) {
     }
     println!();
     op_print_deviations(&net, "끝");
+    op_print_inputs(&net, "끝");
     op_save_end(&net);
 }
 
@@ -1505,6 +1566,7 @@ fn op2_test(params: &NetParams, trials: usize) {
     for w in 0..nw { println!("  입력 '{}' 의 목표 '{}' (처음 {}/{probes}), 나머지 {}개", words[w], net.token_of(targets[w]), count[w][targets[w]], others[w].len()); }
     // 여기부터 '◦' 로 시작하는 줄은 관찰(망의 동작과 무관)
     op_print_word_inputs(&words);
+    op_print_inputs(&net, "처음 60번 뒤");
     println!("  ◦ 목표 고르는 법: {}", if apart { "--op-target-apart (자극 뒤 − 앞 +10%p 이상이고 다른 낱말에서 25% 아래인 출력 가운데 50% 에 가장 가까운 것)" } else { "그 낱말에서 50% 에 가장 가까운 출력" });
     for w in 0..nw {
         let mut line = format!("  ◦ 입력 '{}' 의 목표 '{}' 의 처음 {probes}번 비율 (자극 뒤 / 자극 앞 %):", words[w], net.token_of(targets[w]));
@@ -1599,6 +1661,7 @@ fn op2_test(params: &NetParams, trials: usize) {
             }
         }
     }
+    op_print_inputs(&net, "끝");
     op_save_end(&net);
 }
 
