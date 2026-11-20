@@ -1144,11 +1144,60 @@ fn op_trial(net: &mut Network, word: &str) -> Vec<bool> {
 /// 자극 앞의 바탕을 보는 창: 앞 시행 쉬는 구간의 마지막 몇 틱 (자극 뒤에 출력을 읽는 40틱과 같은 길이)
 const OP_PRE: u64 = 40;
 
-/// 관찰용 쉼: net.rest(ticks) 와 같은 차례로 틱을 돌리면서 마지막 OP_PRE 틱에 발화한 출력을 적는다 (망의 동작에는 관여하지 않는다)
-fn op_rest_tail(net: &mut Network, ticks: u64) -> Vec<bool> {
+/// 구간 동안의 망 값 누적 (관찰): 은닉 발화 수와 틱 수, 쉬는 구간(자극 뒤 61~300틱)의 한 틱 최대 은닉 발화, 그 최대가 은닉의 2% 를 넘은 / 5% 이상인 시행 수, 시행 수
+#[derive(Default, Clone)]
+struct OpNet { hid: u64, ticks: u64, rest_peak: usize, over2: usize, over5: usize, trials: usize, trial_peak: usize }
+impl OpNet {
+    /// 방금 돈 틱의 은닉 발화를 센다. rest = 쉬는 구간(자극 뒤 61틱부터)의 틱인가
+    fn tick(&mut self, net: &Network, rest: bool) {
+        let h = net.hidden_count();
+        let n = net.tick_ids.iter().filter(|&&id| (id as usize) < h).count();
+        self.hid += n as u64; self.ticks += 1;
+        if rest { self.trial_peak = self.trial_peak.max(n); }
+    }
+    /// 시행 하나가 끝났다: 그 시행의 쉬는 구간 최대를 구간 값에 넣는다
+    fn end_trial(&mut self, net: &Network) {
+        let h = net.hidden_count().max(1);
+        self.rest_peak = self.rest_peak.max(self.trial_peak);
+        if self.trial_peak * 50 > h { self.over2 += 1; }
+        if self.trial_peak * 20 >= h { self.over5 += 1; }
+        self.trials += 1; self.trial_peak = 0;
+    }
+}
+
+/// 망 값 한 줄 (관찰, 읽기만): 접점·상대 수, 은닉 → 출력 쌍, 목표 출력이 받는 쌍, 은닉 입력 0 인 뉴런, 구간의 은닉 발화와 쉬는 구간의 한 틱 최대
+fn op_print_net(net: &Network, targets: &[usize], o: Option<&OpNet>) {
+    let (avg, _, _, conns) = net.out_degree_stats();
+    let (ov, _) = net.out_observe();
+    let zero = net.dev_observe().per.iter().filter(|x| x.5 + x.6 == 0).count();
+    let h = net.hidden_count().max(1) as f64;
+    let tg: Vec<String> = targets.iter().map(|&q| format!("{}", ov.get(q).map(|x| x.0).unwrap_or(0))).collect();
+    let mut line = format!("      ◦ 망: 은닉 뉴런당 접점 {:.0}, 상대 수 {:.0} | 은닉→출력 쌍 {} (자란 것 {}), 목표 출력이 받는 쌍 {}, 받는 쌍 0 인 출력 {} | 은닉 입력 0 인 뉴런 {} | 생긴 수 {}, 사라진 수 {} (누적)",
+        avg, conns, ov.iter().map(|x| x.0).sum::<usize>(), ov.iter().map(|x| x.1).sum::<usize>(), tg.join(" / "), ov.iter().filter(|x| x.0 == 0).count(), zero, net.sprouted, net.pruned);
+    if let Some(o) = o {
+        line += &format!(" | 구간의 은닉 뉴런당 발화/1k {:.2} ({}틱) | 쉬는 구간(자극 뒤 61~300틱)의 한 틱 최대 은닉 발화 {:.2}% (2% 넘은 시행 {}, 5% 이상 {} / 시행 {})",
+            if o.ticks > 0 { o.hid as f64 * 1000.0 / (o.ticks as f64 * h) } else { 0.0 }, o.ticks, o.rest_peak as f64 * 100.0 / h, o.over2, o.over5, o.trials);
+    }
+    println!("{line}");
+}
+
+/// --save-path P 가 있으면 시험이 끝난 망을 P 에 저장한다 (기능 시험에서만: 발달 시험의 --save-every 와 따로)
+fn op_save_end(net: &Network) {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(p) = args.iter().position(|a| a == "--save-path").and_then(|i| args.get(i + 1)) {
+        net.save(std::path::Path::new(p));
+        println!("  ◦ [저장] {}", p);
+    }
+}
+
+/// 관찰용 쉼: net.rest(ticks) 와 같은 차례로 틱을 돌리면서 마지막 OP_PRE 틱에 발화한 출력을 적는다 (망의 동작에는 관여하지 않는다).
+/// obs 가 있으면 틱마다의 은닉 발화도 센다(쉬는 구간의 틱으로)
+fn op_rest_tail(net: &mut Network, ticks: u64) -> Vec<bool> { op_rest_tail_obs(net, ticks, None) }
+fn op_rest_tail_obs(net: &mut Network, ticks: u64, mut obs: Option<&mut OpNet>) -> Vec<bool> {
     let mut tail = vec![false; net.output_count()];
     for t in 0..ticks {
         net.tick();
+        if let Some(o) = obs.as_deref_mut() { o.tick(net, true); }
         if t + OP_PRE >= ticks { for &id in &net.tick_ids { if let Some(q) = net.output_seq(id as usize) { tail[q] = true; } } }
     }
     tail
@@ -1244,7 +1293,7 @@ impl OpObs {
 /// 기능 시험의 한 시행 전체(300틱)를 돌리면서 시간대별 값을 센다. 진행 순서는 op_trial + (보상) + rest(260) 과 같다:
 /// 입력 4틱, 40틱 동안 출력 읽기, 목표가 나왔고 reward 이면 보상 입력 20틱, 나머지 260틱.
 /// 반환: 출력별 발화 여부, 보상을 줬는지, 이 시행의 관찰값, 마지막 OP_PRE 틱에 발화한 출력(다음 시행의 '자극 앞' 바탕)
-fn op_trial_observed(net: &mut Network, word: &str, target: usize, reward: bool) -> (Vec<bool>, bool, OpObs, Vec<bool>) {
+fn op_trial_observed(net: &mut Network, word: &str, target: usize, reward: bool, nobs: &mut OpNet) -> (Vec<bool>, bool, OpObs, Vec<bool>) {
     let mut fired = vec![false; net.output_count()];
     let mut tail = vec![false; net.output_count()];
     let mut o = OpObs { n: 1, ..Default::default() };
@@ -1255,6 +1304,7 @@ fn op_trial_observed(net: &mut Network, word: &str, target: usize, reward: bool)
         if t == 41 && reward && fired[target] { net.drive_reward(true, 20); rewarded = true; }
         let (d0, v0, p0) = (net.da_spikes, net.val_spikes, net.pred_spikes);
         net.tick();
+        nobs.tick(net, t > 60);
         let (d, v, p) = (net.da_spikes - d0, net.val_spikes - v0, net.pred_spikes - p0);
         let b = OP_BINS.iter().position(|&e| t <= e).unwrap();
         o.da[b] += d; o.val[b] += v; o.pred[b] += p;
@@ -1282,6 +1332,7 @@ fn op_trial_observed(net: &mut Network, word: &str, target: usize, reward: bool)
             if t <= OP_FINE { o.f_hi[t - 1] += hi; o.f_samp[t - 1] += devs.len() as u64; }
         }
     }
+    nobs.end_trial(net);
     (fired, rewarded, o, tail)
 }
 
@@ -1309,6 +1360,8 @@ fn op_test(params: &NetParams, trials: usize) {
     let word_owned: String = op_arg_words().map(|w| w[0].clone()).unwrap_or_else(|| "안녕".to_string());
     let word: &str = &word_owned;
     let apart = std::env::args().any(|a| a == "--op-target-apart");
+    // --op-no-reward: 대조 — 2단계에도 보상을 주지 않는다 (반복과 자람만으로 목표가 움직이는가)
+    let no_reward = std::env::args().any(|a| a == "--op-no-reward");
     // pre = 바로 앞 쉬는 구간의 마지막 40틱에 발화한 출력 (관찰. 틱의 차례는 net.rest 와 같다)
     let mut pre = op_rest_tail(&mut net, 300);
     let nout = net.output_count();
@@ -1349,8 +1402,11 @@ fn op_test(params: &NetParams, trials: usize) {
     op_print_deviations(&net, "준비 직후");
     let weights = |net: &Network| { let ((vw, vn), (pw, pn)) = net.slow_input_weights(); format!("가치 입력 가중치 합 {:.4} ({}개),  예측 입력 가중치 합 {:.4} ({}개)", vw, vn, pw, pn) };
     println!("  [시작] {}\n", weights(&net));
+    if no_reward { println!("  ◦ 보상 규칙: --op-no-reward (대조: 2단계에도 보상 없음)"); }
+    op_print_net(&net, &[target], None);
     let block = (trials / 6).max(1);
-    for (name, reward) in [("보상 없이 반복", false), ("목표가 나오면 보상", true)] {
+    for (name, reward) in [("보상 없이 반복", false), ("목표가 나오면 보상", !no_reward)] {
+        let mut nobs = OpNet::default();
         let (mut t_hit, mut c_hit, mut n, mut rewards) = (0usize, 0usize, 0usize, 0usize);
         let mut o_hit = 0usize;
         let (mut obs_r, mut obs_n) = (OpObs::default(), OpObs::default());
@@ -1362,7 +1418,7 @@ fn op_test(params: &NetParams, trials: usize) {
             if pre[control] { c_pre += 1; }
             o_pre += others.iter().filter(|&&q| pre[q]).count();
             for q in 0..nout { if pre[q] { prec[q] += 1; } }
-            let (f, rewarded, o, tail) = op_trial_observed(&mut net, word, target, reward);
+            let (f, rewarded, o, tail) = op_trial_observed(&mut net, word, target, reward, &mut nobs);
             pre = tail;
             for q in 0..nout { if f[q] { outc[q] += 1; } }
             if f[target] { t_hit += 1; }
@@ -1378,6 +1434,8 @@ fn op_test(params: &NetParams, trials: usize) {
                 println!("      · {}", weights(&net));
                 println!("      ◦ 자극 앞 40틱(바탕):  목표 {:>5.1}%   비교 {:>5.1}%   다른 출력 {:>5.1}%", t_pre as f64 * 100.0 / n as f64, c_pre as f64 * 100.0 / n as f64, o_pre as f64 * 100.0 / (n * others.len().max(1)) as f64);
                 op_print_outputs("", &outc, &prec, n, t == block || t == block * 6);
+                op_print_net(&net, &[target], Some(&nobs));
+                nobs = OpNet::default();
                 t_pre = 0; c_pre = 0; o_pre = 0; outc.iter_mut().for_each(|x| *x = 0); prec.iter_mut().for_each(|x| *x = 0);
                 t_hit = 0; c_hit = 0; n = 0; rewards = 0; o_hit = 0;
                 obs_r = OpObs::default(); obs_n = OpObs::default();
@@ -1386,6 +1444,7 @@ fn op_test(params: &NetParams, trials: usize) {
     }
     println!();
     op_print_deviations(&net, "끝");
+    op_save_end(&net);
 }
 
 /// 기능 시험 (입력 여러 개): 입력마다 다른 목표 출력을 정하고, 무작위 순서로 넣으면서 그 입력의 목표가 나온 시행에만 보상.
@@ -1406,6 +1465,8 @@ fn op2_test(params: &NetParams, trials: usize) {
     let apart = std::env::args().any(|a| a == "--op-target-apart");
     // --op-wrong-no-reward: 환경의 보상 규칙만 바꾼다(망은 그대로) — 자기 목표가 나왔더라도 다른 낱말의 목표가 함께 나온 시행에는 보상하지 않는다. 없으면 지금대로
     let wrong_no_reward = std::env::args().any(|a| a == "--op-wrong-no-reward");
+    // --op-no-reward: 대조 — 2단계에도 보상을 주지 않는다
+    let no_reward = std::env::args().any(|a| a == "--op-no-reward");
     let (nw, nout, probes) = (words.len(), net.output_count(), 60usize);
     // 입력별로 출력이 나오는 비율 (pre_count = 그 입력을 넣기 직전 40틱의 바탕)
     let mut count = vec![vec![0usize; nout]; nw];
@@ -1449,8 +1510,11 @@ fn op2_test(params: &NetParams, trials: usize) {
     let pred_w = |net: &Network| { let (_, (pw, pn)) = net.slow_input_weights(); format!("예측 입력 가중치 합 {:.4} ({}개)", pw, pn) };
     println!("  ◦ [시작] {}", pred_w(&net));
     println!("  ◦ 보상 규칙: {}", if wrong_no_reward { "--op-wrong-no-reward (자기 목표가 나왔고 다른 낱말의 목표는 하나도 안 나온 시행에만 보상)" } else { "자기 목표가 나온 시행에 보상" });
+    if no_reward { println!("  ◦ 보상 규칙: --op-no-reward (대조: 2단계에도 보상 없음)"); }
+    op_print_net(&net, &targets, None);
     let block = (trials / 6).max(1);
-    for (name, reward) in [("보상 없이 반복", false), ("자기 목표가 나오면 보상", true)] {
+    for (name, reward) in [("보상 없이 반복", false), ("자기 목표가 나오면 보상", !no_reward)] {
+        let mut nobs = OpNet::default();
         let mut own = vec![0usize; nw]; let mut cross = vec![0usize; nw]; let mut oth = vec![0usize; nw]; let mut n = vec![0usize; nw]; let mut rew = vec![0usize; nw];
         // 관찰: 자극 앞 40틱의 바탕(자기 / 남 / 나머지), 출력마다의 횟수(자극 뒤 / 앞), 보상 창(41~60틱)의 도파민 발화(보상 시행 / 보상 없는 시행: 발화 수, 시행 수)
         let mut own_p = vec![0usize; nw]; let mut cross_p = vec![0usize; nw]; let mut oth_p = vec![0usize; nw];
@@ -1466,7 +1530,17 @@ fn op2_test(params: &NetParams, trials: usize) {
             cross_p[w] += (0..nw).filter(|&v| v != w && pre[targets[v]]).count();
             oth_p[w] += others[w].iter().filter(|&&q| pre[q]).count();
             for q in 0..nout { if pre[q] { prec[w][q] += 1; } }
-            let f = op_trial(&mut net, words[w]);
+            // op_trial 과 같은 차례(입력 4틱, 40틱 동안 출력 읽기)에 은닉 발화만 더 센다
+            let f = {
+                let mut fired = vec![false; nout];
+                net.drive_text(words[w], 4);
+                for _ in 0..40 {
+                    net.step();
+                    nobs.tick(&net, false);
+                    for &id in &net.tick_ids { if let Some(q) = net.output_seq(id as usize) { fired[q] = true; } }
+                }
+                fired
+            };
             for q in 0..nout { if f[q] { outc[w][q] += 1; } }
             n[w] += 1;
             if f[targets[w]] { own[w] += 1; }
@@ -1480,11 +1554,12 @@ fn op2_test(params: &NetParams, trials: usize) {
             if rewarded { net.drive_reward(true, 20); rew[w] += 1; }
             // 쉼 260틱 = 보상 창 20틱(자극 뒤 41~60틱) + 240틱. 틱의 차례는 net.rest(260) 과 같다
             let d0 = net.da_spikes;
-            net.rest(20);
+            for _ in 0..20 { net.tick(); nobs.tick(&net, false); }
             let d = net.da_spikes - d0;
             if rewarded { da_r.0 += d; da_r.1 += 1; } else { da_n0.0 += d; da_n0.1 += 1; }
             da_kind[k].0 += d; da_kind[k].1 += 1;
-            pre = op_rest_tail(&mut net, 240);
+            pre = op_rest_tail_obs(&mut net, 240, Some(&mut nobs));
+            nobs.end_trial(&net);
             if t % (block * nw) == 0 || t == trials * nw {
                 let mut line = format!("  [{name}] {:>6}번까지:", t / nw);
                 for w in 0..nw {
@@ -1508,6 +1583,8 @@ fn op2_test(params: &NetParams, trials: usize) {
                 for w in 0..nw { kline += &format!("   {}: {} / {} / {} / {} (걸러져 보상 없던 시행 {})", words[w], kind[w][0], kind[w][1], kind[w][2], kind[w][3], filtered[w]); }
                 println!("{kline}");
                 println!("      ◦ 보상 창의 도파민 발화 %, 가름마다 (자기만 / 둘 다 / 남만 / 둘 다 안 나옴): {} / {} / {} / {}   (시행 {} / {} / {} / {}번)", pct(da_kind[0]), pct(da_kind[1]), pct(da_kind[2]), pct(da_kind[3]), da_kind[0].1, da_kind[1].1, da_kind[2].1, da_kind[3].1);
+                op_print_net(&net, &targets, Some(&nobs));
+                nobs = OpNet::default();
                 kind.iter_mut().for_each(|x| *x = [0; 4]); da_kind = [(0, 0); 4]; filtered.iter_mut().for_each(|x| *x = 0);
                 own_p.iter_mut().for_each(|x| *x = 0); cross_p.iter_mut().for_each(|x| *x = 0); oth_p.iter_mut().for_each(|x| *x = 0);
                 outc.iter_mut().for_each(|v| v.iter_mut().for_each(|x| *x = 0)); prec.iter_mut().for_each(|v| v.iter_mut().for_each(|x| *x = 0));
@@ -1516,6 +1593,7 @@ fn op2_test(params: &NetParams, trials: usize) {
             }
         }
     }
+    op_save_end(&net);
 }
 
 /// 시험이 자극을 고르는 난수. --rng-seed 가 있으면 (씨앗, 시험 번호)에서 정해지고, 없으면 실행마다 다르다
