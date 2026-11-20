@@ -223,6 +223,12 @@ fn main() {
         println!("[설정] 자기 목표(--own-target {}): 은닉 뉴런 {} 자기 발화 {}번에 걸린 틱으로 목표를 재어 굳힌다 (목표 = {} ÷ 틱, 자기 자발 발화 확률 아래로는 내려가지 않음, 위 한계 없음). 재는 동안 그 뉴런으로 가는 새 접점 시도는 버린다",
             args[i + 1], if params.own_target == Some(network::OwnMode::Pyr) { "가운데 추체가" } else { "모두가" }, neuron::OWN_COUNT + 1, neuron::OWN_COUNT);
     }
+    // --own-target-open: 자기 목표를 재는 동안에도 새 접점을 받는다 (기본은 재는 동안 막음)
+    if args.iter().any(|a| a == "--own-target-open") {
+        if params.own_target.is_none() && params.load_from.is_none() { eprintln!("[오류] --own-target-open 은 --own-target 과 함께 준다"); std::process::exit(2); }
+        params.own_target_open = true;
+        println!("[설정] 자기 목표를 재는 동안에도 새 접점을 받는다(--own-target-open): 재는 중인 뉴런은 목표가 아직 없어 받기 문 없이 받는다");
+    }
     // --prune-reset-floor: 가지치기 기한을 다시 세는 조건에 '굳은 뒤의 가중치가 최소 가중치 이상일 때만'을 더한다 (기본 꺼짐)
     if args.iter().any(|a| a == "--prune-reset-floor") {
         params.prune_reset_floor = true;
