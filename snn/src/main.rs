@@ -107,6 +107,8 @@ fn main() {
     if let Some(v) = num("--spont-fixed") { params.spont_fixed = Some(v); }
     if args.iter().any(|a| a == "--spont-flat") { params.spont_flat = true; }
     // --pred-floor (시험용): 도파민 뉴런의 수상돌기 기여(보상 입력 − 예측 억제)를 0 아래로 내리지 않는다.
+    //   주의: 자발 발화가 있는 망(자란 망)에서는 예측 가중치가 끝없이 오른다 (자란 망의 기능 시험에서 예측 입력 가중치 합이 130 → 6,000~8,000 으로 올랐고
+    //   보상 창의 도파민이 보상 없는 시행과 같아졌다 — lv-snn-runs/review-session/grown-function-verdict.md).
     //   예측 억제가 보상이 올린 몫을 깎기만 하고 평소 발화는 누르지 못한다. 빠진 보상에 도파민이 내려가는 것도 없어진다(뇌와 다르다)
     if args.iter().any(|a| a == "--pred-floor") { params.pred_floor = true; }
     // --unit-med-fix: 새 접점 세기 기준에서 조절(도파민) 뉴런이 보내는 입력을 뺀다
@@ -1292,7 +1294,7 @@ fn op_print_net(net: &Network, targets: &[usize], o: Option<&OpNet>) {
     println!("{line}");
     // 굳는 양 줄 (관찰, 읽기만): 시작 줄에서 관찰을 켜고, 구간마다 그동안 모인 것을 찍고 비운다
     match o {
-        None => net.consol_obs_start(),
+        None => { net.consol_obs_start(); let (cur, now) = net.out_pairs(); let _ = plasticity::obs_sync_pairs(&cur, now); } // 시작할 때 있는 쌍을 곁 표에 넣어 둔다 (사건 없이 떨어지는 쌍도 세도록)
         Some(_) => if let Some(c) = plasticity::obs_take() {
             let ids = net.output_ids(); let tset: std::collections::HashSet<u32> = targets.iter().filter_map(|&q| ids.get(q).map(|&i| i as u32)).collect();
             let n = c.pos_events;
@@ -1301,6 +1303,22 @@ fn op_print_net(net: &Network, targets: &[usize], o: Option<&OpNet>) {
             let (hh, ho) = net.pair_counts();
             println!("      ◦ 굳는 양 (은닉→출력 시냅스, 조절 수준이 기준선 위일 때 굳은 양이 양수였던 사건 {}번): 굳은 양 ÷ 가중치 분위 10% {:.2e}, 50% {:.2e}, 90% {:.2e}, 최대 {:.2e} (분위는 한 자리를 열 칸으로 나눈 눈금의 가운데) | 가중치의 1% 를 넘은 사건 {} | 굳은 양이 0 이하였던 사건 {} | 기준선 아래에서의 사건 {} | 가지치기 기한을 다시 받은 사건 {}, 다시 받은 은닉→출력 쌍: 목표 출력 {} / 그 밖 {} | 은닉→은닉 쌍 {}, 은닉→출력 쌍 {}",
                 n, q(0.1), q(0.5), q(0.9), c.max_ratio, c.over1, c.nonpos_events, c.down_events, c.reset_events, rt, ro, hh, ho);
+            // 크기의 합과 쌍마다 쌓인 양 (관찰, 읽기만)
+            println!("      ◦ 굳는 크기 (은닉→출력, 구간의 합): 기준선 위에서 오른 양 {:.4e} / 기준선 위에서 내린 양(흔적이 음수) {:.4e} | 기준선 아래에서 내린 양 {:.4e} / 기준선 아래에서 오른 양(흔적이 음수) {:.4e} | 위에서 오른 양 ÷ 아래에서 내린 양 {:.3}",
+                c.sum_up, c.sum_up_neg, c.sum_down, c.sum_down_neg, if c.sum_down > 0.0 { c.sum_up / c.sum_down } else { f64::NAN });
+            let (cur, now) = net.out_pairs();
+            let (dropped, alive) = plasticity::obs_sync_pairs(&cur, now);
+            let qq = |v: &mut Vec<f64>, p: f64| -> f64 { if v.is_empty() { return f64::NAN; } v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v[((v.len() as f64 * p) as usize).min(v.len() - 1)] };
+            for (label, set, drop) in [("떨어진 쌍", &dropped, true), ("남은 쌍", &alive, false)] {
+                let mut r: Vec<f64> = set.iter().map(|e| e.acc / e.last_w.max(1e-300)).collect();
+                let mut life: Vec<f64> = set.iter().map(|e| e.last_tick.saturating_sub(e.born) as f64).collect();
+                let (tn, on) = (set.iter().filter(|e| tset.contains(&e.post)).count(), set.iter().filter(|e| !tset.contains(&e.post)).count());
+                let hit = |e: &&plasticity::PairAcc| e.peak >= 0.01 || e.resets > 0;
+                let (th, oh) = (set.iter().filter(|e| tset.contains(&e.post)).filter(hit).count(), set.iter().filter(|e| !tset.contains(&e.post)).filter(hit).count());
+                println!("      ◦ 쌍마다 쌓인 굳은 양 — {} {}개 (목표 출력의 쌍 {} / 그 밖 {}): 쌓인 양 ÷ 가중치 분위 10% {:.2e}, 50% {:.2e}, 90% {:.2e}, 최대 {:.2e} | 쌓인 양이 가중치의 1% 에 닿았던 쌍: 목표 출력 {} / {} , 그 밖 {} / {} | {} 분위 10% {:.0}, 50% {:.0}, 90% {:.0} 틱",
+                    label, set.len(), tn, on, qq(&mut r, 0.1), qq(&mut r, 0.5), qq(&mut r, 0.9), qq(&mut r, 1.0), th, tn, oh, on,
+                    if drop { "수명(마지막으로 본 틱 − 생긴 틱)" } else { "나이(지금 − 생긴 틱)" }, qq(&mut life, 0.1), qq(&mut life, 0.5), qq(&mut life, 0.9));
+            }
         },
     }
 }

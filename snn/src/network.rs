@@ -2495,6 +2495,13 @@ impl Network {
         for &o in &self.output_idx { mark[o] = true; }
         plasticity::obs_start(mark, self.hippocampus_range.1);
     }
+    /// 지금 있는 은닉→출력 쌍의 목록 (보내는 뉴런, 받는 뉴런, 생긴 틱, 가중치) 과 지금 틱 (관찰용)
+    pub fn out_pairs(&self) -> (Vec<(u32, u32, u64, f64)>, u64) {
+        let h = self.hippocampus_range.1; let out: std::collections::HashSet<usize> = self.output_idx.iter().cloned().collect();
+        let mut v = Vec::new();
+        for (i, n) in self.neurons[..h].iter().enumerate() { for s in &n.synapses { if s.count >= 1 && out.contains(&(s.target as usize)) { v.push((i as u32, s.target, s.born, s.weight)); } } }
+        (v, self.global_tick)
+    }
     /// 출력 뉴런의 차례(seq) → 뉴런 번호
     pub fn output_ids(&self) -> Vec<usize> { self.output_idx.clone() }
     /// 은닉→은닉 쌍 수(지연 시냅스 제외, count >= 1)와 은닉→출력 쌍 수 (관찰용)

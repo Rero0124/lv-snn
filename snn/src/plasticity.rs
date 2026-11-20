@@ -23,7 +23,20 @@ pub struct ConsolObs {
     pub max_ratio: f64,
     pub reset_events: u64,
     pub reset_pairs: std::collections::HashSet<(u32, u32)>,
+    /// 크기의 합 (사건의 수가 아니라 양): 기준선 위에서 오른 양(굳은 양 > 0) / 기준선 위에서 내린 양(굳은 양 < 0) / 기준선 아래에서 내린 양(굳은 양 > 0 이 깎임) / 기준선 아래에서 오른 양
+    pub sum_up: f64,
+    pub sum_up_neg: f64,
+    pub sum_down: f64,
+    pub sum_down_neg: f64,
+    /// 쌍마다의 곁 표 (보내는 뉴런, 받는 뉴런) → 쌓인 값. 구간을 넘어 이어진다 (obs_take 가 비우지 않는다)
+    pub pairs: HashMap<(u32, u32), PairAcc>,
+    /// 사건 도중에 '같은 쌍인데 생긴 틱이 달라진 것'(떨어졌다가 다시 생긴 쌍)을 보면 옛 것을 여기에 옮겨 둔다
+    pub dropped: Vec<PairAcc>,
 }
+/// 쌍 하나의 쌓인 값 (관찰용): 생긴 틱, 마지막으로 본 틱과 그때의 가중치, 생긴 뒤(또는 기한을 마지막으로 받은 뒤) 강화 쪽으로 굳은 양의 합,
+/// 그 합 ÷ 그때의 가중치가 가장 컸던 값, 기한을 다시 받은 횟수, 받는 뉴런
+#[derive(Clone, Copy)]
+pub struct PairAcc { pub born: u64, pub last_tick: u64, pub last_w: f64, pub acc: f64, pub peak: f64, pub resets: u32, pub post: u32 }
 static OBS: std::sync::Mutex<Option<ConsolObs>> = std::sync::Mutex::new(None);
 // 표시된 받는 뉴런 번호의 범위 [OBS_LO, OBS_HI): 잠그기 전에 이 범위 밖의 시냅스를 걸러 낸다 (빠르게)
 static OBS_LO: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -32,24 +45,62 @@ static OBS_HI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::
 pub fn obs_start(mark: Vec<bool>, pre_end: usize) {
     let lo = mark.iter().position(|&m| m).unwrap_or(0); let hi = mark.iter().rposition(|&m| m).map_or(0, |i| i + 1);
     OBS_LO.store(lo, std::sync::atomic::Ordering::Relaxed); OBS_HI.store(hi, std::sync::atomic::Ordering::Relaxed);
-    *OBS.lock().unwrap() = Some(ConsolObs { mark, pre_end, hist: [0; 80], pos_events: 0, nonpos_events: 0, down_events: 0, over1: 0, max_ratio: 0.0, reset_events: 0, reset_pairs: std::collections::HashSet::new() });
+    *OBS.lock().unwrap() = Some(ConsolObs { mark, pre_end, hist: [0; 80], pos_events: 0, nonpos_events: 0, down_events: 0, over1: 0, max_ratio: 0.0, reset_events: 0, reset_pairs: std::collections::HashSet::new(), sum_up: 0.0, sum_up_neg: 0.0, sum_down: 0.0, sum_down_neg: 0.0, pairs: HashMap::new(), dropped: Vec::new() });
     OBS_ON.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 /// 지금까지 모은 것을 꺼내고 비운다 (관찰은 켜진 채로 둔다). 켜져 있지 않으면 None
 pub fn obs_take() -> Option<ConsolObs> {
     let mut g = OBS.lock().unwrap();
     let o = g.as_mut()?;
-    let fresh = ConsolObs { mark: o.mark.clone(), pre_end: o.pre_end, hist: [0; 80], pos_events: 0, nonpos_events: 0, down_events: 0, over1: 0, max_ratio: 0.0, reset_events: 0, reset_pairs: std::collections::HashSet::new() };
-    Some(std::mem::replace(o, fresh))
+    // 쌍마다의 곁 표는 구간을 넘어 이어져야 하므로 새 묶음으로 옮겨 두고, 꺼내는 쪽에는 그 사본을 준다
+    let pairs = std::mem::take(&mut o.pairs);
+    let fresh = ConsolObs { mark: o.mark.clone(), pre_end: o.pre_end, hist: [0; 80], pos_events: 0, nonpos_events: 0, down_events: 0, over1: 0, max_ratio: 0.0, reset_events: 0, reset_pairs: std::collections::HashSet::new(),
+        sum_up: 0.0, sum_up_neg: 0.0, sum_down: 0.0, sum_down_neg: 0.0, pairs: pairs.clone(), dropped: Vec::new() };
+    let mut out = std::mem::replace(o, fresh);
+    out.pairs = pairs;
+    // 사건 도중에 옮겨 둔 '떨어진 쌍'은 구간 끝의 obs_sync_pairs 가 가져가도록 남겨 둔다
+    o.dropped = std::mem::take(&mut out.dropped);
+    Some(out)
 }
-fn obs_consol(pre: usize, post: usize, l: f64, moved: f64, w: f64, reset: bool) {
+/// 구간 끝에: 지금 있는 쌍의 목록(보내는, 받는, 생긴 틱, 가중치)을 받아, 곁 표에서 없어진 쌍(또는 생긴 틱이 달라진 쌍)을 떨어진 것으로 돌려주고
+/// 표를 지금의 쌍에 맞춘다(처음 보는 쌍은 쌓인 양 0 으로 넣는다). 돌려주는 것: (떨어진 쌍들, 남은 쌍들 — 가중치는 지금 값으로)
+pub fn obs_sync_pairs(current: &[(u32, u32, u64, f64)], now: u64) -> (Vec<PairAcc>, Vec<PairAcc>) {
+    let mut g = OBS.lock().unwrap();
+    let Some(o) = g.as_mut() else { return (Vec::new(), Vec::new()) };
+    let mut dropped = std::mem::take(&mut o.dropped);
+    let live: HashMap<(u32, u32), (u64, f64)> = current.iter().map(|&(a, b, born, w)| ((a, b), (born, w))).collect();
+    let keys: Vec<(u32, u32)> = o.pairs.keys().cloned().collect();
+    for k in keys {
+        let gone = match live.get(&k) { None => true, Some(&(born, _)) => born != o.pairs[&k].born };
+        if gone { dropped.push(o.pairs.remove(&k).unwrap()); }
+    }
+    let mut alive = Vec::with_capacity(current.len());
+    for &(a, b, born, w) in current {
+        let e = o.pairs.entry((a, b)).or_insert(PairAcc { born, last_tick: now, last_w: w, acc: 0.0, peak: 0.0, resets: 0, post: b });
+        e.last_tick = now; e.last_w = w;
+        alive.push(*e);
+    }
+    (dropped, alive)
+}
+fn obs_consol(pre: usize, post: usize, l: f64, moved: f64, w: f64, reset: bool, born: u64, tick: u64) {
     if post < OBS_LO.load(std::sync::atomic::Ordering::Relaxed) || post >= OBS_HI.load(std::sync::atomic::Ordering::Relaxed) { return; }
     let mut g = OBS.lock().unwrap();
     let Some(o) = g.as_mut() else { return };
     if pre >= o.pre_end || !o.mark.get(post).copied().unwrap_or(false) { return; }
-    if l < 0.0 { o.down_events += 1; return; }
-    if moved <= 0.0 { o.nonpos_events += 1; return; }
+    // 쌍의 곁 표: 처음 보거나, 생긴 틱이 달라졌으면(떨어졌다가 다시 생긴 쌍) 새로 연다
+    let key = (pre as u32, post as u32);
+    let stale = match o.pairs.get(&key) { Some(e) => e.born != born, None => false };
+    if stale { let old = o.pairs.remove(&key).unwrap(); o.dropped.push(old); }
+    let e = o.pairs.entry(key).or_insert(PairAcc { born, last_tick: tick, last_w: w, acc: 0.0, peak: 0.0, resets: 0, post: post as u32 });
+    e.last_tick = tick; e.last_w = w;
+    if l < 0.0 { o.down_events += 1; if moved > 0.0 { o.sum_down += moved; } else { o.sum_down_neg += -moved; } return; }
+    if moved <= 0.0 { o.nonpos_events += 1; o.sum_up_neg += -moved; return; }
     o.pos_events += 1;
+    o.sum_up += moved;
+    e.acc += moved;
+    let pr = e.acc / w.max(1e-300);
+    if pr > e.peak { e.peak = pr; }
+    if reset { e.resets += 1; e.acc = 0.0; }
     let r = moved / w.max(1e-300);
     if moved > 0.01 * w { o.over1 += 1; }
     if r > o.max_ratio { o.max_ratio = r; }
@@ -270,7 +321,7 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
                     // 도파민으로 강화 쪽이 굳었으면 이 시냅스는 쓰인 것이다: 가지치기 기한을 지금부터 다시 센다
                     let reset = l > 0.0 && moved > 0.01 * s.weight && s.weight >= floor; // 가중치의 1% 이상 굳었고, 굳은 뒤의 가중치가 바닥(reset_min) 이상일 때만
                     if reset { s.last_co = global_tick; }
-                    if OBS_ON.load(std::sync::atomic::Ordering::Relaxed) { obs_consol(pre as usize, post, l, moved, s.weight, reset); }
+                    if OBS_ON.load(std::sync::atomic::Ordering::Relaxed) { obs_consol(pre as usize, post, l, moved, s.weight, reset, s.born, global_tick); }
                     if s.elig.abs() < 1e-3 * s.weight.max(1e-9) { s.elig = 0.0; s.lq = false; false } else { true }
                 });
                 neurons[post].elig_in = list;
@@ -300,7 +351,7 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
                             // 도파민으로 강화 쪽이 굳었으면 이 시냅스는 쓰인 것이다: 가지치기 기한을 지금부터 다시 센다
                             let reset = l > 0.0 && moved > 0.01 * s.weight && s.weight >= floor; // 가중치의 1% 이상 굳었고, 굳은 뒤의 가중치가 바닥(reset_min) 이상일 때만
                             if reset { s.last_co = global_tick; }
-                            if OBS_ON.load(std::sync::atomic::Ordering::Relaxed) { obs_consol(pre_id, s.target as usize, l, moved, s.weight, reset); }
+                            if OBS_ON.load(std::sync::atomic::Ordering::Relaxed) { obs_consol(pre_id, s.target as usize, l, moved, s.weight, reset, s.born, global_tick); }
                         }
                     }
                     // 흔적이 가중치의 0.1% 아래로 줄면 없는 것으로 본다 (틱당 0.993배로 줄어서, 그냥 두면 수천 틱 동안 목록에 남는다)
