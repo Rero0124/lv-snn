@@ -171,7 +171,7 @@ pub struct NetParams {
     ///   값은 은닉 뉴런의 reset_min 에 넣는다 (켜면 min_weight, 끄면 0). 새 상수는 없다 (명세: lv-snn-runs/review-session/prune-hole-spec.md)
     pub prune_reset_floor: bool,
     /// (시험용) 입력 뉴런 하나가 가는 은닉 흥분 뉴런의 수 F: 주면 감정 주·이성 주·기억의 흥분 뉴런 가운데 F 개를 **되풀이 없이** 고른다.
-    ///   없으면 지금 길(synapses_per_neuron × input_pop 번, 되풀이 허락). 처음 배선에만 쓰인다(--topo 와는 함께 쓰지 않는다).
+    ///   없으면 지금 길(synapses_per_neuron × input_pop 번, 되풀이 허락). 처음 배선에만 쓰인다. --topo(발달 구성)에서는 자리 둘레로 고르는 법은 그대로 두고 수만 F 로 바꾼다(영역에 크기대로 나눔).
     ///   명세: lv-snn-runs/review-session/sparse-inhibit-spec.md ㉠. 바깥에서 준 값이다
     #[serde(default)]
     pub in_fan: Option<usize>,
@@ -1590,13 +1590,14 @@ impl Network {
                 for area in areas {
                     let rows = area.len() / 50;
                     let (col, row) = (rng.random::<f64>() * 50.0, rng.random::<f64>() * rows as f64);
-                    let n = per_neuron * p.input_pop * area.len() / total;
+                    // (시험용, --in-fan) 발달 구성에서도 글자 하나가 닿는 은닉 수를 바꾼다: 영역에 나누는 몫과 자리 둘레로 고르는 법은 그대로
+                    let n = p.in_fan.unwrap_or(per_neuron * p.input_pop) * area.len() / total;
                     let mut made = 0;
                     for _ in 0..n * 6 {
                         if made >= n { break; }
                         let Some(t) = pick_near(&mut rng, area, 50, col, row, TOPO_SIGMA) else { continue };
                         if self.neurons[t].inhibitory || !used.insert(t) { continue; }
-                        let w = io_w(&mut rng);
+                        let w = match p.in_weight { Some(w) => w, None => io_w(&mut rng) };
                         self.neurons[idx].add_seed_synapse(t as NeuronId, w);
                         made += 1;
                     }

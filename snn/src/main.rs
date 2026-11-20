@@ -271,9 +271,6 @@ fn main() {
         println!();
         return;
     }
-    if (params.in_fan.is_some() || params.in_weight.is_some()) && params.topo {
-        eprintln!("[오류] --in-fan / --in-weight 는 --topo(발달 구성)와 함께 쓰지 않는다 (입력이 자리 둘레로 가는 길에는 넣지 않았다)"); std::process::exit(2);
-    }
     if params.in_fan.is_some() || params.in_weight.is_some() {
         println!("[설정] (시험용) 입력 배선: 가는 곳 {} / 처음 세기 {}",
             params.in_fan.map(|f| format!("{f}개, 되풀이 없이 (--in-fan)")).unwrap_or_else(|| "지금 그대로".into()),
@@ -1264,7 +1261,7 @@ fn in_probe_detail(params: &NetParams, items: &[String]) {
     println!("영역: {}", (0..6).map(|a| format!("{} {}", AREA[a], na[a])).collect::<Vec<_>>().join(", "));
     { let mut n: Vec<usize> = srcs.iter().map(|v| v.len()).collect(); n.sort_unstable();
       if !n.is_empty() { println!("출력 {}개가 받는 은닉 뉴런 수(쌍): 최소 {} / 중앙 {} / 최대 {}", n.len(), n[0], n[n.len() / 2], n[n.len() - 1]); } }
-    let targets: Vec<Vec<usize>> = items.iter().map(|it| net.probe_input_targets(it)).collect();
+    let targets: Vec<Vec<usize>> = items.iter().map(|it| if it == "_" { Vec::new() } else { net.probe_input_targets(it) }).collect();
     net.rest(300);
     let pct = |a: usize, b: usize| if b > 0 { a as f64 * 100.0 / b as f64 } else { 0.0 };
     let mut sets: Vec<Vec<Vec<bool>>> = Vec::new(); // [바퀴][입력] = 10틱에 한 번이라도 발화한 은닉
@@ -1275,7 +1272,7 @@ fn in_probe_detail(params: &NetParams, items: &[String]) {
             let mut early = vec![false; h]; // 2~5틱에 발화
             let mut per_tick: Vec<[usize; 5]> = Vec::new();
             let mut outs_fired = vec![false; net.output_count()];
-            net.drive_text(it, 4);
+            if it != "_" { net.drive_text(it, 4); } // "_" = 자극 없는 바퀴(자발 발화의 바탕)
             for t in 1..=10usize {
                 net.tick();
                 let mut c = [0usize; 5];
@@ -1358,7 +1355,15 @@ fn in_probe_detail(params: &NetParams, items: &[String]) {
         let (sa, sb) = (&sets[0][a], &sets[1][a]);
         let (ca, cb) = (sa.iter().filter(|&&x| x).count(), sb.iter().filter(|&&x| x).count());
         let both = (0..h).filter(|&i| sa[i] && sb[i]).count();
-        println!("      '{}' {} · {} : 함께 {} → {:.3}", items[a], ca, cb, both, both as f64 / ca.min(cb).max(1) as f64);
+        // 추체만, 그리고 입력이 직접 닿는 뉴런만으로 다시 센다
+        let sub = |ok: &dyn Fn(usize) -> bool| {
+            let (x, y) = ((0..h).filter(|&i| ok(i) && sa[i]).count(), (0..h).filter(|&i| ok(i) && sb[i]).count());
+            let z = (0..h).filter(|&i| ok(i) && sa[i] && sb[i]).count();
+            format!("{} · {} : 함께 {} → {:.3}", x, y, z, z as f64 / x.min(y).max(1) as f64)
+        };
+        let tset: std::collections::HashSet<usize> = targets[a].iter().cloned().collect();
+        println!("      '{}' {} · {} : 함께 {} → {:.3}   |  추체만 {}   |  직접 닿는 것만 {}", items[a], ca, cb, both, both as f64 / ca.min(cb).max(1) as f64,
+            sub(&|i| info[i].0 == 0), sub(&|i| tset.contains(&i)));
     }
     op_print_inputs_always(&net, "끝");
 }
