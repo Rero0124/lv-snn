@@ -204,6 +204,12 @@ fn main() {
         println!("[설정] 출력으로 가는 성장(--grow-out): 발화한 은닉 흥분 뉴런이 감정 주·이성 주 영역이면 성장 빠르기 × {:.3}, 기억 영역이면 × {:.3} 만큼을 은닉으로 가는 시도에 얹어 출력 뉴런 하나(고르게 무작위)에 시도한다. 출력의 받기 문 목표 = 추체의 목표 {:.6}/틱",
             params.output_frac, params.output_frac * 2.0 / 3.0, params.act_target.unwrap() * params.spont_fixed.unwrap());
     }
+    // --prune-reset-floor: 가지치기 기한을 다시 세는 조건에 '굳은 뒤의 가중치가 최소 가중치 이상일 때만'을 더한다 (기본 꺼짐)
+    if args.iter().any(|a| a == "--prune-reset-floor") {
+        params.prune_reset_floor = true;
+        if params.grow.is_none() && params.load_from.is_none() { println!("[경고] --prune-reset-floor 는 --grow 가 없으면 효과가 없다 (가지치기가 꺼져 있다)"); }
+        println!("[설정] 가지치기 기한의 바닥(--prune-reset-floor): 도파민으로 강화 쪽이 굳어도 굳은 뒤의 가중치가 최소 가중치 {} 보다 작으면 기한을 다시 세지 않는다", params.min_weight);
+    }
     if gate_soft_given && params.grow_gate.is_none() {
         println!("[경고] --grow-gate-soft 는 --grow-gate 가 없으면 효과가 없다 (어느 발화율을 볼지 정해지지 않는다)");
     }

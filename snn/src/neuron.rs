@@ -122,6 +122,10 @@ pub struct Neuron {
     pub prune_tau: f64,
     #[serde(default)]
     pub prune_min: f64,
+    /// 가지치기 기한을 다시 세는 조건의 바닥 (보내는 뉴런의 값): 도파민으로 강화 쪽이 굳었을 때, 굳은 뒤의 가중치가 이 값 이상이어야 기한을 다시 센다.
+    ///   0 이면(기본, 이 칸이 없는 저장 파일도) 조건이 없는 것과 같다 — 가중치는 0 이상이라 늘 참이다
+    #[serde(default)]
+    pub reset_min: f64,
     /// 조절 수준이 틱마다 줄어드는 배수 (기본 0.98). 가치 뉴런은 더 빨리 줄어들게 해서(0.9) 도파민의 급증을 짧게 읽는다
     #[serde(default = "default_mod_decay")]
     pub mod_decay: f64,
@@ -205,7 +209,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: false, skip_refractory: false,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, reset_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
         }
     }
 
@@ -213,7 +217,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: true, skip_refractory: false,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, reset_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
         }
     }
 
@@ -222,7 +226,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory, skip_refractory: false,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.75, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 2, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.75, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 2, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, reset_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
         }
     }
 
@@ -230,7 +234,7 @@ impl Neuron {
         Self {
             id, potential: 0.0, last_spike_tick: None,
             synapses: Vec::new(), x, y, inhibitory: false, skip_refractory: true,
-            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
+            excitability: 1.0, fire_count_window: 0, decay_rate: 0.7, threshold_scale: 1.0, self_threshold: 0.5, refractory_scale: 1, rate_fast: 0.0, rate_avg: 0.0, set_point: -1.0, w_ref_med: 0.0, w_ref_max: 0.0, has_dendrite: false, dend_potential: 0.0, last_burst: false, cell_type: CellType::Legacy, abs_refractory: 0, rel_refractory: 0, adapt: 0.0, adapt_inc: 0.0, adapt_decay: 1.0, slow_adapt: true, modulatory: false, mod_level: 0.0, mod_base: 0.0, mod_seen: 0, tonic: 0.0, dend_floor: false, next_prune: 0, prune_tau: 0.0, prune_min: 0.0, reset_min: 0.0, pruned_n: 0, did_prune: false, need: 0.0, need_rate: 0.0, mod_decay: 0.98, elig_idx: Vec::new(), elig_in: Vec::new(), ltd_mult: 1.0, ltd_mult_tick: 0, spont_scale: 1.0, incoming: Vec::new(), rng_seed: 0,
         }
     }
 

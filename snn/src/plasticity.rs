@@ -203,6 +203,8 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
             for &(post, l) in &active {
                 let mut list = std::mem::take(&mut neurons[post].elig_in);
                 list.retain(|&(pre, k)| {
+                    // 기한을 다시 세는 바닥은 보내는 뉴런의 값 (시냅스를 빌리기 전에 읽어 둔다. 0 이면 조건이 없는 것과 같다)
+                    let floor = neurons.get(pre as usize).map_or(0.0, |n| n.reset_min);
                     let Some(s) = neurons.get_mut(pre as usize).and_then(|n| n.synapses.get_mut(k as usize)) else { return false };
                     if s.target as usize != post { return false; }
                     if s.elig == 0.0 { s.lq = false; return false; }
@@ -213,7 +215,7 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
                     // 굳은 만큼은 더 이상 일시적인 부분이 아니다 (합쳐진 세기가 두 번 세어지지 않게)
                     if s.short_decay > 0.0 { s.w_short -= moved; }
                     // 도파민으로 강화 쪽이 굳었으면 이 시냅스는 쓰인 것이다: 가지치기 기한을 지금부터 다시 센다
-                    if l > 0.0 && moved > 0.01 * s.weight { s.last_co = global_tick; } // 가중치의 1% 이상 굳었을 때만
+                    if l > 0.0 && moved > 0.01 * s.weight && s.weight >= floor { s.last_co = global_tick; } // 가중치의 1% 이상 굳었고, 굳은 뒤의 가중치가 바닥(reset_min) 이상일 때만
                     if s.elig.abs() < 1e-3 * s.weight.max(1e-9) { s.elig = 0.0; s.lq = false; false } else { true }
                 });
                 neurons[post].elig_in = list;
@@ -227,6 +229,7 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
                 // 흔적이 남아 있는 시냅스의 목록만 본다 (시냅스 전체를 훑지 않는다)
                 if n.modulatory || n.elig_idx.is_empty() { return; }
                 let mut list = std::mem::take(&mut n.elig_idx);
+                let floor = n.reset_min;
                 list.retain(|&k| {
                     let Some(s) = n.synapses.get_mut(k as usize) else { return false };
                     if s.elig == 0.0 { s.lp = false; return false; }
@@ -239,7 +242,7 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
                             s.elig -= moved;
                             if s.short_decay > 0.0 { s.w_short -= moved; }
                             // 도파민으로 강화 쪽이 굳었으면 이 시냅스는 쓰인 것이다: 가지치기 기한을 지금부터 다시 센다
-                            if l > 0.0 && moved > 0.01 * s.weight { s.last_co = global_tick; } // 가중치의 1% 이상 굳었을 때만
+                            if l > 0.0 && moved > 0.01 * s.weight && s.weight >= floor { s.last_co = global_tick; } // 가중치의 1% 이상 굳었고, 굳은 뒤의 가중치가 바닥(reset_min) 이상일 때만
                         }
                     }
                     // 흔적이 가중치의 0.1% 아래로 줄면 없는 것으로 본다 (틱당 0.993배로 줄어서, 그냥 두면 수천 틱 동안 목록에 남는다)
