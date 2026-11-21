@@ -235,6 +235,12 @@ fn main() {
         params.prune_reset_net = true;
         println!("[설정] 알짜로 가지치기의 기한을 다시 센다(--prune-reset-net): 시냅스마다 조절 신호가 가중치를 옮긴 양을 부호째 쌓아, 쌓인 알짜가 자기 가중치의 1% 이상이고 가중치가 기한을 다시 세는 바닥 이상이면 기한을 다시 세고 쌓인 값을 0 으로 한다 (옛 조건 '한 번에 1%' 에 또는으로 더함. 기한을 다시 받으면 어느 조건이든 0 으로. 줄이는 박자 없음)");
     }
+    // --prune-reset-net-off: 불러온 망의 알짜 조건을 끈다 (기본 꺼짐. 저장 파일에 켜져 있어도 끄고, 쌓인 알짜를 0 으로)
+    if args.iter().any(|a| a == "--prune-reset-net-off") {
+        if args.iter().any(|a| a == "--prune-reset-net" || a == "--prune-reset-net-at-reward") { eprintln!("[오류] --prune-reset-net-off 는 --prune-reset-net · --prune-reset-net-at-reward 와 함께 줄 수 없다"); std::process::exit(2); }
+        params.prune_reset_net_off = true;
+        println!("[설정] 불러온 망의 알짜 조건을 끈다(--prune-reset-net-off): 저장 파일에 켜져 있어도 알짜 조건과 그 범위를 끄고, 시냅스에 쌓인 알짜를 모두 0 으로 한다 (옛 조건 '한 번에 1%' 만 남는다)");
+    }
     // --prune-reset-net-out: 알짜 조건을 받는 뉴런이 출력인 시냅스에만 (기본 꺼짐. 불러온 망에도 먹는다. --prune-reset-net 또는 --prune-reset-net-at-reward 와 함께)
     if args.iter().any(|a| a == "--prune-reset-net-out") {
         params.prune_reset_net_out = true;
