@@ -1892,10 +1892,16 @@ fn op2_test(params: &NetParams, trials: usize) {
     let trials2 = { let a: Vec<String> = std::env::args().collect(); a.iter().position(|x| x == "--op2-reward-trials").and_then(|i| a.get(i + 1)).and_then(|x| x.parse::<usize>().ok()).unwrap_or(trials) };
     if trials2 != trials { println!("  ◦ 2단계의 길이: --op2-reward-trials {} (1단계는 {}번, 구간은 {}번씩)", trials2, trials, block); }
     let trials1 = trials;
-    for (name, reward) in [("보상 없이 반복", false), ("자기 목표가 나오면 보상", !no_reward)] {
-        let trials = if name == "보상 없이 반복" { trials1 } else { trials2 };
+    // --op2-extinction-trials N: 보상 단계 뒤에 보상 없는 셋째 단계를 N 번(낱말마다) 더한다 — 같은 목표·같은 낱말, 보상만 없음. 없으면 두 단계 그대로.
+    //   알짜 조건(--prune-reset-net-at-reward 로 켠 것 포함)은 셋째 단계에도 그대로 둔다
+    let trials3 = { let a: Vec<String> = std::env::args().collect(); a.iter().position(|x| x == "--op2-extinction-trials").and_then(|i| a.get(i + 1)).and_then(|x| x.parse::<usize>().ok()).unwrap_or(0) };
+    if trials3 > 0 { println!("  ◦ 셋째 단계: --op2-extinction-trials {} (보상 단계 뒤에 보상 없이 {}번, 구간은 {}번씩; 목표와 낱말은 그대로)", trials3, trials3, block); }
+    let mut phases: Vec<(&str, bool)> = vec![("보상 없이 반복", false), ("자기 목표가 나오면 보상", !no_reward)];
+    if trials3 > 0 { phases.push(("보상을 끊고 반복", false)); }
+    for (name, reward) in phases {
+        let trials = if name == "보상 없이 반복" { trials1 } else if name == "보상을 끊고 반복" { trials3 } else { trials2 };
         // --prune-reset-net-at-reward: 알짜 조건을 2단계의 첫 시행부터 켠다 (목표를 고르는 처음 60번과 1단계는 꺼진 길). 보상 없는 대조(--op-no-reward)에서도 2단계의 시작에서 켠다
-        if name != "보상 없이 반복" && std::env::args().any(|a| a == "--prune-reset-net-at-reward") {
+        if name == "자기 목표가 나오면 보상" && std::env::args().any(|a| a == "--prune-reset-net-at-reward") {
             net.set_prune_reset_net(true);
             println!("  ◦ [--prune-reset-net-at-reward] 2단계의 시작에서 알짜 조건을 켠다 (쌓인 알짜는 모든 시냅스에서 0 부터)");
         }
