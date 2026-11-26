@@ -196,6 +196,15 @@ fn main() {
         params.slow_check = true;
         if !params.slow_events { println!("[경고] --slow-check 는 --slow-events 와 함께 써야 한다. --slow-events 를 켠다"); params.slow_events = true; }
     }
+    // --unit-med-report (--load P 와 함께, 관찰용): 불러온 망을 한 틱도 돌리지 않고, 출력·은닉 추체마다 새 접점 세기 기준(unit_med)과
+    //   지역 기준(w_ref_med, w_ref_max)을 지금 코드의 방식과 도파민 입력을 뺀 방식으로 세어 찍고 끝낸다. 저장하지 않는다
+    if args.iter().any(|a| a == "--unit-med-report") {
+        if params.load_from.is_none() { eprintln!("[오류] --unit-med-report 는 --load 와 함께 쓴다"); std::process::exit(2); }
+        let mut net = Network::with_params(params.clone());
+        println!("[설정] 새 접점 세기 기준 보고(--unit-med-report): 불러온 망을 돌리지 않고 세어 찍고 끝낸다 (저장하지 않음). 불러온 설정: {:?}", net.params_ref());
+        net.unit_med_report();
+        return;
+    }
     if params.scale_in.is_some() && params.act_target.is_none() { eprintln!("[오류] --scale-in 은 목표가 있어야 한다: --act-target K 를 함께 준다"); std::process::exit(2); }
     if params.act_target.is_some() && params.spont_fixed.is_none() {
         println!("[경고] --act-target 을 --spont-fixed 없이 주면 목표(K × 자발 발화 확률)가 1만 틱마다의 갱신에서 움직인다");
@@ -263,6 +272,50 @@ fn main() {
         if params.own_target.is_none() && params.load_from.is_none() { eprintln!("[오류] --own-target-open 은 --own-target 과 함께 준다"); std::process::exit(2); }
         params.own_target_open = true;
         println!("[설정] 자기 목표를 재는 동안에도 새 접점을 받는다(--own-target-open): 재는 중인 뉴런은 목표가 아직 없어 받기 문 없이 받는다");
+    }
+    // --own-target-out: 출력 뉴런도 자기 값으로 목표를 잰다 (기본 꺼짐. --grow-out 과 함께만). 출력으로 가는 시도의 받기 문이 추체의 목표 대신 받는 출력 자신의 굳힌 목표를 쓴다.
+    //   은닉 쪽(--own-target)과는 따로다. --load 와 함께 주면 무시된다(저장 파일의 설정을 따른다. 불러오기에서 경고를 찍는다)
+    if args.iter().any(|a| a == "--own-target-out") {
+        if params.load_from.is_none() && !params.grow_out { eprintln!("[오류] --own-target-out 은 --grow-out 과 함께 준다 (출력으로 가는 성장의 받기 문 목표를 바꾸는 옵션이다)"); std::process::exit(2); }
+        params.own_target_out = true;
+        if params.load_from.is_none() {
+            println!("[설정] 출력의 자기 목표(--own-target-out): 출력 뉴런마다 자기 발화 {}번에 걸린 틱으로 목표를 재어 굳힌다 (목표 = {} ÷ 틱, 한 번 굳으면 그대로). 출력으로 가는 시도의 받기 문은 추체의 목표 대신 받는 출력 자신의 목표를 쓴다. 재는 동안 그 출력으로 가는 시도는 {}. 은닉 쪽 규칙과 감응도 항상성은 그대로",
+                neuron::OWN_COUNT + 1, neuron::OWN_COUNT, if params.own_target_open { "문 없이 받는다(--own-target-open)" } else { "버린다(걸린 시도로 센다)" });
+        }
+    }
+    // (대조용) --out-target X: 출력으로 가는 시도의 받기 문 목표를 1천 틱당 X 로 준다 (기본 없음 = 추체의 목표). 코드 안에서는 틱당 X ÷ 1000.
+    //   --out-gate-off: 출력으로 가는 시도에는 받기 문을 걸지 않는다 (은닉 쪽 문은 그대로). 둘 다 --grow-out 과 함께만, 서로·--own-target-out 과 함께 줄 수 없다.
+    //   --load 와 함께 주면 무시된다(저장 파일의 설정을 따른다. 불러오기에서 경고를 찍는다)
+    let own_out_given = args.iter().any(|a| a == "--own-target-out");
+    if args.iter().any(|a| a == "--out-target") {
+        let Some(x) = num("--out-target") else { eprintln!("[오류] --out-target 뒤에 1천 틱당 발화 수(수)가 필요하다"); std::process::exit(2); };
+        if !(x > 0.0) { eprintln!("[오류] --out-target 은 0 보다 커야 한다 (받은 값: {x})"); std::process::exit(2); }
+        if own_out_given { eprintln!("[오류] --out-target 과 --own-target-out 은 함께 줄 수 없다 (둘 다 출력의 받기 문 목표를 정한다)"); std::process::exit(2); }
+        if params.load_from.is_none() && !params.grow_out { eprintln!("[오류] --out-target 은 --grow-out 과 함께 준다 (출력으로 가는 성장의 받기 문 목표를 바꾸는 옵션이다)"); std::process::exit(2); }
+        params.out_target_fixed = Some(x / 1000.0);
+        if params.load_from.is_none() {
+            println!("[설정] (대조용) 출력의 받기 문 목표를 손으로 준다(--out-target {x}): 추체의 목표 대신 1천 틱당 {x} (틱당 {:.6}). 출력 줄의 '출력의 느린 ÷ 목표' 칸도 이 값으로 나눈다", x / 1000.0);
+        }
+    }
+    if args.iter().any(|a| a == "--out-gate-off") {
+        if own_out_given || args.iter().any(|a| a == "--out-target") { eprintln!("[오류] --out-gate-off 는 --own-target-out · --out-target 과 함께 줄 수 없다 (문을 걸지 않으면 목표가 쓰이지 않는다)"); std::process::exit(2); }
+        if params.load_from.is_none() && !params.grow_out { eprintln!("[오류] --out-gate-off 는 --grow-out 과 함께 준다 (출력으로 가는 성장의 받기 문을 끄는 옵션이다)"); std::process::exit(2); }
+        params.out_gate_off = true;
+        if params.load_from.is_none() {
+            println!("[설정] (대조용) 출력으로 가는 시도에는 받기 문을 걸지 않는다(--out-gate-off): 은닉 쪽 문은 그대로. 출력 줄의 '출력의 느린 ÷ 목표' 칸은 추체의 목표로 나눈 값 그대로");
+        }
+    }
+    // (대조용) --out-new-weight M: 출력으로 가는 시도에서만 새 접점의 시작 세기에 M 을 곱한다 (기본 1.0 = 지금 동작). --new-weight 와 달리 은닉으로 가는 접점은 그대로.
+    //   새 쌍의 시작 세기와 있는 쌍에 접점이 늘 때 보태는 양 둘 다에 먹는다. --grow-out 과 함께만. --load 와 함께 주면 무시된다
+    if args.iter().any(|a| a == "--out-new-weight") {
+        let Some(m) = num("--out-new-weight") else { eprintln!("[오류] --out-new-weight 뒤에 배수(수)가 필요하다"); std::process::exit(2); };
+        if !(m > 0.0) { eprintln!("[오류] --out-new-weight 는 0 보다 커야 한다 (받은 값: {m})"); std::process::exit(2); }
+        if params.load_from.is_none() && !params.grow_out { eprintln!("[오류] --out-new-weight 는 --grow-out 과 함께 준다 (출력으로 가는 새 접점의 시작 세기를 바꾸는 옵션이다)"); std::process::exit(2); }
+        params.out_new_weight = m;
+        if params.load_from.is_none() {
+            println!("[설정] (대조용) 출력으로 가는 새 접점의 시작 세기 배수(--out-new-weight {m}): 받는 출력의 접점 하나 세기 가운데 × new_weight {} × 퍼짐 (1 ± {}) 에 {m} 을 더 곱한다 (새 쌍의 시작 세기와 있는 쌍에 보태는 양 둘 다. 바닥 2 × min_weight, 천장 0.25 는 그대로). 은닉으로 가는 접점은 그대로",
+                params.new_weight, params.new_spread);
+        }
     }
     // 가지치기 기한의 바닥은 기본으로 켜져 있다: 기한을 다시 세는 조건에 '굳은 뒤의 가중치가 최소 가중치 이상일 때만'이 든다.
     //   --prune-reset-floor-off: 끈다(옛 동작). --prune-reset-floor: 받아들이되 아무 일도 하지 않는다(이미 기본이다).
@@ -980,6 +1033,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     println!("  (추가 줄의 뜻) 은닉 발화 = 은닉 뉴런만 센 실제 발화 (윗줄의 발화/1k 는 입출력 뉴런 포함). 발화율 분위 = rate_avg × 1000 (시정수 약 5000틱)");
     println!("  (추가 줄의 뜻) 접점 = 은닉 뉴런이 내보내는 접점을 쌍이 생긴 때로 나눈 것. 처음 쌍(born = 0)에 나중에 더해진 접점은 처음 쪽에 들어간다(그 누계를 따로 찍는다). 자란 쌍은 은닉→은닉 (--grow-out 을 켜면 은닉→출력도 든다)");
     println!("  (추가 줄의 뜻) 출력 = 은닉→출력 쌍: 보내는 뉴런이 은닉이고 받는 뉴런이 출력이며 접점이 1 이상인 시냅스 칸. 자란 쌍 = 그 가운데 born > 0. 느린 발화율 = 출력 뉴런의 rate_avg × 1000. 감응도 = excitability. 받은 접점·걸린 시도 = 받는 쪽이 '그 밖'(출력)인 것의 구간 값. 느린÷목표의 목표 = act_target × spont_fixed (없으면 NaN)");
+    println!("  (추가 줄의 뜻) 출력 줄 끝의 덧붙인 칸 (앞 칸들의 자리와 이름은 그대로): 접점 하나 세기 = 은닉→출력 쌍마다 가중치 ÷ 접점 수의 분위(쌍 하나 = 값 하나). 자기 목표 칸은 --own-target-out 일 때만 값이 있다(끄면 재는 출력 0, 분위 NaN): 굳힌 출력 = own_target > 0 인 출력 수 / 출력 수, 굳힌 목표/1k = own_target × 1000 의 분위(굳힌 출력만), 굳은 시험 틱 = 첫 발화 틱 + 16 ÷ 목표를 이 시험의 틱으로 바꾼 것(아래 한계에 걸린 것은 뺌), 재는 중이라 버린 출력 시도 = 문에 걸린 시도에도 든 것(구간과 누계), 느린 ÷ 자기 목표 = 출력마다 rate_avg ÷ 자기 own_target 의 분위(굳힌 출력만)");
     println!("  (추가 줄의 뜻) 받기 = 구간에 생긴 접점 수와 받기 문에 걸려 버린 시도 수를 받는 뉴런의 종류별로. 소멸의 나이 = 사라진 틱 − 그 접점이 속한 쌍이 생긴 틱 (처음부터 있던 쌍은 0틱에 생긴 것으로 센다)");
     println!("  (추가 줄의 뜻) 입력 = 은닉 뉴런마다 다른 은닉 뉴런에서 들어오는 접점 수(지연 시냅스 제외). 느린÷목표 = rate_avg ÷ (K × 자기 자발 발화 확률). 문이 닫힌 비율은 보고 시점의 값");
     println!("  (추가 줄의 뜻) 표의 '상대 수' = 서로 다른 상대의 수가 아니라 시냅스 칸의 수 (같은 상대로 가는 칸이 둘 이상일 수 있다: 초기 배선의 중복). '쌍 수'도 칸의 수다. 중복 시냅스 = 같은 (보내는 뉴런, 받는 뉴런)의 두 번째 이상인 칸");
@@ -991,6 +1045,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     if let Some(d) = &restored { need_before = d.need_before; need_pre_acc = d.need_pre_acc; need_drop_acc = d.need_drop_acc; need_drop_n = d.need_drop_n; }
     let (mut last_made, mut last_drop, mut last_short) = (net.grow_made, net.gate_drop, net.pruned_short);
     let mut last_own_wait = net.own_wait_drop;
+    let mut last_own_wait_out = net.own_wait_drop_out;
     let (mut last_exc_over, mut last_exc_expect) = (net.exc_only_over, net.exc_only_expect);
     const AREAS: [&str; 6] = ["감정 주", "감정 지도", "이성 주", "이성 지도", "기억", "해마"];
     for t in (start + 1)..=ticks {
@@ -1121,10 +1176,25 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
                 let mut rate: Vec<f64> = ov.iter().map(|o| o.3 * 1000.0).collect();
                 let mut exc: Vec<f64> = ov.iter().map(|o| o.4).collect();
                 let mut rg: Vec<f64> = if goal > 0.0 { ov.iter().map(|o| o.3 / goal).collect() } else { Vec::new() };
-                println!("{:>9} 출력 (n={}) | 은닉→출력 쌍 수 {} (그 가운데 자란 쌍 수 {}) | 출력 하나가 받는 쌍: 최소 {:.0} / 중앙 {:.0} / 최대 {:.0} | 받는 쌍이 0 인 출력 수 {} | 은닉→출력 접점 수 {} | 출력의 느린 발화율/1k: 10% {:.2} / 50% {:.2} / 90% {:.2} | 출력의 감응도 중앙 {:.3} | 구간에 출력이 받은 접점 {} / 문에 걸린 시도 {} | 출력의 느린 ÷ 목표: 10% {:.2} / 50% {:.2} / 90% {:.2} | 출력이 내보내는 시냅스 칸 {}",
+                print!("{:>9} 출력 (n={}) | 은닉→출력 쌍 수 {} (그 가운데 자란 쌍 수 {}) | 출력 하나가 받는 쌍: 최소 {:.0} / 중앙 {:.0} / 최대 {:.0} | 받는 쌍이 0 인 출력 수 {} | 은닉→출력 접점 수 {} | 출력의 느린 발화율/1k: 10% {:.2} / 50% {:.2} / 90% {:.2} | 출력의 감응도 중앙 {:.3} | 구간에 출력이 받은 접점 {} / 문에 걸린 시도 {} | 출력의 느린 ÷ 목표: 10% {:.2} / 50% {:.2} / 90% {:.2} | 출력이 내보내는 시냅스 칸 {}",
                     "", ov.len(), ov.iter().map(|o| o.0).sum::<usize>(), ov.iter().map(|o| o.1).sum::<usize>(), q(&mut pairs, 0.0), q(&mut pairs, 0.5), q(&mut pairs, 1.0),
                     ov.iter().filter(|o| o.0 == 0).count(), ov.iter().map(|o| o.2).sum::<usize>(), q(&mut rate, 0.1), q(&mut rate, 0.5), q(&mut rate, 0.9), q(&mut exc, 0.5),
                     net.grow_made[4] - last_made[4], net.gate_drop[4] - last_drop[4], q(&mut rg, 0.1), q(&mut rg, 0.5), q(&mut rg, 0.9), ov.iter().map(|o| o.5).sum::<usize>());
+                // 덧붙인 칸 (읽기만, 같은 줄 끝): 은닉→출력 접점 하나 세기의 분위, 출력의 자기 목표(--own-target-out)가 굳은 수·값·때, 재는 중이라 버린 시도, 느린 ÷ 자기 목표
+                let (oo, mut unit, gnow) = net.out_own_observe();
+                let on_n = oo.iter().filter(|o| o.0).count();
+                let fixed: Vec<&(bool, f64, f64, u32, u64, f64)> = oo.iter().filter(|o| o.0 && o.1 > 0.0).collect();
+                let never = oo.iter().filter(|o| o.0 && o.1 == 0.0 && o.3 == 0).count();
+                let mut ot: Vec<f64> = fixed.iter().map(|o| o.1 * 1000.0).collect();
+                // 굳은 전역 틱(첫 발화 틱 + 16 ÷ 목표)을 이 시험의 틱으로: 시험 틱 = 전역 틱 − (지금 전역 틱 − 지금 시험 틱)
+                let off = gnow as f64 - t as f64;
+                let mut when: Vec<f64> = fixed.iter().filter(|o| o.1 > o.2).map(|o| o.4 as f64 + (neuron::OWN_COUNT as f64 / o.1).round() - off).collect();
+                let mut rown: Vec<f64> = fixed.iter().map(|o| o.5 / o.1).collect();
+                println!(" | 은닉→출력 접점 하나 세기(가중치 ÷ 접점 수): 10% {:.4} / 50% {:.4} / 90% {:.4} | 자기 목표를 재는 출력 {} 가운데 굳힌 출력 {} / {} (재는 중 {}, 그 가운데 아직 발화 없음 {}) | 굳힌 목표/1k: 최소 {:.2} / 10% {:.2} / 25% {:.2} / 50% {:.2} / 75% {:.2} / 90% {:.2} / 최대 {:.2} | 굳은 시험 틱: 50% {:.0} / 최대 {:.0} | 재는 중이라 버린 출력 시도: 구간 {} / 누계 {} | 출력의 느린 ÷ 자기 목표: 10% {:.2} / 50% {:.2} / 90% {:.2}",
+                    q(&mut unit, 0.1), q(&mut unit, 0.5), q(&mut unit, 0.9), on_n, fixed.len(), oo.len(), on_n - fixed.len(), never,
+                    q(&mut ot, 0.0), q(&mut ot, 0.1), q(&mut ot, 0.25), q(&mut ot, 0.5), q(&mut ot, 0.75), q(&mut ot, 0.9), q(&mut ot, 1.0),
+                    q(&mut when, 0.5), q(&mut when, 1.0), net.own_wait_drop_out - last_own_wait_out, net.own_wait_drop_out, q(&mut rown, 0.1), q(&mut rown, 0.5), q(&mut rown, 0.9));
+                last_own_wait_out = net.own_wait_drop_out;
             }
             if net.params_ref().own_target_homeo {
                 // 감응도 줄 (읽기만): 종류마다 감응도의 분위와 한계(0.5 / 1.5)에 붙은 뉴런 수, 그리고 굳힌 목표를 보는 뉴런 수

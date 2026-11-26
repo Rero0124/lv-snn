@@ -179,11 +179,33 @@ pub struct NetParams {
     ///   (명세: lv-snn-runs/review-session/self-target-spec.md)
     pub own_target: Option<OwnMode>,
     /// 자기 목표를 재는 동안에도 새 접점을 받는다 (기본 꺼짐 = 재는 동안 그 뉴런으로 가는 시도를 버린다. 이 칸이 없는 저장 파일은 꺼짐).
-    ///   켜면 재는 중인 뉴런은 목표가 아직 0 이라 받기 문 없이 받는다. own_target 이 없으면 효과가 없다
+    ///   켜면 재는 중인 뉴런은 목표가 아직 0 이라 받기 문 없이 받는다. own_target 이 없으면 효과가 없다 (명령줄에서 --own-target 과 함께만 켤 수 있다.
+    ///   own_target_out 도 켜져 있으면 재는 중인 출력에도 같게 먹는다)
     pub own_target_open: bool,
     /// 감응도 항상성이 굳힌 자기 목표를 본다 (기본 꺼짐. 이 칸이 없는 저장 파일은 꺼짐). own_target 이 켜진 뉴런(own_on)의 own_homeo 를 켠다:
     ///   목표가 굳은 뒤로는 따라가는 평소 수준(set_point) 대신 굳힌 목표와 견주어 감응도를 고친다 (명세: lv-snn-runs/review-session/self-target-verdict.md 13장 '라')
     pub own_target_homeo: bool,
+    /// 출력 뉴런도 자기 값으로 목표를 잰다 (기본 꺼짐. 이 칸이 없는 저장 파일은 꺼짐). grow_out 과 함께만 뜻이 있다.
+    ///   켜면 출력 뉴런마다 own_on 을 켜서(은닉과 같은 시점: 준비 구간 뒤) 자기 발화 열일곱 번에 걸린 틱으로 목표를 재어 굳히고(neuron.rs 의 own_*),
+    ///   출력으로 가는 성장 시도의 받기 문이 out_target()(추체의 목표) 대신 받는 출력 자신의 own_target 을 목표로 쓴다.
+    ///   재는 동안(own_target == 0)의 처리는 은닉의 기본과 같다: 그 출력으로 가는 시도를 버리고 걸린 시도(gate_drop)로 센다(따로 own_wait_drop_out 에도).
+    ///   own_target_open 이 켜져 있으면 은닉처럼 재는 동안 문 없이 받는다. 은닉 쪽 규칙(own_target, act_target_of)과 감응도 항상성(own_homeo)은 건드리지 않는다.
+    ///   새 바깥 값은 없다 (16 은 이미 있는 OWN_COUNT). 명세: lv-snn-runs/review-session/out-strength-verdict.md 4장 '가'
+    pub own_target_out: bool,
+    /// (대조용) 출력에 거는 받기 문의 목표를 손으로 준다 (틱당 발화율. 기본 없음 = 추체의 목표 act_target × spont_fixed. 이 칸이 없는 저장 파일은 없음).
+    ///   Some(x) 이면 out_target() 이 x 를 돌려준다: 출력으로 가는 시도의 받기 문 목표와 발달 보고 "출력" 줄의 '출력의 느린 ÷ 목표' 칸이 이 값을 쓴다.
+    ///   명령줄(--out-target X)은 1천 틱당 발화 수 X 를 받아 x = X ÷ 1000 으로 넣는다. own_target_out 과 함께 쓰지 않는다. 바깥에서 준 값이다
+    pub out_target_fixed: Option<f64>,
+    /// (대조용) 출력으로 가는 시도에는 받기 문을 걸지 않는다 (기본 꺼짐. 이 칸이 없는 저장 파일은 꺼짐). 은닉으로 가는 시도의 문은 그대로다.
+    ///   출력으로 가는 시도의 수·몫(output_frac)과 쌍의 한계(접점 수·세기)는 그대로. own_target_out, out_target_fixed 와 함께 쓰지 않는다
+    pub out_gate_off: bool,
+    /// (대조용) 출력으로 가는 시도에서만 새 접점의 시작 세기에 곱하는 배수 m (기본 1.0 = 지금 동작. 이 칸이 없는 저장 파일은 1.0).
+    ///   grow_attempt 의 new_w(= new_weight × 퍼짐)에 곱한다: 새 쌍의 시작 세기(받는 쪽 접점 하나 세기의 가운데 × new_w)와
+    ///   있는 쌍에 접점이 늘 때 보태는 양(같은 가운데 × new_w × 남은 자리) 둘 다에 먹는다 — 코드가 "늘어나는 접점도 새 접점과 같은 세기로 시작한다"이므로.
+    ///   은닉으로 가는 시도에는 먹지 않는다(그쪽은 1.0 을 곱한다 = 값이 그대로). 난수를 더 뽑지 않는다. 바깥에서 준 값이다
+    ///   (명세: lv-snn-runs/review-session/out-strength-verdict.md 4-2장 E·F)
+    #[serde(default = "out_new_weight_missing")]
+    pub out_new_weight: f64,
     /// 받기 문이 억제 뉴런이 보내는 새 접점은 막지 않는다 (기본 꺼짐. 이 칸이 없는 저장 파일은 꺼짐). 받기 문(grow_gate)이 있는 구성이면 쓸 수 있다.
     ///   보내는 뉴런이 억제면 받는 뉴런의 목표를 보지 않고 받는다. 자기 목표를 재는 동안 막는 것(own_target)은 그대로다 (같은 문서 13장 '다')
     pub gate_exc_only: bool,
@@ -309,7 +331,7 @@ pub struct DevObs {
 
 impl Default for NetParams {
     fn default() -> Self {
-        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), grow_out: false, in_fan: None, in_weight: None, prune_reset_floor: true, own_target: None, own_target_open: false, own_target_homeo: false, gate_exc_only: false, freeze_wiring: false, prune_reset_net: false, prune_reset_net_out: false, prune_reset_net_off: false, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
+        Self { synapses_per_neuron: 10, hidden_gain: 1.0, lognormal: false, inhibitory_ratio: 0.15, input_pop: 1, min_weight: MIN_WEIGHT, output_frac: 0.3, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), grow_out: false, in_fan: None, in_weight: None, prune_reset_floor: true, own_target: None, own_target_open: false, own_target_homeo: false, own_target_out: false, out_target_fixed: None, out_gate_off: false, out_new_weight: 1.0, gate_exc_only: false, freeze_wiring: false, prune_reset_net: false, prune_reset_net_out: false, prune_reset_net_off: false, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
     }
 }
 
@@ -317,7 +339,7 @@ impl NetParams {
     /// 커넥톰 비율 (초파리 성체 기준): 뉴런당 연결 ~100, 연결 세기 중앙값:평균 ≈ 2:3.6 의 꼬리 긴 분포,
     /// 가장 강한 입력 하나가 전체 입력의 10~30%, 억제성 뉴런 30%
     pub fn connectome() -> Self {
-        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), grow_out: false, in_fan: None, in_weight: None, prune_reset_floor: true, own_target: None, own_target_open: false, own_target_homeo: false, gate_exc_only: false, freeze_wiring: false, prune_reset_net: false, prune_reset_net_out: false, prune_reset_net_off: false, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
+        Self { synapses_per_neuron: 100, hidden_gain: 0.1, lognormal: true, inhibitory_ratio: 0.30, input_pop: 1, min_weight: 0.002, output_frac: 0.10, typed: false, validated: false, morph: false, dopamine: false, gate_base: 0.02, da_gain: 0.05, predict: false, pred_eta: 5e-5, end_on_output: false, spont: None, spont_fixed: None, spont_flat: false, unit_med_fix: false, topo: false, local_frac: 0.0, scale: 1.0, grow: None, target_syn: 2000, prune_tau: 95_000.0, grow_sigma: 12.0, new_weight: 1.0, new_spread: 0.5, grow_da: None, compete: 0.0, short_tau: None, value: false, val_eta: 0.0, v2da: VALUE_TO_DA_WEIGHT, p2da: None, needs: false, release: None, seed: None, scatter_co: false, act_target: None, grow_gate: None, grow_gate_soft: Some(4.0), grow_out: false, in_fan: None, in_weight: None, prune_reset_floor: true, own_target: None, own_target_open: false, own_target_homeo: false, own_target_out: false, out_target_fixed: None, out_gate_off: false, out_new_weight: 1.0, gate_exc_only: false, freeze_wiring: false, prune_reset_net: false, prune_reset_net_out: false, prune_reset_net_off: false, prune_act: 0.0, slow_events: true, slow_check: false, warmup_quiet: false, no_warmup_quiet: false, wake_check: false, load_from: None, no_homeo_need: true, no_homeo_da: false, pred_floor: false, scale_in: None, scale_in_hidden_only: false, no_homeo_hidden: false, rng_seed: None }
     }
 }
 
@@ -421,6 +443,8 @@ pub struct Network {
     pub gate_drop: [u64; 5],
     /// 받는 뉴런이 자기 목표를 재는 중이라 버린 새 접점 시도의 누계 (gate_drop 에도 들어간다)
     pub own_wait_drop: u64,
+    /// 받는 출력 뉴런이 자기 목표를 재는 중이라 버린 출력으로 가는 시도의 누계 (own_target_out. gate_drop 의 '그 밖' 칸에도 들어가고, own_wait_drop 에는 넣지 않는다)
+    pub own_wait_drop_out: u64,
     /// gate_exc_only 의 관찰: 억제 뉴런이 보낸 시도 가운데 받는 뉴런의 발화율이 목표를 넘어 있던 수(문이 있었다면 걸릴 수 있던 시도),
     /// 그리고 그 시도들이 문에서 떨어졌을 기대 수(차츰 줄이는 문이면 1 − (목표 ÷ 발화율)^K 의 합, 옛 문이면 그 수 그대로). 읽기만 하고 동작에 쓰지 않는다
     pub exc_only_over: u64,
@@ -521,6 +545,20 @@ impl Network {
             // 자기 목표: 저장 파일의 설정을 따른다. 옵션 없이 기른 망을 옵션을 켜서 부르는 것은 막는다 (이미 자란 망의 발화율이 목표로 굳는다)
             if params.own_target.is_some() && net.params.own_target.is_none() {
                 eprintln!("[오류] --own-target 없이 기른 망({})을 --own-target 을 켜서 불러올 수 없다 (자란 뒤의 발화율이 목표로 굳는다)", path); std::process::exit(2);
+            }
+            // 출력의 자기 목표(--own-target-out): 명령줄의 것은 쓰지 않고 저장 파일의 설정을 따른다 (뉴런의 own_on · own_target 도 저장 파일의 것)
+            if params.own_target_out {
+                println!("[경고] --own-target-out 은 --load 와 함께 주면 무시된다: 불러온 망의 설정(저장 파일의 own_target_out = {})을 그대로 쓴다", net.params.own_target_out);
+            }
+            // 출력 받기 문의 대조(--out-target, --out-gate-off)도 저장 파일의 설정을 따른다
+            if params.out_target_fixed.is_some() {
+                println!("[경고] --out-target 은 --load 와 함께 주면 무시된다: 불러온 망의 설정(저장 파일의 out_target_fixed = {:?} /틱)을 그대로 쓴다", net.params.out_target_fixed);
+            }
+            if params.out_gate_off {
+                println!("[경고] --out-gate-off 는 --load 와 함께 주면 무시된다: 불러온 망의 설정(저장 파일의 out_gate_off = {})을 그대로 쓴다", net.params.out_gate_off);
+            }
+            if params.out_new_weight != 1.0 {
+                println!("[경고] --out-new-weight 는 --load 와 함께 주면 무시된다: 불러온 망의 설정(저장 파일의 out_new_weight = {})을 그대로 쓴다", net.params.out_new_weight);
             }
             // 배선을 얼린다: 명령줄에서 켜면 불러온 망의 성장과 가지치기를 끈다 (보내는 쪽 가지치기는 뉴런의 prune_tau 를 0 으로 해서 끈다)
             if params.freeze_wiring && !net.params.freeze_wiring {
@@ -662,6 +700,7 @@ impl Network {
             grow_made: [0; 5],
             gate_drop: [0; 5],
             own_wait_drop: 0,
+            own_wait_drop_out: 0,
             exc_only_over: 0,
             exc_only_expect: 0.0,
             added_on_initial: 0,
@@ -769,6 +808,10 @@ impl Network {
                 // 자기 목표를 재기 시작한다 (준비 구간 뒤. 시계는 각자의 첫 발화에서 시작한다)
                 n.own_homeo = net.params.own_target_homeo && match net.params.own_target { Some(OwnMode::All) => true, Some(OwnMode::Pyr) => n.cell_type == CellType::Pyramidal, None => false };
                 n.own_on = match net.params.own_target { Some(OwnMode::All) => true, Some(OwnMode::Pyr) => n.cell_type == CellType::Pyramidal, None => false };
+            }
+            // 출력의 자기 목표(own_target_out): 출력 뉴런도 같은 시점(준비 구간 뒤)에 재기 시작한다. 감응도 항상성(own_homeo)은 켜지 않는다
+            if net.params.own_target_out {
+                for &o in &net.output_idx { net.neurons[o].own_on = true; }
             }
         }
 
@@ -2368,6 +2411,12 @@ impl Network {
         // 출력으로 가는 성장 (grow_out): 출력의 목표는 추체의 목표. 목표가 없으면(act_target 이나 spont_fixed 가 없으면) 출력으로 자라지 않는다
         let out_goal = self.out_target();
         let out_on = self.params.grow_out && gated && out_goal > 0.0 && !self.output_idx.is_empty();
+        // 출력의 자기 목표(own_target_out): 받는 출력이 자기 목표를 쓰면 out_goal 대신 그 값. 재는 중인 출력으로 가는 시도를 버리는가는 은닉과 같게 own_target_open 을 따른다
+        let own_out = self.params.own_target_out;
+        let out_wait = own_out && !self.params.own_target_open;
+        // out_gate_off: 출력으로 가는 시도에는 문을 걸지 않는다 (목표 0 = 걸지 않음). out_target_fixed 는 out_target() 안에서 out_goal 을 바꾼다
+        let out_gate_off = self.params.out_gate_off;
+        let out_w = self.params.out_new_weight;
         for &(nid, _) in spikes {
             let pre = nid as usize;
             if pre >= hidden_end { continue; }
@@ -2415,7 +2464,7 @@ impl Network {
                             }
                             goal = 0.0;
                         }
-                        self.grow_attempt(pre, post, goal, &mut rng, now);
+                        self.grow_attempt(pre, post, goal, 1.0, &mut rng, now);
                     }
                 }
             }
@@ -2433,18 +2482,31 @@ impl Network {
             if rng.f() < expect - expect.floor() { count += 1; }
             for _ in 0..count {
                 let post = self.output_idx[rng.below(self.output_idx.len())];
-                self.grow_attempt(pre, post, out_goal, &mut rng, now);
+                // 받기 문의 목표: 기본은 추체의 목표(out_goal, out_target_fixed 가 있으면 그 값). own_target_out 이면 받는 출력 자신이 굳힌 목표를 쓴다.
+                //   아직 재는 중이면(목표 0) 은닉의 기본처럼 이 시도를 버리고 걸린 시도로 센다 (own_target_open 이면 문 없이 받는다). out_gate_off 면 0 (문 없음)
+                let goal = if out_gate_off { 0.0 } else if own_out && self.neurons[post].own_on {
+                    let g = self.neurons[post].own_target;
+                    if g == 0.0 && out_wait {
+                        self.gate_drop[Self::kind_index(self.neurons[post].cell_type)] += 1; self.own_wait_drop_out += 1; continue;
+                    }
+                    g
+                } else { out_goal };
+                // 시작 세기의 배수: 출력으로 가는 시도에만 out_new_weight (기본 1.0)
+                self.grow_attempt(pre, post, goal, out_w, &mut rng, now);
             }
         }
     }
 
-    /// 출력 뉴런에 거는 받기 문의 목표 (틱당 발화율): 추체의 목표 = act_target × spont_fixed. 둘 중 하나라도 없으면 0
+    /// 출력 뉴런에 거는 받기 문의 목표 (틱당 발화율): 추체의 목표 = act_target × spont_fixed. 둘 중 하나라도 없으면 0.
+    ///   (대조용) out_target_fixed 가 있으면 그 값
     fn out_target(&self) -> f64 {
+        if let Some(x) = self.params.out_target_fixed { return x; }
         match (self.params.act_target, self.params.spont_fixed) { (Some(k), Some(p)) => k * p, _ => 0.0 }
     }
 
-    /// 새 접점 시도 하나 (pre → post): 받기 문(goal > 0 일 때만) → 이미 이어진 쌍이면 접점 +1, 아니면 새 쌍. 은닉으로 가는 시도와 출력으로 가는 시도가 함께 쓴다
-    fn grow_attempt(&mut self, pre: usize, post: usize, goal: f64, rng: &mut GrowDraw, now: u64) {
+    /// 새 접점 시도 하나 (pre → post): 받기 문(goal > 0 일 때만) → 이미 이어진 쌍이면 접점 +1, 아니면 새 쌍. 은닉으로 가는 시도와 출력으로 가는 시도가 함께 쓴다.
+    ///   w_mult: 새 접점의 시작 세기 배수 new_w 에 더 곱하는 값 (은닉으로 가는 시도는 1.0, 출력으로 가는 시도는 out_new_weight). 난수의 수·차례는 바꾸지 않는다
+    fn grow_attempt(&mut self, pre: usize, post: usize, goal: f64, w_mult: f64, rng: &mut GrowDraw, now: u64) {
         let min_w = self.params.min_weight;
         // 받기 문: 받는 뉴런의 발화율이 목표를 넘으면 이 시도를 버린다 (다른 상대로 넘기지 않는다)
         let post_kind = Self::kind_index(self.neurons[post].cell_type);
@@ -2467,7 +2529,8 @@ impl Network {
             }
         }
         let jitter = 1.0 + self.params.new_spread * (rng.f() * 2.0 - 1.0);
-        let (post_med, new_w) = (self.unit_med.get(post).copied().unwrap_or(0.0), self.params.new_weight * jitter);
+        // w_mult == 1.0 이면 곱해도 값이 그대로다 (IEEE 곱셈에서 x × 1.0 = x)
+        let (post_med, new_w) = (self.unit_med.get(post).copied().unwrap_or(0.0), self.params.new_weight * jitter * w_mult);
         // 이미 연결된 상대면 접점이 하나 늘어난다: 접점 하나의 세기(가중치 ÷ 개수)만큼 가중치가 커진다
         if let Some(s) = self.neurons[pre].synapses.iter_mut().find(|s| s.target as usize == post && s.slow_rate == 0.0) {
             // 한 쌍 사이의 접점 수에는 한계가 있다 (축삭과 수상돌기가 만나는 자리가 한정됨). 많을수록 더 생기기 어렵고, 한계에 닿으면 생기지 않는다.
@@ -2589,6 +2652,19 @@ impl Network {
             }
         }
         (v, self.out_target())
+    }
+
+    /// 출력 쪽 덧붙인 관찰값 (발달 시험의 "출력" 줄 끝 칸, 읽기만): 출력 뉴런마다 (own_on, own_target, 자발 발화 확률 0.00001 × spont_scale(목표의 아래 한계),
+    /// own_n, own_t0, 느린 발화율 rate_avg), 은닉→출력 쌍마다 접점 하나 세기(쌍의 가중치 ÷ 접점 수. 접점 1 이상인 칸만), 지금 전역 틱
+    pub fn out_own_observe(&self) -> (Vec<(bool, f64, f64, u32, u64, f64)>, Vec<f64>, u64) {
+        let hidden_end = self.hippocampus_range.1;
+        let per = self.output_idx.iter().map(|&i| { let n = &self.neurons[i]; (n.own_on, n.own_target, 1e-5 * n.spont_scale, n.own_n, n.own_t0, n.rate_avg) }).collect();
+        let is_out: std::collections::HashSet<usize> = self.output_idx.iter().cloned().collect();
+        let mut unit = Vec::new();
+        for n in &self.neurons[..hidden_end] {
+            for s in &n.synapses { if s.count >= 1 && is_out.contains(&(s.target as usize)) { unit.push(s.weight / s.count as f64); } }
+        }
+        (per, unit, self.global_tick)
     }
 
     /// 연결이 함께 활동하지 않고 버티는 시간 (틱): prune_tau × ln(가중치 ÷ min_weight), 최소 2만 틱.
@@ -2920,6 +2996,140 @@ impl Network {
         if h == 0 { 0.0 } else { self.unit_med[..h].iter().sum::<f64>() / h as f64 }
     }
 
+    /// (관찰용, --unit-med-report) 새 접점 세기 기준(unit_med)과 지역 기준(w_ref_med, w_ref_max)을 두 방식으로 다시 세어 찍는다. 망을 돌리지 않는다.
+    ///   unit_med: 받는 뉴런의 입력 쌍마다 "접점 하나의 세기"(쌍의 가중치 ÷ 접점 수)를 하나씩 모아(쌍 하나 = 값 하나, 지연 시냅스 뺌) 정렬한 값의 len/2 번째.
+    ///     A = refresh_local 의 기본 거름 그대로(받는 쪽 s.target 이 조절 뉴런이면 뺌), B = --unit-med-fix 의 거름(보내는 쪽이 조절 뉴런이면 뺌).
+    ///   w_ref_med / w_ref_max: refresh_local_scales 그대로 쌍의 가중치(접점 수로 나누지 않음)를 모든 입력에서 모아 len/2 번째, min(⌊len×0.95⌋, len−1) 번째.
+    ///     A = 지금 코드(거름 없음), B = 보내는 쪽이 조절 뉴런인 쌍을 뺌(코드에 없는 방식, 견주기용).
+    ///   끝에서 실제 refresh_local 을 fix 끔·켬으로 불러 A·B 와 모든 뉴런에서 같은지 맞춘다. 그때 뉴런의 지역 값·unit_med·자발 배수를 덮어쓰므로
+    ///   이 함수 뒤에는 망을 돌리거나 저장하지 않는다 (main 은 이 함수 뒤에 바로 끝낸다)
+    pub fn unit_med_report(&mut self) {
+        // 정렬한 값의 (n−1)×p 번째(반올림). 비어 있으면 NaN
+        fn pct(sorted: &[f64], p: f64) -> f64 { if sorted.is_empty() { f64::NAN } else { sorted[((sorted.len() - 1) as f64 * p).round() as usize] } }
+        fn sorted(mut v: Vec<f64>) -> Vec<f64> { v.sort_by(|a, b| a.partial_cmp(b).unwrap()); v }
+        // refresh_local / refresh_local_scales 와 같은 순위 (정렬 뒤 인덱스: select_nth 와 같은 값)
+        fn med(v: &[f64]) -> f64 { if v.is_empty() { 0.0 } else { v[v.len() / 2] } }
+        fn strong(v: &[f64]) -> f64 { if v.is_empty() { 0.0 } else { v[((v.len() as f64 * 0.95) as usize).min(v.len() - 1)] } }
+        fn dist(v: &[f64]) -> String {
+            let s = sorted(v.iter().copied().filter(|x| x.is_finite()).collect());
+            format!("최소 {:.4} / 1사분위 {:.4} / 중앙 {:.4} / 3사분위 {:.4} / 최대 {:.4} (n={})", pct(&s, 0.0), pct(&s, 0.25), pct(&s, 0.5), pct(&s, 0.75), pct(&s, 1.0), s.len())
+        }
+        #[derive(Default, Clone)]
+        struct Row { pairs: [usize; 4], contacts: [u64; 4], slow: usize, a: f64, b: f64, wmed_a: f64, wmed_b: f64, wmax_a: f64, wmax_b: f64,
+            hid_unit: Vec<f64>, hexc_pair: Vec<f64>, da_w: Vec<f64> }
+        let h = self.hippocampus_range.1;
+        let neurons = &self.neurons;
+        // 보내는 쪽 종류: 0 은닉 흥분, 1 은닉 억제, 2 도파민(조절 뉴런), 3 그 밖
+        let kind = |i: usize| -> usize { let n = &neurons[i]; if n.modulatory { 2 } else if i < h { if n.inhibitory { 1 } else { 0 } } else { 3 } };
+        let rows: Vec<Row> = (0..neurons.len()).map(|t| {
+            let mut r = Row::default();
+            let (mut va, mut vb, mut wa, mut wb) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for &(pre, k) in &neurons[t].incoming {
+                let Some(s) = neurons.get(pre).and_then(|p| p.synapses.get(k)) else { continue };
+                let kd = kind(pre);
+                r.pairs[kd] += 1; r.contacts[kd] += s.count as u64;
+                if s.slow_rate != 0.0 { r.slow += 1; }
+                let unit = s.weight / s.count.max(1) as f64;
+                if s.slow_rate == 0.0 && !neurons[s.target as usize].modulatory { va.push(unit); }
+                if s.slow_rate == 0.0 && !neurons[pre].modulatory { vb.push(unit); }
+                wa.push(s.weight);
+                if !neurons[pre].modulatory { wb.push(s.weight); }
+                if kd <= 1 { r.hid_unit.push(unit); }
+                if kd == 0 { r.hexc_pair.push(s.weight); }
+                if kd == 2 { r.da_w.push(s.weight); }
+            }
+            let (va, vb, wa, wb) = (sorted(va), sorted(vb), sorted(wa), sorted(wb));
+            r.a = med(&va); r.b = med(&vb);
+            r.wmed_a = med(&wa); r.wmax_a = strong(&wa); r.wmed_b = med(&wb); r.wmax_b = strong(&wb);
+            r.hid_unit = sorted(std::mem::take(&mut r.hid_unit)); r.hexc_pair = sorted(std::mem::take(&mut r.hexc_pair)); r.da_w = sorted(std::mem::take(&mut r.da_w));
+            r
+        }).collect();
+        let saved_um = self.unit_med.clone();
+        let saved_w: Vec<(f64, f64)> = self.neurons.iter().map(|n| (n.w_ref_med, n.w_ref_max)).collect();
+        let outs = self.output_idx.clone();
+        let pyr: Vec<usize> = (0..h).filter(|&i| self.neurons[i].cell_type == CellType::Pyramidal).collect();
+        let ratio = |x: f64, y: f64| if y > 0.0 { x / y } else { f64::NAN };
+        println!("\n[unit-med] 전역 틱 {} / 뉴런 {} / 은닉 {} (추체 {}) / 출력 {} / 도파민 {} / 설정의 unit_med_fix {} / 성장 {:?}",
+            self.global_tick, self.neurons.len(), h, pyr.len(), outs.len(), self.da_idx.len(), self.params.unit_med_fix, self.params.grow);
+        println!("[unit-med] 칸: 쌍 = 들어오는 Synapse 하나(한 상대와의 연결), 접점 = 그 Synapse 의 count 합. 종류 = 보내는 쪽(흥 은닉 흥분, 억 은닉 억제, DA 조절 뉴런, 밖 그 밖). 지연 = slow_rate>0 인 쌍 수");
+        println!("[unit-med] 칸: 접점세기 = 쌍의 가중치 ÷ count. A = unit_med 기본 거름(도파민 넣음), B = 보내는 쪽 도파민 뺌(--unit-med-fix). wmed/wmax = w_ref_med/w_ref_max (쌍의 가중치, A 넣음 / B 뺌)");
+        println!("[unit-med] 칸: 은닉접점세기 p10/p50/p90 = 은닉(흥분+억제)에서 오는 쌍의 접점세기 백분위, 은닉흥분쌍가중치 = 은닉 흥분에서 오는 쌍의 가중치(접점 수로 나누지 않음) 최소/중앙/최대, 저장um = 저장 파일에 든 unit_med");
+        println!("[출력표] {:>4} {:>6} | {:>4} {:>3} {:>3} {:>3} | {:>4} {:>3} {:>3} {:>3} | {:>3} | {:>4} | {:>8} {:>8} {:>6} | {:>8} {:>8} {:>8} | {:>8} {:>8} {:>6} | {:>8} {:>8} {:>6} | {:>8} {:>8} {:>8} | {:>7} {:>7} | {:>8}",
+            "o#", "뉴런", "쌍흥", "억", "DA", "밖", "접흥", "억", "DA", "밖", "지연", "은닉쌍", "A", "B", "A/B", "접p10", "접p50", "접p90", "wmedA", "wmedB", "비", "wmaxA", "wmaxB", "비", "흥쌍최소", "흥쌍중앙", "흥쌍최대", "DA최소", "DA최대", "저장um");
+        for (o, &t) in outs.iter().enumerate() {
+            let r = &rows[t];
+            println!("[출력표] {:>4} {:>6} | {:>4} {:>3} {:>3} {:>3} | {:>4} {:>3} {:>3} {:>3} | {:>3} | {:>4} | {:>8.5} {:>8.5} {:>6.3} | {:>8.5} {:>8.5} {:>8.5} | {:>8.5} {:>8.5} {:>6.3} | {:>8.5} {:>8.5} {:>6.3} | {:>8.5} {:>8.5} {:>8.5} | {:>7.4} {:>7.4} | {:>8.5}",
+                o, t, r.pairs[0], r.pairs[1], r.pairs[2], r.pairs[3], r.contacts[0], r.contacts[1], r.contacts[2], r.contacts[3], r.slow, r.pairs[0] + r.pairs[1],
+                r.a, r.b, ratio(r.a, r.b), pct(&r.hid_unit, 0.1), pct(&r.hid_unit, 0.5), pct(&r.hid_unit, 0.9),
+                r.wmed_a, r.wmed_b, ratio(r.wmed_a, r.wmed_b), r.wmax_a, r.wmax_b, ratio(r.wmax_a, r.wmax_b),
+                pct(&r.hexc_pair, 0.0), pct(&r.hexc_pair, 0.5), pct(&r.hexc_pair, 1.0), pct(&r.da_w, 0.0), pct(&r.da_w, 1.0), saved_um.get(t).copied().unwrap_or(f64::NAN));
+        }
+        let summary = |name: &str, set: &[usize]| {
+            let ab: Vec<f64> = set.iter().map(|&t| ratio(rows[t].a, rows[t].b)).collect();
+            let undefined = ab.iter().filter(|x| !x.is_finite()).count();
+            let s = sorted(ab.iter().copied().filter(|x| x.is_finite()).collect());
+            println!("[요약] {name}: 수 {} / A÷B 의 중앙 {:.4} / A÷B > 1.1 인 수 {} / A == 0.25 인 수 {} / B 가 0 이라 A÷B 를 못 낸 수 {} / 은닉 입력 쌍 ≤ 8 인 수 {}",
+                set.len(), pct(&s, 0.5), s.iter().filter(|&&x| x > 1.1).count(), set.iter().filter(|&&t| rows[t].a == 0.25).count(), undefined,
+                set.iter().filter(|&&t| rows[t].pairs[0] + rows[t].pairs[1] <= 8).count());
+            println!("[요약] {name}: A÷B {}", dist(&ab));
+            println!("[요약] {name}: A÷B < 1 인 수 {} / B > 0.25 인 수 {} / A÷B < 1 이면서 B > 0.25 인 수 {}",
+                s.iter().filter(|&&x| x < 1.0).count(), set.iter().filter(|&&t| rows[t].b > 0.25).count(),
+                set.iter().filter(|&&t| ratio(rows[t].a, rows[t].b) < 1.0 && rows[t].b > 0.25).count());
+            println!("[요약] {name}: A {}", dist(&set.iter().map(|&t| rows[t].a).collect::<Vec<_>>()));
+            println!("[요약] {name}: B {}", dist(&set.iter().map(|&t| rows[t].b).collect::<Vec<_>>()));
+            println!("[요약] {name}: w_ref_med A÷B {}", dist(&set.iter().map(|&t| ratio(rows[t].wmed_a, rows[t].wmed_b)).collect::<Vec<_>>()));
+            println!("[요약] {name}: w_ref_max A÷B {}", dist(&set.iter().map(|&t| ratio(rows[t].wmax_a, rows[t].wmax_b)).collect::<Vec<_>>()));
+            println!("[요약] {name}: 은닉 입력 쌍 수 {}", dist(&set.iter().map(|&t| (rows[t].pairs[0] + rows[t].pairs[1]) as f64).collect::<Vec<_>>()));
+            println!("[요약] {name}: 도파민 입력 쌍 수 {}", dist(&set.iter().map(|&t| rows[t].pairs[2] as f64).collect::<Vec<_>>()));
+            println!("[요약] {name}: 쌍 합 흥 {} 억 {} DA {} 밖 {} / 접점 합 흥 {} 억 {} DA {} 밖 {} / 지연 쌍 {}",
+                set.iter().map(|&t| rows[t].pairs[0]).sum::<usize>(), set.iter().map(|&t| rows[t].pairs[1]).sum::<usize>(), set.iter().map(|&t| rows[t].pairs[2]).sum::<usize>(), set.iter().map(|&t| rows[t].pairs[3]).sum::<usize>(),
+                set.iter().map(|&t| rows[t].contacts[0]).sum::<u64>(), set.iter().map(|&t| rows[t].contacts[1]).sum::<u64>(), set.iter().map(|&t| rows[t].contacts[2]).sum::<u64>(), set.iter().map(|&t| rows[t].contacts[3]).sum::<u64>(),
+                set.iter().map(|&t| rows[t].slow).sum::<usize>());
+            // "쌍" 칸이 서로 다른 상대의 수인지: 같은 보내는 뉴런에서 들어오는 Synapse 가 둘 이상인 경우를 센다
+            let dup: usize = set.iter().map(|&t| {
+                let mut p: Vec<usize> = self.neurons[t].incoming.iter().map(|&(pre, _)| pre).collect();
+                let n0 = p.len(); p.sort_unstable(); p.dedup(); n0 - p.len()
+            }).sum();
+            println!("[요약] {name}: 같은 보내는 뉴런에서 온 두 번째 이후 Synapse 수 {dup} (0 이면 쌍 수 = 서로 다른 상대 수)");
+            let da: Vec<f64> = set.iter().flat_map(|&t| rows[t].da_w.iter().copied()).collect();
+            println!("[요약] {name}: 도파민 시냅스 가중치 {}", dist(&da));
+            // 저장 파일에 든 값과 지금 다시 센 A 가 다른 뉴런 수 (저장 직전의 갱신 뒤로 가중치가 바뀐 만큼)
+            let du = set.iter().filter(|&&t| saved_um.get(t).copied().unwrap_or(f64::NAN) != rows[t].a).count();
+            let dw = set.iter().filter(|&&t| saved_w[t] != (rows[t].wmed_a, rows[t].wmax_a)).count();
+            println!("[요약] {name}: 저장된 unit_med ≠ 다시 센 A 인 수 {du} / 저장된 (w_ref_med, w_ref_max) ≠ 다시 센 A 인 수 {dw}");
+            let su: Vec<f64> = set.iter().map(|&t| ratio(saved_um.get(t).copied().unwrap_or(f64::NAN), rows[t].a)).collect();
+            println!("[요약] {name}: 저장된 unit_med ÷ 다시 센 A {}", dist(&su));
+        };
+        summary("출력", &outs);
+        summary("은닉 추체", &pyr);
+        // 맞춤: 실제 refresh_local 을 fix 끔 / 켬으로 불러, 모든 뉴런에서 unit_med 와 w_ref 가 A·B 와 글자 그대로 같은지
+        let fix0 = self.params.unit_med_fix;
+        let cmp = |got: &[f64], want: &dyn Fn(usize) -> f64| -> (usize, f64) {
+            let (mut n, mut m) = (0usize, 0.0f64);
+            for (i, &g) in got.iter().enumerate() { let w = want(i); if g != w { n += 1; m = m.max((g - w).abs()); } }
+            (n, m)
+        };
+        if self.params.grow.is_none() { println!("[맞춤] 성장 설정이 없어 refresh_local 이 unit_med 를 세지 않는다: 맞춤을 건너뛴다"); return; }
+        self.params.unit_med_fix = false;
+        self.refresh_local();
+        let (n1, m1) = cmp(&self.unit_med, &|i| rows[i].a);
+        let wm: Vec<f64> = self.neurons.iter().map(|n| n.w_ref_med).collect();
+        let wx: Vec<f64> = self.neurons.iter().map(|n| n.w_ref_max).collect();
+        let (n2, m2) = cmp(&wm, &|i| rows[i].wmed_a);
+        let (n3, m3) = cmp(&wx, &|i| rows[i].wmax_a);
+        let um_off = self.unit_med.clone();
+        self.params.unit_med_fix = true;
+        self.refresh_local();
+        let (n4, m4) = cmp(&self.unit_med, &|i| rows[i].b);
+        self.params.unit_med_fix = fix0;
+        println!("[맞춤] 실제 refresh_local (fix 끔) 과 A: unit_med 다른 뉴런 {n1}/{} (최대 차 {m1:e}), w_ref_med 다른 뉴런 {n2} (최대 차 {m2:e}), w_ref_max 다른 뉴런 {n3} (최대 차 {m3:e})", self.unit_med.len());
+        println!("[맞춤] 실제 refresh_local (fix 켬) 과 B: unit_med 다른 뉴런 {n4}/{} (최대 차 {m4:e})", self.unit_med.len());
+        for &t in outs.iter().take(2).chain(pyr.iter().take(1)) {
+            println!("[맞춤] 뉴런 {t}: 실제 fix 끔 unit_med {:.6} / A {:.6}, 실제 fix 켬 unit_med {:.6} / B {:.6}, 실제 w_ref_med {:.6} / A {:.6}, 실제 w_ref_max {:.6} / A {:.6}",
+                um_off[t], rows[t].a, self.unit_med[t], rows[t].b, wm[t], rows[t].wmed_a, wx[t], rows[t].wmax_a);
+        }
+    }
+
     /// 검증된 학습 구성 적용
     fn validated_plasticity() -> PlasticityOptions {
         PlasticityOptions {
@@ -3164,7 +3374,7 @@ impl Network {
                 val_idx: self.val_idx.clone(), taste_idx: self.taste_idx.clone(), need_idx: self.need_idx.clone(), aux_end: self.aux_end,
                 unit_med: self.unit_med.clone(), noise_amp: self.noise_amp.clone(),
                 sprouted: self.sprouted, pruned: self.pruned, da_spikes: self.da_spikes, pred_spikes: self.pred_spikes, val_spikes: self.val_spikes,
-                grow_made: self.grow_made, gate_drop: self.gate_drop, own_wait_drop: self.own_wait_drop, exc_only_over: self.exc_only_over, exc_only_expect: self.exc_only_expect, added_on_initial: self.added_on_initial, pruned_short: self.pruned_short,
+                grow_made: self.grow_made, gate_drop: self.gate_drop, own_wait_drop: self.own_wait_drop, own_wait_drop_out: self.own_wait_drop_out, exc_only_over: self.exc_only_over, exc_only_expect: self.exc_only_expect, added_on_initial: self.added_on_initial, pruned_short: self.pruned_short,
                 wiring_sum: self.wiring_sum, dev_tick: self.dev_tick,
                 drives: self.drives.clone(), dev_state: self.dev_state.clone(),
                 slow_sum: if self.params.slow_events { self.slow_sum.clone() } else { Vec::new() },
@@ -3245,6 +3455,7 @@ impl Network {
             grow_made: [0; 5],
             gate_drop: [0; 5],
             own_wait_drop: 0,
+            own_wait_drop_out: 0,
             exc_only_over: 0,
             exc_only_expect: 0.0,
             added_on_initial: 0,
@@ -3278,7 +3489,7 @@ impl Network {
                 net.val_idx = x.val_idx; net.taste_idx = x.taste_idx; net.need_idx = x.need_idx; net.aux_end = x.aux_end;
                 net.unit_med = x.unit_med; net.noise_amp = x.noise_amp;
                 net.sprouted = x.sprouted; net.pruned = x.pruned; net.da_spikes = x.da_spikes; net.pred_spikes = x.pred_spikes; net.val_spikes = x.val_spikes;
-                net.grow_made = x.grow_made; net.gate_drop = x.gate_drop; net.own_wait_drop = x.own_wait_drop; net.exc_only_over = x.exc_only_over; net.exc_only_expect = x.exc_only_expect; net.added_on_initial = x.added_on_initial; net.pruned_short = x.pruned_short;
+                net.grow_made = x.grow_made; net.gate_drop = x.gate_drop; net.own_wait_drop = x.own_wait_drop; net.own_wait_drop_out = x.own_wait_drop_out; net.exc_only_over = x.exc_only_over; net.exc_only_expect = x.exc_only_expect; net.added_on_initial = x.added_on_initial; net.pruned_short = x.pruned_short;
                 net.wiring_sum = x.wiring_sum; net.dev_tick = x.dev_tick;
                 net.drives = x.drives; net.dev_state = x.dev_state;
                 if !x.slow_sum.is_empty() && x.slow_sum.len() == x.slow_live.len() { net.slow_saved = Some((x.slow_sum, x.slow_live)); }
@@ -3393,6 +3604,8 @@ struct SnapExt {
     #[serde(default)]
     own_wait_drop: u64,
     #[serde(default)]
+    own_wait_drop_out: u64,
+    #[serde(default)]
     exc_only_over: u64,
     #[serde(default)]
     exc_only_expect: f64,
@@ -3436,6 +3649,8 @@ impl GrowDraw {
 }
 /// 저장 파일에 prune_reset_floor 가 없으면(이 칸이 생기기 전의 파일) 꺼짐
 fn reset_floor_missing() -> bool { false }
+/// 저장 파일에 out_new_weight 가 없으면(이 칸이 생기기 전의 파일) 지금 동작(1.0)
+fn out_new_weight_missing() -> f64 { 1.0 }
 /// 저장 파일에 grow_gate_soft 가 없으면(이 칸이 생기기 전의 파일) 옛 닫힘/열림 문
 fn gate_soft_missing() -> Option<f64> { None }
 fn default_pred_eta() -> f64 { 5e-5 }
