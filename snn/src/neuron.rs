@@ -24,6 +24,50 @@ pub enum CellType { #[default] Legacy, Pyramidal, Pv, Sst, Vip, Modulatory, Pred
 /// 자기 목표를 잴 때 세는 발화 간격의 수: 첫 발화에서 (OWN_COUNT + 1)째 발화까지의 틱으로 발화율을 잰다
 pub const OWN_COUNT: u32 = 16;
 
+// ── 은닉→출력 쌍의 기한 사건 셈 (관찰용, --out-reset-count, 기본 꺼짐) ─────────────────────────────────────────
+// 가지치기·굳힘·성장이 은닉→출력 시냅스 칸(보내는 뉴런 번호 < pre_end, 받는 뉴런이 표시된 출력)에 일으킨 사건을 받는 출력마다 센다.
+// 꺼져 있으면(기본, 초파리도) 원자 읽기 하나만 하고, 켜져 있어도 원자 셈만 더한다 — 시냅스·난수·차례를 건드리지 않는다.
+// 병렬 구간(뉴런이 발화할 때의 가지치기, 굳힘의 여러 스레드 길)에서도 부르므로 원자 셈을 쓴다. 망(network.rs)이 켜고 읽는다
+pub const RC_KINDS: usize = 8;
+/// (ㄱ) 기한이 와서 접점 하나를 잃고, 남은 접점이 기한을 다시 받음 (prune_own, 접점 > 1)
+pub const RC_LOSE: usize = 0;
+/// 기한이 와서 마지막 접점을 잃어 쌍이 사라짐 (prune_own, 접점 = 1)
+pub const RC_DIE: usize = 1;
+/// (ㄴ) 도파민으로 굳어 옛 조건(한 번에 가중치의 1%)으로 기한을 다시 받음 (plasticity::mod_transfer). 알짜 조건에도 함께 닿은 것을 포함
+pub const RC_DA: usize = 2;
+/// (ㄴ) 알짜 조건으로만 기한을 다시 받음 (옛 조건에는 닿지 않음. --prune-reset-net 이 켜졌을 때만 생긴다)
+pub const RC_DA_NET: usize = 3;
+/// STDP 의 동시 발화로 기한을 다시 받음 (plasticity::stdp_step. 조절 신호 방식(mod_gate)이 아닐 때만 생긴다)
+pub const RC_STDP: usize = 4;
+/// (ㄷ) 이미 있는 쌍에 접점이 덧붙음 (Network::grow_attempt. 기한은 그대로)
+#[allow(dead_code)] // 초파리 크레이트는 이 파일을 같이 쓰지만 성장을 하지 않는다
+pub const RC_ADD: usize = 5;
+/// 새 쌍이 생김 (Network::grow_attempt. 접점 하나, 기한은 지금부터)
+#[allow(dead_code)]
+pub const RC_NEW: usize = 6;
+/// 접점 0 으로 표시된 칸(사라졌으나 자리를 아직 비우지 않은 칸)에 접점이 덧붙어 되살아남 (Network::grow_attempt. 0 이어야 한다)
+#[allow(dead_code)]
+pub const RC_REVIVE: usize = 7;
+/// 셈 묶음: slot[받는 뉴런 번호] = 출력 차례 + 1 (0 = 세지 않음), counts[출력 차례 × RC_KINDS + 사건 종류]
+pub struct OutResetCount { pub slot: Vec<u32>, pub pre_end: usize, pub counts: Vec<std::sync::atomic::AtomicU64> }
+impl OutResetCount {
+    #[inline]
+    pub fn add(&self, pre: usize, post: usize, kind: usize) {
+        if pre >= self.pre_end { return; }
+        let Some(&s) = self.slot.get(post) else { return };
+        if s == 0 { return; }
+        self.counts[(s as usize - 1) * RC_KINDS + kind].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+pub static RC_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static RC: std::sync::Mutex<Option<std::sync::Arc<OutResetCount>>> = std::sync::Mutex::new(None);
+/// 켜져 있으면 셈 묶음, 꺼져 있으면 None (원자 읽기 하나)
+#[inline]
+pub fn rc_get() -> Option<std::sync::Arc<OutResetCount>> {
+    if !RC_ON.load(std::sync::atomic::Ordering::Relaxed) { return None; }
+    RC.lock().unwrap().clone()
+}
+
 /// 뉴런: potential + 시냅스 리스트 + 2D 위치
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Neuron {
@@ -497,6 +541,9 @@ impl Neuron {
     pub fn prune_own(&mut self, now: u64) {
         let (tau, min_w) = (self.prune_tau, self.prune_min.max(1e-12));
         let mut removed = 0u32;
+        // 관찰용 (--out-reset-count): 꺼져 있으면 None. 셈만 더하고 시냅스는 건드리지 않는다
+        let rc = rc_get();
+        let me = self.id as usize;
         for s in self.synapses.iter_mut() {
             if s.slow_rate > 0.0 || s.count == 0 { continue; }
             let life = (tau * (s.weight / min_w).max(1.0).ln()).max(20_000.0) as u64;
@@ -506,11 +553,13 @@ impl Neuron {
                 s.weight -= s.weight / s.count as f64;
                 s.count -= 1;
                 s.last_co = now; // 남은 접점은 지금부터 다시 기한을 센다
+                if let Some(r) = &rc { r.add(me, s.target as usize, RC_LOSE); }
             } else {
                 s.weight = 0.0;
                 s.count = 0;
                 s.elig = 0.0;
                 s.w_short = 0.0; // 일시 성분도 지운다: 남겨 두면 죽은 연결이 이번 틱에 일시 성분만큼 한 번 더 전달한다
+                if let Some(r) = &rc { r.add(me, s.target as usize, RC_DIE); }
             }
         }
         self.pruned_n += removed;

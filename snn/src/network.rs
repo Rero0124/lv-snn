@@ -2542,7 +2542,10 @@ impl Network {
             // 이미 강한 연결일수록 덜 보탠다 (한계에 닿으면 0)
             let room = (1.0 - s.weight / CONN_CAP).max(0.0);
             s.weight += unit.max(2.0 * min_w) * room;
+            // 관찰용 (--out-reset-count): 접점 0 으로 표시된 칸(자리를 아직 비우지 않은 죽은 칸)에 붙은 것은 따로 센다. 셈만 더한다
+            let revive = s.count == 0;
             s.count += 1;
+            if let Some(r) = crate::neuron::rc_get() { r.add(pre, post, if revive { crate::neuron::RC_REVIVE } else { crate::neuron::RC_ADD }); }
             let initial = s.born == 0;
             self.sprouted += 1;
             self.grow_made[post_kind] += 1;
@@ -2572,6 +2575,23 @@ impl Network {
         self.neurons[post].incoming.push((pre, len));
         self.sprouted += 1;
         self.grow_made[post_kind] += 1;
+        if let Some(r) = crate::neuron::rc_get() { r.add(pre, post, crate::neuron::RC_NEW); }
+    }
+
+    /// (관찰용, --out-reset-count) 은닉→출력 쌍의 기한 사건 셈을 켜고 받는 출력마다 0 부터 센다 (사건의 뜻은 neuron.rs 의 RC_*).
+    /// 은닉 = 보내는 뉴런 번호가 hippocampus_range.1 아래. 셈은 저장 파일에 싣지 않는다. 망의 상태·난수·차례는 바꾸지 않는다
+    pub fn out_reset_count_start(&self) {
+        let mut slot = vec![0u32; self.neurons.len()];
+        for (k, &i) in self.output_idx.iter().enumerate() { slot[i] = k as u32 + 1; }
+        let counts = (0..self.output_idx.len() * crate::neuron::RC_KINDS).map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
+        *crate::neuron::RC.lock().unwrap() = Some(std::sync::Arc::new(crate::neuron::OutResetCount { slot, pre_end: self.hippocampus_range.1, counts }));
+        crate::neuron::RC_ON.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// (관찰용) 켠 뒤의 누계: 출력 차례(output_idx 의 차례)마다 사건 종류별 수. 켜져 있지 않으면 None
+    pub fn out_reset_count_read(&self) -> Option<Vec<[u64; crate::neuron::RC_KINDS]>> {
+        let r = crate::neuron::rc_get()?;
+        let k = crate::neuron::RC_KINDS;
+        Some((0..r.counts.len() / k).map(|o| std::array::from_fn(|j| r.counts[o * k + j].load(std::sync::atomic::Ordering::Relaxed))).collect())
     }
 
     /// 굳는 양의 관찰을 켠다 (읽기만): 은닉 뉴런이 출력 뉴런으로 보내는 시냅스만 센다
@@ -3128,6 +3148,65 @@ impl Network {
             println!("[맞춤] 뉴런 {t}: 실제 fix 끔 unit_med {:.6} / A {:.6}, 실제 fix 켬 unit_med {:.6} / B {:.6}, 실제 w_ref_med {:.6} / A {:.6}, 실제 w_ref_max {:.6} / A {:.6}",
                 um_off[t], rows[t].a, self.unit_med[t], rows[t].b, wm[t], rows[t].wmed_a, wx[t], rows[t].wmax_a);
         }
+    }
+
+    /// (관찰용, --out-pairs-dump P) 출력 뉴런으로 들어오는 시냅스 칸과 출력 뉴런의 값을 CSV 둘에 적는다. 망을 돌리지 않고 상태를 바꾸지 않는다.
+    ///   P.pairs.csv — 모든 뉴런의 synapses 를 훑어 대상(target)이 출력 뉴런인 칸마다 한 줄. 접점 0 인 칸(죽었으나 아직 자리를 비우지 않은 칸)도 적는다:
+    ///     pre, post = 보내는·받는 뉴런 번호 / out_seq = 받는 뉴런의 output_idx 차례 / pre_kind = 0 은닉 흥분, 1 은닉 억제, 2 조절 뉴런, 3 그 밖 /
+    ///     weight = 그 칸(한 상대와의 연결) 전체의 굳은 가중치 / count = 접점 수 / born = 그 칸이 생긴 전역 틱(처음 배선은 0) /
+    ///     last_co = 가지치기 기한을 세기 시작한 전역 틱 / w_short = 지금 틱까지 줄인 일시 성분 / slow_rate = 지연 시냅스(0 이면 일반) / seed
+    ///   P.outs.csv — 출력 뉴런마다 한 줄: out_seq, nid, rate_avg(틱당, 시간 상수 약 5000틱), rate_fast(틱당, 약 100틱), excitability,
+    ///     own_on, own_target(틱당, 0 = 없음·재는 중), own_n, own_t0, spont_p(= 0.00001 × spont_scale)
+    pub fn out_pairs_dump(&self, prefix: &str) {
+        use std::io::Write;
+        let h = self.hippocampus_range.1;
+        let pos: HashMap<usize, usize> = self.output_idx.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+        let kind = |i: usize| -> usize { let n = &self.neurons[i]; if n.modulatory { 2 } else if i < h { if n.inhibitory { 1 } else { 0 } } else { 3 } };
+        let pp = format!("{prefix}.pairs.csv");
+        let mut f = std::io::BufWriter::new(std::fs::File::create(&pp).unwrap_or_else(|e| { eprintln!("[오류] {pp} 를 만들지 못했다: {e}"); std::process::exit(2); }));
+        writeln!(f, "pre,post,out_seq,pre_kind,weight,count,born,last_co,w_short,slow_rate,seed").unwrap();
+        let (mut rows, mut ho_pairs, mut ho_contacts, mut dead) = (0usize, 0usize, 0u64, 0usize);
+        let mut unit: Vec<f64> = Vec::new();
+        let mut keys: Vec<(usize, u32)> = Vec::new();
+        for pre in 0..self.neurons.len() {
+            for k in 0..self.neurons[pre].synapses.len() {
+                let t = self.neurons[pre].synapses[k].target as usize;
+                let Some(&o) = pos.get(&t) else { continue };
+                let s = self.synapse_view(pre, k);
+                writeln!(f, "{},{},{},{},{:e},{},{},{},{:e},{:e},{}", pre, t, o, kind(pre), s.weight, s.count, s.born, s.last_co, s.w_short, s.slow_rate, s.seed as u8).unwrap();
+                rows += 1;
+                if s.count == 0 { dead += 1; continue; }
+                // 발달 기록 "출력" 줄과 같은 거름: 보내는 뉴런이 은닉이고 접점이 1 이상인 칸
+                if pre < h { ho_pairs += 1; ho_contacts += s.count as u64; unit.push(s.weight / s.count as f64); if s.slow_rate == 0.0 { keys.push((pre, s.target)); } }
+            }
+        }
+        f.flush().unwrap();
+        let po = format!("{prefix}.outs.csv");
+        let mut g = std::io::BufWriter::new(std::fs::File::create(&po).unwrap_or_else(|e| { eprintln!("[오류] {po} 를 만들지 못했다: {e}"); std::process::exit(2); }));
+        writeln!(g, "out_seq,nid,rate_avg,rate_fast,excitability,own_on,own_target,own_n,own_t0,spont_p").unwrap();
+        for (o, &i) in self.output_idx.iter().enumerate() {
+            let n = &self.neurons[i];
+            writeln!(g, "{},{},{:e},{:e},{:e},{},{:e},{},{},{:e}", o, i, n.rate_avg, n.rate_fast, n.excitability, n.own_on as u8, n.own_target, n.own_n, n.own_t0, 1e-5 * n.spont_scale).unwrap();
+        }
+        g.flush().unwrap();
+        // 맞춤용 값: 출력들의 incoming 목록 길이(훑은 칸 수와 같아야 한다), 같은 (보내는, 받는) 쌍의 두 번째 이후 칸 수, 은닉의 가지치기 설정
+        let incoming: usize = self.output_idx.iter().map(|&i| self.neurons[i].incoming.len()).sum();
+        let n_keys = keys.len(); keys.sort_unstable(); keys.dedup();
+        unit.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let q = |v: &[f64], p: f64| -> f64 { if v.is_empty() { f64::NAN } else { v[((v.len() as f64 * p) as usize).min(v.len() - 1)] } };
+        let taus: Vec<f64> = self.neurons[..h].iter().map(|n| n.prune_tau).collect();
+        let mins: Vec<f64> = self.neurons[..h].iter().map(|n| n.prune_min).collect();
+        let mm = |v: &[f64]| -> (f64, f64) { v.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &x| (a.min(x), b.max(x))) };
+        println!("[pairs-dump] 전역 틱 {} / 시험 틱(dev_tick) {} / 뉴런 {} / 은닉 끝 {} / 출력 {} (번호 {}~{})",
+            self.global_tick, self.dev_tick, self.neurons.len(), h, self.output_idx.len(),
+            self.output_idx.iter().min().copied().unwrap_or(0), self.output_idx.iter().max().copied().unwrap_or(0));
+        println!("[pairs-dump] 출력으로 가는 칸 {rows} (접점 0 인 칸 {dead}) / 출력들의 incoming 목록 길이 합 {incoming}");
+        println!("[pairs-dump] 은닉→출력 쌍(접점 1 이상) {ho_pairs} / 접점 합 {ho_contacts} / 접점 하나 세기 10% {:.4} / 50% {:.4} / 90% {:.4} (발달 기록 \"출력\" 줄과 같은 분위 셈)",
+            q(&unit, 0.1), q(&unit, 0.5), q(&unit, 0.9));
+        println!("[pairs-dump] 같은 (보내는, 받는) 의 두 번째 이후 칸 수(지연 아님, 접점 1 이상) {}", n_keys - keys.len());
+        println!("[pairs-dump] 은닉 뉴런의 prune_tau 최소/최대 {:?} / prune_min 최소/최대 {:?} / 설정 prune_tau {} min_weight {} / 출력 목표(out_target) {:e}",
+            mm(&taus), mm(&mins), self.params.prune_tau, self.params.min_weight, self.out_target());
+        println!("[pairs-dump] 적음: {pp} , {po}");
     }
 
     /// 검증된 학습 구성 적용

@@ -205,6 +205,20 @@ fn main() {
         net.unit_med_report();
         return;
     }
+    // --out-pairs-dump P (--load 와 함께, 관찰용): 불러온 망을 한 틱도 돌리지 않고, 출력으로 들어오는 시냅스 칸마다(P.pairs.csv)와
+    //   출력 뉴런마다(P.outs.csv)의 값을 적고 끝낸다. 저장하지 않는다 (칸의 뜻은 network.rs 의 out_pairs_dump)
+    if let Some(i) = args.iter().position(|a| a == "--out-pairs-dump") {
+        let Some(prefix) = args.get(i + 1) else { eprintln!("[오류] --out-pairs-dump 뒤에 경로 앞부분이 필요하다"); std::process::exit(2); };
+        if params.load_from.is_none() { eprintln!("[오류] --out-pairs-dump 는 --load 와 함께 쓴다"); std::process::exit(2); }
+        let net = Network::with_params(params.clone());
+        println!("[설정] 출력 쌍 적기(--out-pairs-dump): 불러온 망을 돌리지 않고 적고 끝낸다 (저장하지 않음). 불러온 설정: {:?}", net.params_ref());
+        net.out_pairs_dump(prefix);
+        return;
+    }
+    // --out-reset-count (관찰용, 기본 꺼짐): 은닉→출력 쌍의 기한 사건을 받는 출력마다 세어 발달 시험·기능 시험의 보고에 찍는다 (dev_test, op2_test 가 켠다)
+    if args.iter().any(|a| a == "--out-reset-count") {
+        println!("[설정] 은닉→출력 쌍의 기한 사건 셈(--out-reset-count, 관찰용): 은닉→출력 시냅스 칸에 일어난 (ㄱ) 기한이 와서 접점 하나를 잃고 남은 접점이 기한을 다시 받음, (ㄴ) 도파민으로 굳어 기한을 다시 받음(옛 조건 '한 번에 1%' — 알짜 조건에도 함께 닿은 것 포함 / 알짜 조건만), STDP 동시 발화로 기한을 다시 받음(조절 신호 방식이 아닐 때만 생긴다), (ㄷ) 이미 있는 쌍에 접점이 덧붙음(기한은 그대로), 새 쌍, 사라진 쌍(마지막 접점을 잃음), 되살아난 칸(접점 0 으로 표시된 칸에 접점이 붙음, 0 이어야 함)을 받는 출력마다 센다. 발달 시험(--dev-test)은 보고마다 '기한 셈' 줄, 기능 시험(--op2-test)은 목표를 고른 뒤와 구간마다 '◦ 기한 셈' 줄에 찍는다(다른 시험에는 찍지 않는다). 셈은 저장 파일에 싣지 않는다: 이 실행이 망을 만들거나 불러온 뒤 0 부터 세고, 저장한 망을 이어 돌리면 다시 0 부터 센다. 망의 상태·난수·차례는 바꾸지 않는다");
+    }
     if params.scale_in.is_some() && params.act_target.is_none() { eprintln!("[오류] --scale-in 은 목표가 있어야 한다: --act-target K 를 함께 준다"); std::process::exit(2); }
     if params.act_target.is_some() && params.spont_fixed.is_none() {
         println!("[경고] --act-target 을 --spont-fixed 없이 주면 목표(K × 자발 발화 확률)가 1만 틱마다의 갱신에서 움직인다");
@@ -967,6 +981,11 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     println!("{:?}", params);
     let t0 = std::time::Instant::now();
     let mut net = Network::with_params(params.clone());
+    // 관찰용 (--out-reset-count): 망을 만든(불러온) 뒤 0 부터 센다. 맞춤용으로 켠 때의 은닉→출력 쌍 수와 접점 수를 적어 둔다
+    let rc_on = std::env::args().any(|a| a == "--out-reset-count");
+    if rc_on { net.out_reset_count_start(); }
+    let (rc_pairs0, rc_contacts0) = if rc_on { let (ov, _) = net.out_observe(); (ov.iter().map(|o| o.0).sum::<usize>() as i64, ov.iter().map(|o| o.2).sum::<usize>() as i64) } else { (0, 0) };
+    let mut rc_last = [0u64; neuron::RC_KINDS];
     let words = ["안녕", "고마워", "사랑해", "잘자", "배고파"];
     let needs = net.params_ref().needs;
     println!("[발달 시험] 보고 간격 {}, 자극 {}, 초기 배선의 합계 값 {:016x} (같은 배선 씨앗이면 같다. 씨앗 {:?})",
@@ -1039,6 +1058,7 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
     println!("  (추가 줄의 뜻) 표의 '상대 수' = 서로 다른 상대의 수가 아니라 시냅스 칸의 수 (같은 상대로 가는 칸이 둘 이상일 수 있다: 초기 배선의 중복). '쌍 수'도 칸의 수다. 중복 시냅스 = 같은 (보내는 뉴런, 받는 뉴런)의 두 번째 이상인 칸");
     println!("  (추가 줄의 뜻) 조절 줄의 문 = 은닉 뉴런의 조절 수준을 10틱마다 읽어, 기준선보다 25% 이상 높은 비율(위)과 25% 이상 낮은 비율(아래)을 구간에 걸쳐 평균한 값. 도파민 수상돌기 = 도파민 뉴런 수상돌기 값의 10틱마다 표본 평균");
     let (mut gate_up, mut gate_down, mut gate_n, mut dend_acc, mut dend_n) = (0u64, 0u64, 0u64, 0.0f64, 0u64);
+    if rc_on { println!("  (추가 줄의 뜻) 기한 셈 (--out-reset-count) = 출력 줄 다음의 새 줄. 은닉→출력 시냅스 칸(출력 줄의 '쌍'과 같은 것)에 일어난 사건의 수를 모든 출력에 걸쳐 더한 것, 구간 / 켠 뒤 누계. (ㄱ) 기한이 와서 접점 하나를 잃고 남은 접점이 기한을 다시 받음 (neuron.rs prune_own) / (ㄴ) 도파민으로 굳어 옛 조건(한 번에 가중치의 1%)으로 기한을 다시 받음, 알짜 조건에도 함께 닿은 것 포함 / 알짜 조건만으로 다시 받음 (plasticity.rs mod_transfer) / STDP 동시 발화로 다시 받음 (stdp_step, 조절 신호 방식이 아닐 때만) / (ㄷ) 이미 있는 쌍에 접점이 덧붙음 (기한은 그대로) / 새 쌍 / 사라진 쌍 = 마지막 접점을 잃음 / 되살아난 칸 = 접점 0 으로 표시된 칸에 접점이 붙음 (0 이어야 함). 맞춤 = 켠 때부터 지금까지 쌍 수·접점 수의 실제 변화와 사건 누계로 셈한 변화 (같아야 한다). 셈은 저장 파일에 없어 불러와 이어 돌리면 0 부터"); }
     if params.scale_in.is_some() { println!("  (추가 줄의 뜻) 세기 = 입력의 세기를 고르는 규칙(--scale-in)이 지난 보고 뒤로 한 일. 1만 틱마다 추체마다 (느린 발화율 ÷ 목표 − 1)을 ±1 로 자른 오차 × η 만큼 들어오는 흥분 가중치를 곱해 고친다. 누적 배수 = 그 구간에 그 뉴런의 입력에 곱해진 값의 곱"); }
     println!("  (추가 줄의 뜻) 몸 = 구간에 끝난 보상(먹이·물)마다 보상 입력 직전의 결핍과 그 200틱 뒤까지 내려간 양의 평균, 그리고 보조 뉴런 무리별 평균 감응도(항상성이 1만 틱마다 고친다. 무리가 없으면 NaN)");
     let (mut need_before, mut need_pre_acc, mut need_drop_acc, mut need_drop_n) = (0.0f64, 0.0f64, 0.0f64, 0u64);
@@ -1195,6 +1215,16 @@ fn dev_test(params: &NetParams, ticks: u64, report_every: Option<u64>, no_stim: 
                     q(&mut ot, 0.0), q(&mut ot, 0.1), q(&mut ot, 0.25), q(&mut ot, 0.5), q(&mut ot, 0.75), q(&mut ot, 0.9), q(&mut ot, 1.0),
                     q(&mut when, 0.5), q(&mut when, 1.0), net.own_wait_drop_out - last_own_wait_out, net.own_wait_drop_out, q(&mut rown, 0.1), q(&mut rown, 0.5), q(&mut rown, 0.9));
                 last_own_wait_out = net.own_wait_drop_out;
+                // 기한 셈 줄 (--out-reset-count, 읽기만. 출력 줄 다음의 새 줄): 은닉→출력 쌍의 사건 수를 모든 출력에 걸쳐 더한 것, 구간 / 켠 뒤 누계
+                if let Some(per) = net.out_reset_count_read() {
+                    let cum = rc_sum(&per, |_| true);
+                    let iv: [u64; neuron::RC_KINDS] = std::array::from_fn(|k| cum[k] - rc_last[k]);
+                    let (pairs, contacts) = (ov.iter().map(|o| o.0).sum::<usize>() as i64, ov.iter().map(|o| o.2).sum::<usize>() as i64);
+                    let (ep, ec) = rc_expect(&cum);
+                    println!("{:>9} 기한 셈 (은닉→출력 쌍, 모든 출력의 합; 값 = 구간 / 켠 뒤 누계) | {} | 맞춤 (켠 뒤): 쌍 수 {} 의 변화 {:+} / 셈(새 쌍 + 되살아난 칸 − 사라진 쌍) {:+} | 접점 수 {} 의 변화 {:+} / 셈(새 쌍 + (ㄷ) + 되살아난 칸 − (ㄱ) − 사라진 쌍) {:+}",
+                        "", rc_fmt(&iv, Some(&cum)), pairs, pairs - rc_pairs0, ep, contacts, contacts - rc_contacts0, ec);
+                    rc_last = cum;
+                }
             }
             if net.params_ref().own_target_homeo {
                 // 감응도 줄 (읽기만): 종류마다 감응도의 분위와 한계(0.5 / 1.5)에 붙은 뉴런 수, 그리고 굳힌 목표를 보는 뉴런 수
@@ -1898,6 +1928,9 @@ fn op2_test(params: &NetParams, trials: usize) {
     let mut rng = test_rng(params, 3);
     println!("{:?}", params);
     let mut net = Network::with_params(params.clone());
+    // 관찰용 (--out-reset-count): 망을 만든(불러온) 뒤 0 부터, 받는 출력마다 센다. 목표를 고르기 전의 셈은 고른 뒤에 그 목표로 나눠 찍는다
+    if std::env::args().any(|a| a == "--out-reset-count") { net.out_reset_count_start(); }
+    let rc_pc0 = net.out_reset_count_read().map(|_| { let (ov, _) = net.out_observe(); (ov.iter().map(|o| o.0).sum::<usize>() as i64, ov.iter().map(|o| o.2).sum::<usize>() as i64) });
     // pre = 바로 앞 쉬는 구간의 마지막 40틱에 발화한 출력 (관찰. 틱의 차례는 net.rest 와 같다)
     let mut pre = op_rest_tail(&mut net, 300);
     // 낱말: --op-words 가,나[,다] 가 있으면 그것, 없으면 지금대로
@@ -1957,6 +1990,9 @@ fn op2_test(params: &NetParams, trials: usize) {
     println!("  ◦ 보상 규칙: {}", if wrong_no_reward { "--op-wrong-no-reward (자기 목표가 나왔고 다른 낱말의 목표는 하나도 안 나온 시행에만 보상)" } else { "자기 목표가 나온 시행에 보상" });
     if no_reward { println!("  ◦ 보상 규칙: --op-no-reward (대조: 2단계에도 보상 없음)"); }
     op_print_net(&net, &targets, None);
+    // 기한 셈 (--out-reset-count, 읽기만): 목표를 고르기 전(쉼 300틱 + 처음 60번)의 셈을 방금 고른 목표로 나눠 찍는다
+    let mut rc_last: Option<Vec<[u64; neuron::RC_KINDS]>> = net.out_reset_count_read();
+    if let Some(per) = &rc_last { println!("{}", op_rc_line(&net, &words, &targets, per, None, rc_pc0, &format!("목표를 고르기 전(쉼 300틱 + 처음 {probes}번, 뒤에 고른 목표로 나눔; 값 = 그 동안의 합)"))); }
     let block = (trials / 6).max(1);
     // --op2-reward-trials N: 2단계(보상 단계)만 N 번으로 한다 (없으면 1단계와 같은 수). 구간의 길이는 그대로(1단계의 1/6)
     let trials2 = { let a: Vec<String> = std::env::args().collect(); a.iter().position(|x| x == "--op2-reward-trials").and_then(|i| a.get(i + 1)).and_then(|x| x.parse::<usize>().ok()).unwrap_or(trials) };
@@ -2069,6 +2105,11 @@ fn op2_test(params: &NetParams, trials: usize) {
                     }
                     println!("{sline}");
                 }
+                // 기한 셈 (--out-reset-count, 읽기만): 이 구간의 셈 / 켠 뒤 누계를 받는 출력이 낱말마다의 목표인가, 그 밖인가로 나눠
+                if let (Some(per), Some(last)) = (net.out_reset_count_read(), rc_last.as_ref()) {
+                    println!("{}", op_rc_line(&net, &words, &targets, &per, Some(last), rc_pc0, &format!("{name} 단계의 이 구간(시행 {}번째까지; 값 = 이 구간 / 켠 뒤 누계)", t / nw)));
+                    rc_last = Some(per);
+                }
                 early.iter_mut().for_each(|v| v.iter_mut().for_each(|x| *x = 0));
                 nobs = OpNet::default();
                 kind.iter_mut().for_each(|x| *x = [0; 4]); da_kind = [(0, 0); 4]; filtered.iter_mut().for_each(|x| *x = 0);
@@ -2081,6 +2122,51 @@ fn op2_test(params: &NetParams, trials: usize) {
     }
     op_print_inputs(&net, "끝");
     op_save_end(&net);
+}
+
+/// (관찰용, --out-reset-count) 사건 종류의 이름 (차례는 neuron.rs 의 RC_*) 과 찍는 차례: (ㄱ), (ㄴ) 옛 조건, (ㄴ) 알짜만, STDP, (ㄷ), 새 쌍, 사라진 쌍, 되살아난 칸
+const RC_NAMES: [&str; neuron::RC_KINDS] = ["(ㄱ) 접점 잃고 기한 다시", "사라진 쌍", "(ㄴ) 도파민 옛 조건으로 기한 다시", "(ㄴ) 알짜 조건만으로 기한 다시", "STDP 동시 발화로 기한 다시", "(ㄷ) 접점 덧붙음", "새 쌍", "되살아난 칸"];
+const RC_ORDER: [usize; neuron::RC_KINDS] = [neuron::RC_LOSE, neuron::RC_DA, neuron::RC_DA_NET, neuron::RC_STDP, neuron::RC_ADD, neuron::RC_NEW, neuron::RC_DIE, neuron::RC_REVIVE];
+/// 출력 차례마다의 셈에서 pick(차례) 가 참인 출력만 더한다
+fn rc_sum(per: &[[u64; neuron::RC_KINDS]], pick: impl Fn(usize) -> bool) -> [u64; neuron::RC_KINDS] {
+    let mut s = [0u64; neuron::RC_KINDS];
+    for (o, x) in per.iter().enumerate() { if pick(o) { for k in 0..neuron::RC_KINDS { s[k] += x[k]; } } }
+    s
+}
+/// "이름 구간 / 누계" (누계가 없으면 "이름 값") 를 찍는 차례대로 쉼표로 잇는다
+fn rc_fmt(iv: &[u64; neuron::RC_KINDS], cum: Option<&[u64; neuron::RC_KINDS]>) -> String {
+    RC_ORDER.iter().map(|&k| match cum { Some(c) => format!("{} {} / {}", RC_NAMES[k], iv[k], c[k]), None => format!("{} {}", RC_NAMES[k], iv[k]) }).collect::<Vec<_>>().join(", ")
+}
+/// 맞춤용: 사건 누계로 셈한 (쌍 수의 변화, 접점 수의 변화) = (새 쌍 + 되살아난 칸 − 사라진 쌍, 새 쌍 + (ㄷ) + 되살아난 칸 − (ㄱ) − 사라진 쌍)
+fn rc_expect(c: &[u64; neuron::RC_KINDS]) -> (i64, i64) {
+    let g = |k: usize| c[k] as i64;
+    (g(neuron::RC_NEW) + g(neuron::RC_REVIVE) - g(neuron::RC_DIE),
+     g(neuron::RC_NEW) + g(neuron::RC_ADD) + g(neuron::RC_REVIVE) - g(neuron::RC_LOSE) - g(neuron::RC_DIE))
+}
+/// 기능 시험의 기한 셈 한 줄 (읽기만): 받는 출력이 낱말 w 의 목표(targets[w])인가 그 밖인가로 나눠, 사건 수(last 가 있으면 구간 / 켠 뒤 누계, 없으면 누계 하나)와
+/// 지금 그 출력들이 받는 쌍 수. 끝에 모든 출력에 걸친 맞춤 (켠 때부터 쌍 수·접점 수의 실제 변화와 사건 누계로 셈한 변화)
+fn op_rc_line(net: &Network, words: &[&str], targets: &[usize], per: &[[u64; neuron::RC_KINDS]], last: Option<&Vec<[u64; neuron::RC_KINDS]>>, pc0: Option<(i64, i64)>, what: &str) -> String {
+    let (ov, _) = net.out_observe();
+    let mut line = format!("      ◦ 기한 셈 (은닉→출력 쌍, 받는 출력별, --out-reset-count) {what}:");
+    let mut groups: Vec<(String, Vec<usize>)> = targets.iter().enumerate().map(|(w, &q)| (format!("목표 {} {} '{}'", w + 1, words[w], net.token_of(q)), vec![q])).collect();
+    let rest: Vec<usize> = (0..per.len()).filter(|q| !targets.contains(q)).collect();
+    groups.push((format!("그 밖 {}개", rest.len()), rest));
+    for (label, qs) in &groups {
+        let pick = |o: usize| qs.contains(&o);
+        let cum = rc_sum(per, pick);
+        let pairs: usize = qs.iter().map(|&q| ov.get(q).map_or(0, |o| o.0)).sum();
+        let body = match last {
+            Some(l) => { let lc = rc_sum(l, pick); let iv: [u64; neuron::RC_KINDS] = std::array::from_fn(|k| cum[k] - lc[k]); rc_fmt(&iv, Some(&cum)) }
+            None => rc_fmt(&cum, None),
+        };
+        line += &format!(" | {label} (지금 받는 쌍 {pairs}): {body}");
+    }
+    if let Some((p0, c0)) = pc0 {
+        let (ep, ec) = rc_expect(&rc_sum(per, |_| true));
+        let (p, c) = (ov.iter().map(|o| o.0).sum::<usize>() as i64, ov.iter().map(|o| o.2).sum::<usize>() as i64);
+        line += &format!(" | 맞춤 (모든 출력, 켠 뒤): 쌍 수 {p} 의 변화 {:+} / 셈 {:+} | 접점 수 {c} 의 변화 {:+} / 셈 {:+}", p - p0, ep, c - c0, ec);
+    }
+    line
 }
 
 /// 시험이 자극을 고르는 난수. --rng-seed 가 있으면 (씨앗, 시험 번호)에서 정해지고, 없으면 실행마다 다르다

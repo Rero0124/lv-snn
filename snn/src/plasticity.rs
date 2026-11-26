@@ -318,6 +318,8 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
         let net_all = PRUNE_RESET_NET.load(std::sync::atomic::Ordering::Relaxed);
         let net_mark: Option<std::sync::Arc<Vec<bool>>> = if net_all { NET_MARK.lock().unwrap().clone() } else { None };
         let net_at = |post: usize| net_all && net_mark.as_ref().map_or(true, |m| m.get(post).copied().unwrap_or(false));
+        // 관찰용 (--out-reset-count): 은닉→출력 쌍이 기한을 다시 받은 사건을 조건마다 센다. 꺼져 있으면 None. 셈만 더하고 시냅스는 건드리지 않는다
+        let rc = crate::neuron::rc_get();
         // level = 흔적을 넘기는 세기와 부호. 기준선 방식이면 (조절 수준 ÷ 자기 기준선 − 1), 아니면 조절 수준 그대로
         let active: Vec<(usize, f64)> = neurons.iter().enumerate().filter_map(|(i, n)| {
             if opt.mod_baseline {
@@ -349,6 +351,7 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
                     // 알짜 조건 (--prune-reset-net, 기본 꺼짐): 쌓인 알짜가 가중치의 1% 이상이고 가중치가 바닥 이상이면 기한을 다시 센다. 옛 조건에 '또는'으로 더한다
                     let net_reset = if net_on { s.net_acc += s.weight - w_before; let r = s.net_acc > 0.0 && s.net_acc >= 0.01 * s.weight && s.weight >= floor; if r || reset { s.net_acc = 0.0; } r } else { false };
                     if reset || net_reset { s.last_co = global_tick; }
+                    if let Some(r) = &rc { if reset { r.add(pre as usize, post, crate::neuron::RC_DA); } else if net_reset { r.add(pre as usize, post, crate::neuron::RC_DA_NET); } }
                     if OBS_ON.load(std::sync::atomic::Ordering::Relaxed) { obs_consol(pre as usize, post, l, moved, s.weight, reset, s.born, global_tick, s.weight - w_before, floor, if net_on { Some(net_reset) } else { None }); }
                     if s.elig.abs() < 1e-3 * s.weight.max(1e-9) { s.elig = 0.0; s.lq = false; false } else { true }
                 });
@@ -383,6 +386,7 @@ fn mod_transfer(neurons: &mut [Neuron], global_tick: u64, opt: &PlasticityOption
                             // 알짜 조건 (--prune-reset-net, 기본 꺼짐): 쌓인 알짜가 가중치의 1% 이상이고 가중치가 바닥 이상이면 기한을 다시 센다. 옛 조건에 '또는'으로 더한다
                             let net_reset = if net_on { s.net_acc += s.weight - w_before; let r = s.net_acc > 0.0 && s.net_acc >= 0.01 * s.weight && s.weight >= floor; if r || reset { s.net_acc = 0.0; } r } else { false };
                             if reset || net_reset { s.last_co = global_tick; }
+                            if let Some(r) = &rc { if reset { r.add(pre_id, s.target as usize, crate::neuron::RC_DA); } else if net_reset { r.add(pre_id, s.target as usize, crate::neuron::RC_DA_NET); } }
                             if OBS_ON.load(std::sync::atomic::Ordering::Relaxed) { obs_consol(pre_id, s.target as usize, l, moved, s.weight, reset, s.born, global_tick, s.weight - w_before, floor, if net_on { Some(net_reset) } else { None }); }
                         }
                     }
@@ -502,6 +506,8 @@ pub fn stdp_step(neurons: &mut [Neuron], tick_spikes: &[NeuronId], global_tick: 
         }
     }
     let gate_base: Option<f64> = opt.mod_gate.map(|_| opt.gate_base);
+    // 관찰용 (--out-reset-count): STDP 의 동시 발화로 기한을 다시 받는 길은 조절 신호 방식이 아닐 때만 있다. 꺼져 있으면 None
+    let rc = if gate_base.is_none() { crate::neuron::rc_get() } else { None };
     // 조절 신호 방식의 흔적 넘기기 (발화와 무관하게 매 틱)
     mod_transfer(neurons, global_tick, opt);
     let spike_ticks: Vec<Option<u64>> = neurons.iter()
@@ -555,6 +561,7 @@ pub fn stdp_step(neurons: &mut [Neuron], tick_spikes: &[NeuronId], global_tick: 
                     let ltp_bonus = syn.accumulate_ltp();
                     // 조절 신호 방식에서는 STDP 만으로 "쓰였다"고 보지 않는다 (우연한 겹침도 STDP 를 일으킨다). 굳었을 때만 기한이 밀린다
                     if gate_base.is_none() { syn.last_co = global_tick; }
+                    if let Some(r) = &rc { r.add(pidx, tidx, crate::neuron::RC_STDP); }
                     let dw = (stdp_a_plus + ltp_bonus) * f_ltp * opt.stdp_scale * amp(tidx);
                     if apply_dw(syn, dw, gate_base) { pending.push((pidx, k_syn as u32)); }
                 } else if dt < 0.0 && dt > -50.0 {
@@ -596,6 +603,7 @@ pub fn stdp_step(neurons: &mut [Neuron], tick_spikes: &[NeuronId], global_tick: 
             let base = stdp_a_plus * (-dt / STDP_TAU).exp();
             let ltp_bonus = syn.accumulate_ltp();
             if gate_base.is_none() { syn.last_co = global_tick; }
+            if let Some(r) = &rc { r.add(pre_idx, post_idx, crate::neuron::RC_STDP); }
             let dw = (base + ltp_bonus) * f_ltp * opt.stdp_scale * amp(post_idx);
             if apply_dw(syn, dw, gate_base) { pending.push((pre_idx, syn_idx as u32)); }
         }
